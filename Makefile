@@ -214,17 +214,19 @@ sim-se: | $(BUILD)
 # the same clock:  make sim-se-tvla SEED=2, then
 #   python3 scripts/pqse_tvla.py confirm build/tvla_m1_s1/tvla_t.txt build/tvla_m1_s2/tvla_t.txt
 # Results in build/tvla_m<MASKED>_s<SEED>/: tvla_t.txt (t per clock), tvla_t.png.
+# LOWPOWER=1: the operand-isolated ASIC variant (the one se-power* builds),
+# results in build/tvla_m<MASKED>_s<SEED>_lp/.
 MASKED ?= 1
 N    ?= 200
 SEED ?= 1
-TVD  := $(BUILD)/tvla_m$(MASKED)_s$(SEED)
+TVD  := $(BUILD)/tvla_m$(MASKED)_s$(SEED)$(if $(filter 1,$(LOWPOWER)),_lp)
 sim-se-tvla: | $(BUILD)
 	rm -rf $(TVD) && mkdir -p $(TVD)
 	cp -r hw/sim/vectors $(TVD)/
 	$(PYTHON) scripts/pqse_tvla.py gen $(N) $(TVD)/tvla_in.txt --seed $(SEED)
 	cd $(TVD) && $(VERILATOR) --binary --timing -j 2 -O3 -Wno-fatal -Wno-lint -Wno-style \
 	    --top-module tb_pqse_tvla -Mdir obj -o ../vtvla -I../../hw/se \
-	    +define+PQSE_SIM_INIT +define+TVLA_MASKED=$(MASKED) \
+	    +define+PQSE_SIM_INIT +define+TVLA_MASKED=$(MASKED) $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
 	    ../../hw/sim/tb_pqse_tvla.sv $(addprefix ../../,$(SE_SRC)) > build.log 2>&1 \
 	    || { tail -30 build.log; exit 1; }
 	cd $(TVD) && ./vtvla | tee sim.log

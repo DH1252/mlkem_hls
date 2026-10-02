@@ -15,7 +15,7 @@
 // Power model: per clock, the Hamming distance (number of bits that toggle)
 // of the main datapath registers and buses: polynomial / seed / buffer RAM
 // data, the multiplier operands, the masked gadget registers, the masked
-// compression registers and the Keccak lane registers. Hiding is switched
+// compression registers and the Keccak lane and column-parity registers. Hiding is switched
 // off (CONFIG = 0) so every trace is aligned; samples start at the first
 // instruction after the PRNG reseed (pc 322), whose length depends on the TRNG.
 // The device runs in lifecycle USER (K stays inside, as deployed).
@@ -81,7 +81,7 @@ module tb_pqse_tvla;
 
   // ---- power model ----------------------------------------------------------------------
   // sampled at every rising edge (the values of the clock that just ended)
-  logic [4095:0] cur, prev;
+  logic [8191:0] cur, prev;            // wider than the concatenation (zero-extended)
   int            hd;
   task automatic take_sample();
     cur = {
@@ -130,7 +130,9 @@ module tb_pqse_tvla;
       dut.u_sys.u_core.u_sponge.u_keccak.d10, dut.u_sys.u_core.u_sponge.u_keccak.d11,
       dut.u_sys.u_core.u_sponge.u_keccak.X0r, dut.u_sys.u_core.u_sponge.u_keccak.X1r,
       dut.u_sys.u_core.u_sponge.u_keccak.Y0r, dut.u_sys.u_core.u_sponge.u_keccak.Y1r,
-      dut.u_sys.u_core.u_sponge.u_keccak.apv0, dut.u_sys.u_core.u_sponge.u_keccak.apv1
+      dut.u_sys.u_core.u_sponge.u_keccak.apv0, dut.u_sys.u_core.u_sponge.u_keccak.apv1,
+      // theta column parities (registers, accumulated by the chi write-back)
+      dut.u_sys.u_core.u_sponge.u_keccak.C0v, dut.u_sys.u_core.u_sponge.u_keccak.C1v
     };
   endtask
 
