@@ -135,7 +135,7 @@ module pqse_puf_raw #(
 `endif
       end
     end
-    for (gc = 0; gc < 32; gc = gc + 1) begin : g_col
+    for (gc = 0; gc < 32; gc = gc + 1) begin : g_colv
       wire [29:0] cb;
       for (g = 0; g < 30; g = g + 1) begin : g_cb
         assign cb[g] = qv[32*g + gc];
