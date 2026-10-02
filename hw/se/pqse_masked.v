@@ -288,7 +288,7 @@ module pqse_masked (
   reg  [2:0]  sph;        // 0 read K', 1 read K-bar, 2 load, 3 bits, 4 write
   reg  [1:0]  sj;
   reg  [6:0]  sb;
-  reg  [63:0] D0, D1, kb0, kb1, O0, O1;
+  reg  [63:0] D0, D1, kb0, kb1, Osh0, Osh1;
   reg         s00, s01, s10, s11;
   wire        r_sel = rnd[50];
   // D and K-bar shift right one bit per clock, so the bit in use is always bit 0
@@ -359,7 +359,7 @@ module pqse_masked (
         3'd1: begin sre = 1'b1; sraddr = {e2, sj}; end
         // K stays masked in the seed entry; the microcode exports it (TEST / PERSO
         // only) with IO_S2B, whose unmasking registers nothing else loads
-        3'd4: begin swe = 1'b1; swaddr = {s0, sj}; swd0 = O0; swd1 = O1; end
+        3'd4: begin swe = 1'b1; swaddr = {s0, sj}; swd0 = Osh0; swd1 = Osh1; end
         default: ;
       endcase
     end
@@ -529,8 +529,8 @@ module pqse_masked (
               D1  <= {1'b0, D1[63:1]};
             end
             if (sb >= 7'd1) begin
-              O0  <= {kb0[0] ^ s00 ^ s01, O0[63:1]};
-              O1  <= {kb1[0] ^ s11 ^ s10, O1[63:1]};
+              Osh0  <= {kb0[0] ^ s00 ^ s01, Osh0[63:1]};
+              Osh1  <= {kb1[0] ^ s11 ^ s10, Osh1[63:1]};
               kb0 <= {1'b0, kb0[63:1]};                  // next bit of K-bar to bit 0
               kb1 <= {1'b0, kb1[63:1]};
             end
@@ -549,7 +549,7 @@ module pqse_masked (
       // hygiene; the ok shares stay, OKINI .. OKCHK / SEL span instructions) ----
       if (!start && !b_act && !sel_act && !wbusy && !s1v) begin
         L0  <= 64'd0; L1  <= 64'd0; D0 <= 64'd0; D1 <= 64'd0; kb0 <= 64'd0; kb1 <= 64'd0;
-        O0  <= 64'd0; O1  <= 64'd0; T  <= 12'd0; Rd <= 12'd0; b1d <= 1'b0;
+        Osh0  <= 64'd0; Osh1  <= 64'd0; T  <= 12'd0; Rd <= 12'd0; b1d <= 1'b0;
         acc0 <= 12'd0; acc1 <= 12'd0; wr0 <= 24'd0; wr1 <= 24'd0;
         nw0lo <= 12'd0; nw1lo <= 12'd0;
         s00 <= 1'b0; s01 <= 1'b0; s10 <= 1'b0; s11 <= 1'b0;

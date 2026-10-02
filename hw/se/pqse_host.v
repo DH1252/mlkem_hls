@@ -64,7 +64,7 @@ module pqse_host #(
   output reg         cmd_inj,
   output wire        kexp,
   output reg         hide_en,
-  output wire        lc_test,        // lifecycle TEST (gates the measurement trigger)
+  output wire        lc_is_test,     // lifecycle TEST (gates the measurement trigger)
   input  wire        core_busy,
   input  wire        core_done,
   input  wire [7:0]  core_result,
@@ -105,7 +105,7 @@ module pqse_host #(
   wire test  = (lc == LC_TEST);
   wire perso = (lc == LC_TEST) || (lc == LC_PERSO);
   assign kexp    = perso;
-  assign lc_test = test;
+  assign lc_is_test = test;
   // helper window: 15 lanes of helper data + the 64-bit key check value (lane 15)
   wire can_rd = in_win(ln, B_EKOWN, 9'd148) || in_win(ln, B_HELP, 9'd16) ||
                 in_win(ln, B_XOUT, 9'd136)  || in_win(ln, B_BLOB, 9'd14) ||
