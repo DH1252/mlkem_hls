@@ -317,7 +317,9 @@ se-gowin-bisect:
 # numbers mean (the RAMs become flip-flops here). STA=openroad runs the same
 # script in OpenROAD (which contains OpenSTA). The netlist must be plain
 # structural Verilog for OpenSTA: newer Yosys keeps $scopeinfo cells (with
-# #(...) parameters) after flattening, so they are deleted before writing.
+# #(...) parameters) after flattening, so they are deleted before writing, and
+# OpenSTA's reader does not take "signed" declarations (Yosys writes them for
+# leftover integer loop variables), so sed drops that keyword.
 STA ?= sta
 ACT ?= 0.1
 se-power: | $(BUILD)
@@ -331,6 +333,7 @@ se-power: | $(BUILD)
 	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB); opt_clean; \
 	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
+	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(BUILD)/sepower/pqse_top_sky130.v
 	SKY130_LIB=$(SKY130_LIB) NETLIST=$(BUILD)/sepower/pqse_top_sky130.v ACT=$(ACT) VCD=$(VCD) SCOPE=$(SCOPE) \
 	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(BUILD)/sepower/power_m$(MASKED).txt
 
@@ -360,6 +363,7 @@ se-power-vcd: | $(BUILD)
 	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
 	    rename -hide w:* i:* o:* %u %d; rename -hide c:*; rename -enumerate; \
 	    write_verilog -noattr -noexpr $(GLD)/pqse_top_gl.v"
+	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(GLD)/pqse_top_gl.v
 	$(PYTHON) scripts/pqse_lib2v.py $(SKY130_LIB) $(GLD)/pqse_top_gl.v $(GLD)/sky130_cells.v
 	cd $(GLD) && verilator --binary --timing --trace -j 2 -Wno-fatal -Wno-lint -Wno-style \
 	    --x-assign 0 --x-initial 0 --timescale 1ns/1ps --top-module tb_pqse_gate -Mdir obj -o ../vtb_gl \
