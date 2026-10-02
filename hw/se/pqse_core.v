@@ -69,7 +69,8 @@ module pqse_core #(
                    Q_WAIT = 4'd4,                Q_RSW = 4'd6,   // (5: unused)
                    Q_PG = 4'd7,     // decide: does this instruction need a fresh permutation?
                    Q_PW = 4'd8,     // wait for the Fisher-Yates shuffle (pqse_perm.v)
-                   Q_RXS = 4'd9;    // ST_RXACC: slide the replay window, one bit per clock
+                   Q_RXS = 4'd9,    // ST_RXACC: slide the replay window, one bit per clock
+                   Q_TXI = 4'd10;   // ST_TXINC: send counter + 1, one bit per clock (64 clocks)
   reg  [3:0]  q;
   reg  [9:0]  pc;           // 1024-entry microcode ROM
   reg  [9:0]  pcn;          // always ~pc (fault detection)
@@ -87,7 +88,8 @@ module pqse_core #(
   wire [63:0] ctr_rx;       // counter of the message being opened (pqse_io.v)
   wire        rx_new;       // ... newer than rx_max (pqse_io.v, IO_CTRC)
   wire [6:0]  rx_dist;      // ... newer / older by (64: 64 or more)
-  reg  [5:0]  rxc;          // Q_RXS: window shifts left
+  reg  [5:0]  rxc;          // Q_RXS: window shifts left / Q_TXI: bits done
+  reg         txc;          // Q_TXI: carry
   reg  [3:0]  dly;
   reg         wfirst;       // first clock of Q_WAIT
   reg         fault;        // a fault was detected during this command
@@ -320,7 +322,7 @@ module pqse_core #(
                     sk_valid <= 1'b0; ctr_tx <= 64'd0;
                     rx_any <= 1'b0; rx_max <= 64'd0; rx_bits <= 64'd0;
                   end
-                  ST_TXINC: ctr_tx <= ctr_tx + 64'd1;
+                  ST_TXINC: begin rxc <= 6'd0; txc <= 1'b1; end   // (Q_TXI)
                   // accept ctr_rx (pqse_io.v checked it is fresh and measured
                   // how far it is from rx_max): slide the window. A newer counter
                   // shifts the window by its distance, one bit per clock (Q_RXS)
@@ -342,6 +344,8 @@ module pqse_core #(
                   q  <= Q_RSW;                // pr_reseed pulses in this clock
                 end else if (ins_r[91:88] == ST_RXACC && rx_any && rx_new && !rx_dist[6]) begin
                   q  <= Q_RXS;
+                end else if (ins_r[91:88] == ST_TXINC) begin
+                  q  <= Q_TXI;
                 end else begin
                   pc  <= pc + 10'd1;
                   pcn <= ~(pc + 10'd1);
@@ -366,6 +370,18 @@ module pqse_core #(
             pc  <= pc + 10'd1;
             pcn <= ~(pc + 10'd1);
             q   <= Q_FETCH;
+          end
+          // ctr_tx + 1, bit-serial: rotate right through a half adder, 64 clocks
+          // (no 64-bit incrementer; SEAL only)
+          Q_TXI: begin
+            ctr_tx <= {ctr_tx[0] ^ txc, ctr_tx[63:1]};
+            txc    <= ctr_tx[0] & txc;
+            rxc    <= rxc + 6'd1;
+            if (rxc == 6'd63) begin
+              pc  <= pc + 10'd1;
+              pcn <= ~(pc + 10'd1);
+              q   <= Q_FETCH;
+            end
           end
           Q_RXS: begin                    // rx_bits << rx_dist, then bit 0 := 1 (ctr_rx)
             rxc     <= rxc - 6'd1;
