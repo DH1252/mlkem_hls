@@ -315,7 +315,9 @@ se-gowin-bisect:
 # per clock, or from a gate-level VCD=<file> SCOPE=<instance>) and the slowest
 # path against the 50 MHz clock. See scripts/pqse_power.tcl for what the
 # numbers mean (the RAMs become flip-flops here). STA=openroad runs the same
-# script in OpenROAD (which contains OpenSTA).
+# script in OpenROAD (which contains OpenSTA). The netlist must be plain
+# structural Verilog for OpenSTA: newer Yosys keeps $scopeinfo cells (with
+# #(...) parameters) after flattening, so they are deleted before writing.
 STA ?= sta
 ACT ?= 0.1
 se-power: | $(BUILD)
@@ -325,6 +327,7 @@ se-power: | $(BUILD)
 	mkdir -p $(BUILD)/sepower
 	yosys -q -l $(BUILD)/sepower/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(SE_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
+	    delete t:\$$scopeinfo; \
 	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB); opt_clean; \
 	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
