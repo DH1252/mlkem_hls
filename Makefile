@@ -362,7 +362,9 @@ PW_TAG    := _m$(MASKED)$(if $(PW_RAMLIB),_rammacro)$(if $(PW_CG),_cg)$(if $(PW_
 # otherwise picks e.g. lpflow_inputiso1p_1 as a cheap OR gate.
 ABC_BUF   ?= 1
 PW_ABCF   := $(BUILD)/sepower/abc_map.script
-PW_ABCGEN  = printf '%s\n' strash '&get -n' '&fraig -x' '&put' scorr dc2 dret strash '&get -n' \
+# (only combinational logic reaches ABC - dfflibmap mapped the flip-flops - so
+# the sequential steps of Yosys' default script, scorr / dretime, are left out)
+PW_ABCGEN  = printf '%s\n' strash '&get -n' '&fraig -x' '&put' dc2 strash '&get -n' \
 	    '&dch -f' '&nf -D $(PERIOD_PS)' '&put' \
 	    $(if $(filter 1,$(ABC_BUF)),'buffer -c' topo 'stime -c' 'upsize -c' 'dnsize -c') > $(PW_ABCF)
 PW_DONTUSE = $(foreach c,$(sort $(shell grep -oE 'sky130_fd_sc_hd__(lpflow_|probe)[A-Za-z0-9_]*' $(SKY130_LIB) 2>/dev/null)),-dont_use $(c))
