@@ -23,13 +23,21 @@
 //   CTRW    message header lanes 0, 2, 3 := send counter, 0, 0 (lane 1, the
 //           message length, is the host's)                               (SEAL)
 //   CTRC    BAD := the header counter was already accepted or is older than
-//           the 64-message replay window                                 (OPEN)
+//           the 64-message replay window; also hands pqse_core the window
+//           update (rx_new, rx_dist) for ST_RXACC                        (OPEN)
 //   TRUNC   message length L = header lane 1: BAD unless 1 <= L <= 128;
 //           else the bytes from L on of the 16 message lanes := 0  (SEAL, OPEN);
 //           cmp = 1: the length check only, nothing is written
 //   SEQ     FAULT := the masked values in seed entries e and e2 differ, found
 //           without unmasking either: d_s = e_s ^ e2_s per share, registered,
 //           then d_0 ^ d_1 (= e ^ e2, 0 unless a fault hit one of them)
+//
+// v5 (serial core): the I/O buffer and the seed registers are 16-bit word
+// memories (buffer word {lane, k}, seed word {entry, lane, k}, word k = lane
+// bits [16k+15:16k]); every operation moves one word at a time. Compress_d is
+// a d-step restoring division (no multiplier), Decompress_d accumulates
+// q * bit per decoded bit, and the replay-window arithmetic runs on 16-bit
+// words with a borrow.
 //
 // Instruction fields: see pqse_defs.vh / pqse_ucode.v (u_io).
 // -----------------------------------------------------------------------------
@@ -48,22 +56,22 @@ module pqse_io (
   output reg         we,
   output reg  [10:0] waddr,
   output reg  [23:0] wdata,
-  // I/O buffer
+  // I/O buffer (16-bit words, address {lane, k})
   output reg         bre,
-  output reg  [8:0]  braddr,
-  input  wire [63:0] brdata,
+  output reg  [10:0] braddr,
+  input  wire [15:0] brdata,
   output reg         bwe,
-  output reg  [8:0]  bwaddr,
-  output reg  [63:0] bwdata,
-  // seed registers
+  output reg  [10:0] bwaddr,
+  output reg  [15:0] bwdata,
+  // seed registers (16-bit words, address {entry, lane, k})
   output reg         sre,
-  output reg  [5:0]  sraddr,
-  input  wire [63:0] srd0,
-  input  wire [63:0] srd1,
+  output reg  [7:0]  sraddr,
+  input  wire [15:0] srd0,
+  input  wire [15:0] srd1,
   output reg         swe,
-  output reg  [5:0]  swaddr,
-  output reg  [63:0] swd0,
-  output reg  [63:0] swd1,
+  output reg  [7:0]  swaddr,
+  output reg  [15:0] swd0,
+  output reg  [15:0] swd1,
   // randomness
   input  wire [63:0] rnd,
   output reg         rnd_take,
@@ -77,10 +85,14 @@ module pqse_io (
   input  wire        rx_any,     // a message was accepted with this key   (IO_CTRC)
   input  wire [63:0] rx_max,     // the highest accepted counter
   input  wire [63:0] rx_bits,    // bit k: counter rx_max - k was accepted
-  output reg  [63:0] ctr_rx      // the counter read by IO_CTRC
+  output reg  [63:0] ctr_rx,     // the counter read by IO_CTRC
+  output reg         rx_new,     // ... is newer than rx_max
+  output reg  [6:0]  rx_dist     // ... by (rx_new) / older by (!rx_new); 64 = 64 or more
 );
   `include "pqse_defs.vh"
   `include "pqse_func.vh"
+
+  localparam [12:0] Q13 = 13'd3329;
 
   reg  [95:0] J;
   wire [3:0]  j_op   = J[91:88];
@@ -96,45 +108,46 @@ module pqse_io (
   reg         busy_r;
   assign busy = start | busy_r;
 
-  // ---- T2B: 136 raw TRNG words into buffer lanes ba .. ba+135 ----
+  function [15:0] w16(input [63:0] v, input [1:0] k);    // word k of a lane
+    case (k)
+      2'd0:    w16 = v[15:0];
+      2'd1:    w16 = v[31:16];
+      2'd2:    w16 = v[47:32];
+      default: w16 = v[63:48];
+    endcase
+  endfunction
+
+  // ---- word counter of the seed / buffer ops: wi = {lane, k} -------------------------------
+  reg  [3:0]  wi;
+  wire [1:0]  li = wi[3:2];
+  wire [1:0]  wk = wi[1:0];
+
+  // ---- T2B: 136 raw TRNG words into buffer lanes ba .. ba+135, 4 words each ----
   reg  [7:0]  tl;
   wire        t2b = (j_op == IO_T2B);
   assign t_en   = busy_r && t2b;
-  assign t_take = busy_r && t2b && t_valid;
+  assign t_take = busy_r && t2b && t_valid && (wk == 2'd3);
 
-  // ---- compress / decompress ------------------------------------------------------
-  // Compress_d(x) = round(2^d x / q) mod 2^d, exact formula as in hw/manual
-  function [11:0] compress(input [11:0] x, input [3:0] d);
-    reg [21:0] t;
-    reg [44:0] m;
-    reg [11:0] r;
-    begin
-      t = ({10'd0, x} << d) + 22'd1664;
-      m = t * 45'd2580335;
-      r = m[44:33];
-      compress = r & ((12'd1 << d) - 12'd1);
-    end
-  endfunction
-  // Decompress_d(y) = round(q y / 2^d)
-  function [11:0] decompress(input [11:0] y, input [3:0] d);
-    reg [23:0] t;
-    begin
-      t = y * 24'd3329 + (24'd1 << (d - 4'd1));
-      decompress = t >> d;
-    end
-  endfunction
-
-  // ---- DEC / ENC: bit-serial (one bit per clock; v4 trades clocks for area) -----------------
-  // DEC: a buffer lane is loaded into L and shifted out LSB first, d bits make
-  // a coefficient (collected at the top of cy). ENC: a coefficient's d bits are
-  // shifted out of cy into the top of L; 64 bits make a lane. No wide barrel
-  // shifters: a polynomial is 256 d bits = 4d lanes, ~13 clocks per coefficient.
-  reg  [63:0]  L;         // DEC: lane being consumed / ENC: lane being filled
-  reg  [6:0]   lb;        // DEC: bits left in L / ENC: bits in L
-  reg  [11:0]  cy;        // DEC: bits collected (at the top) / ENC: bits to emit (LSB first)
+  // ---- DEC / ENC: bit-serial (one bit per clock) -------------------------------------------
+  // DEC: a buffer word is loaded into L and shifted out LSB first; bit cb of
+  // the coefficient goes to cy[cb], d bits make a coefficient. Decompress_d
+  // runs alongside: ar <= (ar + bit * q) / 2 per bit (rb = the bit shifted
+  // out), so after d bits ar + rb = round(q y / 2^d).
+  // ENC: Compress_d is a d-step restoring division of x 2^d by q (quotient
+  // bits into cy, remainder in ar), rounded up when the remainder is > q/2:
+  // the +1 rides on the LSB-first output as a serial carry (ec). The
+  // coefficient's d bits are shifted out of cy into the top of L; 16 bits
+  // make a word. A polynomial is 256 d bits = 16 d words.
+  reg  [15:0]  L;         // DEC: word being consumed / ENC: word being filled
+  reg  [4:0]   lb;        // DEC: bits left in L / ENC: bits in L
+  reg  [11:0]  cy;        // DEC: bits collected / ENC: bits to emit (LSB first)
   reg  [3:0]   cb;        // DEC: bits collected / ENC: bits left to emit
-  reg          pend;      // a lane read is in flight
-  reg  [8:0]   la;        // next lane to read / write
+  reg  [12:0]  ar;        // DEC: Decompress accumulator / ENC: division remainder
+  reg          rb;        // DEC: rounding bit
+  reg          ec;        // ENC: rounding carry
+  reg  [3:0]   dc;        // ENC: division steps left
+  reg          pend;      // a word read is in flight
+  reg  [10:0]  la;        // next word to read / write
   reg  [8:0]   ci;        // coefficient index 0..256
   reg  [11:0]  v0q, v1q;
   reg          wpend;
@@ -143,87 +156,105 @@ module pqse_io (
   wire        dec   = (j_op == IO_DEC);
   wire        dneed = busy_r && dec && (ci < 9'd256) && (cb != j_d);   // more bits needed
   wire        ext   = busy_r && dec && (ci < 9'd256) && (cb == j_d);   // a coefficient is complete
-  wire        rd_lane = dneed && (lb == 7'd0) && !pend;
-  wire [11:0] ymask = (12'd1 << j_d) - 12'd1;
-  wire [11:0] y     = (cy >> (4'd12 - j_d)) & ymask;
+  wire        rd_word = dneed && (lb == 5'd0) && !pend;
+  wire        dbit  = L[0];
+  wire [12:0] dsum  = ar + (dbit ? Q13 : 13'd0);
+  wire [11:0] y     = cy;                              // bits >= d are 0
   wire        ybig  = (j_d == 4'd12) && (y >= 12'd3329);
   wire [11:0] yred  = ybig ? (y - 12'd3329) : y;
-  wire [11:0] val   = j_cmp ? decompress(y, j_d) : yred;
+  wire [11:0] val   = j_cmp ? (ar[11:0] + {11'd0, rb}) : yred;
   wire [23:0] nw    = {v1q, v0q};
   wire [23:0] dres  = (j_dm == DM_ADD)  ? {addq(rdata[23:12], v1q), addq(rdata[11:0], v0q)} :
                       (j_dm == DM_RSUB) ? {subq(v1q, rdata[23:12]), subq(v0q, rdata[11:0])} : nw;
   wire        dec_done = (ci == 9'd256) && !wpend;
 
-  localparam [2:0] E_RD = 3'd0, E_LD = 3'd1, E_CV = 3'd2, E_SH = 3'd3, E_FIN = 3'd4;
+  localparam [2:0] E_RD = 3'd0, E_LD = 3'd1, E_CV = 3'd2, E_SH = 3'd3, E_FIN = 3'd4, E_DV = 3'd5;
   reg  [2:0]   es;
   reg  [6:0]   ew;        // word index 0..127
   reg          eph;       // coefficient of the word
   reg  [23:0]  wq;
   wire        enc   = (j_op == IO_ENC);
   wire [11:0] ex    = eph ? wq[23:12] : wq[11:0];
-  wire [11:0] cv    = j_cmp ? compress(ex, j_d) : ex;
-  wire        efull = (lb == 7'd64);
+  wire [12:0] r2    = {ar[11:0], 1'b0};
+  wire        dge   = (r2 >= Q13);
+  wire        ebit  = cy[0] ^ ec;
+  wire        efull = (lb == 5'd16);
 
   // ---- seed ops --------------------------------------------------------------------------
-  reg  [1:0]  li;         // lane 0..3
   reg  [1:0]  sph;        // phase (0, 1; S2B and SCMP 0, 1, 2)
   // S2B / SCMP: only lanes 0..d-1 are written / compared (d = 0: all 4)
   wire        lane_on = (j_d == 4'd0) || ({2'b00, li} < j_d);
-  // S2B / SCMP unmask a lane: its two shares are first copied into um0 / um1,
+  // S2B / SCMP unmask a word: its two shares are first copied into um0 / um1,
   // registers that only these two operations load, and combined there. The
-  // seed RAM outputs (both shares of whatever lane any engine reads) never
+  // seed RAM outputs (both shares of whatever word any engine reads) never
   // reach an XOR gate together.
   wire        unm     = (j_op == IO_S2B) || (j_op == IO_SCMP);
   wire        ph_end  = (j_op == IO_SZERO) || (unm ? (sph == 2'd2) : (sph == 2'd1));
-  reg  [63:0] um0, um1;
+  reg  [15:0] um0, um1;
 
-  // ---- CTRC: 64-message replay window ------------------------------------------------------
-  wire [63:0] age     = rx_max - brdata;                 // how far behind the newest accepted
-  wire        fresh   = !rx_any || (brdata > rx_max) ||
-                        ((age < 64'd64) && !rx_bits[age[5:0]]);
+  // ---- CTRC: 64-message replay window, word-serial -----------------------------------------
+  // per word k of the header counter c (lane 0): a = rx_max - c and n = c -
+  // rx_max, 16 bits at a time with their borrows. c is newer when a borrows
+  // out of word 3; a's (n's) low 6 bits and whether any higher bit is set
+  // give the age (the distance, saturated at 64).
+  wire        ctrc    = (j_op == IO_CTRC);
+  reg         ab, nb;           // borrows
+  reg  [5:0]  alo, nlo;         // a[5:0], n[5:0]
+  reg         ahi, nhi;         // a[63:6] != 0, n[63:6] != 0
+  wire [15:0] mw      = w16(rx_max, wk);
+  wire [16:0] ad      = {1'b0, mw} - {1'b0, brdata} - {16'd0, ab};
+  wire [16:0] nd      = {1'b0, brdata} - {1'b0, mw} - {16'd0, nb};
+  wire        ahi_n   = ahi | ((wk == 2'd0) ? (|ad[15:6]) : (|ad[15:0]));
+  wire        nhi_n   = nhi | ((wk == 2'd0) ? (|nd[15:6]) : (|nd[15:0]));
+  wire [5:0]  alo_n   = (wk == 2'd0) ? ad[5:0] : alo;
+  wire [5:0]  nlo_n   = (wk == 2'd0) ? nd[5:0] : nlo;
+  wire        newer   = ad[16];                          // word 3: c > rx_max
+  wire        fresh   = !rx_any || newer || (!ahi_n && !rx_bits[alo_n]);
 
   // ---- TRUNC: zero the message bytes from L on -------------------------------------------------
-  reg  [5:0]  tq;         // 0 read header lane 1, 1 check, 2..33 read / write the 16 lanes
+  // tq 0..3 read header lane 1 (the length) words 0..3, checked one clock later
+  // (1..4); then tq = 5 + 2m reads, 6 + 2m writes message word m (0..63)
+  reg  [7:0]  tq;
   reg  [7:0]  mlen;       // L
   wire        trunc   = (j_op == IO_TRUNC);
-  wire [3:0]  tk      = tq[4:1] - 4'd1;                  // lane (2 + 2k: read, 3 + 2k: write)
-  reg  [63:0] tmask;
-  integer     tb_;
-  always @* begin
-    for (tb_ = 0; tb_ < 8; tb_ = tb_ + 1)
-      tmask[8*tb_ +: 8] = (({1'b0, tk, 3'b000} + tb_) < {1'b0, mlen}) ? 8'hFF : 8'h00;
-  end
+  wire [7:0]  tu      = tq - 8'd5;
+  wire [5:0]  tm      = tu[6:1];                           // message word
+  wire        tchk    = (tq >= 8'd1) && (tq <= 8'd4);
+  wire        tbad    = (tq == 8'd1) ? ((brdata == 16'd0) || (brdata > 16'd128)) : (brdata != 16'd0);
+  wire [15:0] tmask   = {({1'b0, tm, 1'b1} < mlen) ? 8'hFF : 8'h00,
+                         ({1'b0, tm, 1'b0} < mlen) ? 8'hFF : 8'h00};
 
   // ---- SEQ: share-wise comparison of two masked seed entries --------------------------------
-  reg  [3:0]  sq;         // 0..9 (see below)
-  reg  [63:0] sa0, sa1;   // entry e lane, share 0 / share 1
-  reg  [63:0] sd0, sd1;   // e ^ e2 per share (registered: the shares never meet unregistered)
+  // even sq <= 30: read e word sq/2; odd sq <= 31: read e2 word (sq-1)/2 (e word
+  // captured); the share-wise differences are registered at the next even sq
+  // and checked at the odd one after (the last at sq = 33)
+  reg  [5:0]  sq;
+  reg  [15:0] sa0, sa1;   // entry e word, share 0 / share 1
+  reg  [15:0] sd0, sd1;   // e ^ e2 per share (registered: the shares never meet unregistered)
   wire        seq     = (j_op == IO_SEQ);
 
   // ---- combinational outputs -------------------------------------------------------------------
   always @* begin
     re = 1'b0; raddr = 11'd0; we = 1'b0; waddr = 11'd0; wdata = 24'd0;
-    bre = 1'b0; braddr = 9'd0; bwe = 1'b0; bwaddr = 9'd0; bwdata = 64'd0;
-    sre = 1'b0; sraddr = 6'd0; swe = 1'b0; swaddr = 6'd0; swd0 = 64'd0; swd1 = 64'd0;
+    bre = 1'b0; braddr = 11'd0; bwe = 1'b0; bwaddr = 11'd0; bwdata = 16'd0;
+    sre = 1'b0; sraddr = 8'd0; swe = 1'b0; swaddr = 8'd0; swd0 = 16'd0; swd1 = 16'd0;
     rnd_take  = 1'b0;
     bad_set   = 1'b0;
     fault_set = 1'b0;
     if (busy_r) begin
       if (seq) begin
-        // even sq < 8: read e lane sq/2; odd sq: read e2 lane (sq-1)/2 (e lane captured);
-        // the share-wise differences are registered one clock later and checked the next
-        if (sq <= 4'd7) begin sre = 1'b1; sraddr = {sq[0] ? j_e2 : j_e, sq[2:1]}; end
-        if ((sq[0] && sq >= 4'd3) || sq == 4'd9)
-          if ((sd0 ^ sd1) != 64'd0) fault_set = 1'b1;
+        if (sq <= 6'd31) begin sre = 1'b1; sraddr = {sq[0] ? j_e2 : j_e, sq[4:1]}; end
+        if ((sq[0] && sq >= 6'd3) || sq == 6'd33)
+          if ((sd0 ^ sd1) != 16'd0) fault_set = 1'b1;
       end else if (trunc) begin
-        if (tq == 6'd0) begin bre = 1'b1; braddr = B_SM_HDR + 9'd1; end
-        if (tq == 6'd1 && (brdata == 64'd0 || brdata > 64'd128)) bad_set = 1'b1;
-        if (tq >= 6'd2 && !tq[0]) begin bre = 1'b1; braddr = j_ba + {5'd0, tk}; end
-        if (tq >= 6'd3 && tq[0]) begin
-          bwe = 1'b1; bwaddr = j_ba + {5'd0, tk}; bwdata = brdata & tmask;
+        if (tq <= 8'd3) begin bre = 1'b1; braddr = {B_SM_HDR + 9'd1, tq[1:0]}; end
+        if (tchk && tbad) bad_set = 1'b1;
+        if (tq >= 8'd5 && !tu[0]) begin bre = 1'b1; braddr = {j_ba + {5'd0, tm[5:2]}, tm[1:0]}; end
+        if (tq >= 8'd6 && tu[0]) begin
+          bwe = 1'b1; bwaddr = {j_ba + {5'd0, tm[5:2]}, tm[1:0]}; bwdata = brdata & tmask;
         end
       end else if (dec) begin
-        if (rd_lane) begin bre = 1'b1; braddr = la; end
+        if (rd_word) begin bre = 1'b1; braddr = la; end
         if (ext && !ci[0] && (j_dm == DM_ADD || j_dm == DM_RSUB)) begin
           re = 1'b1; raddr = {j_sl, ci[7:1]};
         end
@@ -235,38 +266,38 @@ module pqse_io (
         if (es == E_RD) begin re = 1'b1; raddr = {j_sl, ew}; end
         if (efull && (es == E_SH || es == E_FIN)) begin bwe = 1'b1; bwaddr = la; bwdata = L; end
       end else if (t2b) begin
-        if (t_valid) begin bwe = 1'b1; bwaddr = j_ba + {1'b0, tl}; bwdata = t_word; end
+        if (t_valid) begin bwe = 1'b1; bwaddr = {j_ba + {1'b0, tl}, wk}; bwdata = w16(t_word, wk); end
+      end else if (ctrc) begin
+        // header lane 0, word wk: read (sph 0), then the borrow step (sph 1)
+        if (!sph) begin bre = 1'b1; braddr = {j_ba, wk}; end
+        else if (wk == 2'd3 && !fresh) bad_set = 1'b1;
       end else begin
         case (j_op)
           IO_S2B: if (sph == 2'd0) begin
-                    if (lane_on) begin sre = 1'b1; sraddr = {j_e, li}; end
+                    if (lane_on) begin sre = 1'b1; sraddr = {j_e, wi}; end
                   end else if (sph == 2'd2 && lane_on) begin
-                    bwe = 1'b1; bwaddr = j_ba + {7'd0, li}; bwdata = um0 ^ um1;
+                    bwe = 1'b1; bwaddr = {j_ba + {7'd0, li}, wk}; bwdata = um0 ^ um1;
                   end
-          IO_B2S: if (!sph) begin bre = 1'b1; braddr = j_ba + {7'd0, li}; end
-                  else begin swe = 1'b1; swaddr = {j_e, li}; swd0 = brdata; swd1 = 64'd0; end
-          IO_S2S: if (!sph) begin sre = 1'b1; sraddr = {j_e, li}; end
-                  else begin swe = 1'b1; swaddr = {j_e2, li}; swd0 = srd0; swd1 = srd1; end
-          IO_SZERO: begin swe = 1'b1; swaddr = {j_e, li}; end
-          IO_SREMASK: if (!sph) begin sre = 1'b1; sraddr = {j_e, li}; end
+          IO_B2S: if (!sph) begin bre = 1'b1; braddr = {j_ba + {7'd0, li}, wk}; end
+                  else begin swe = 1'b1; swaddr = {j_e, wi}; swd0 = brdata; swd1 = 16'd0; end
+          IO_S2S: if (!sph) begin sre = 1'b1; sraddr = {j_e, wi}; end
+                  else begin swe = 1'b1; swaddr = {j_e2, wi}; swd0 = srd0; swd1 = srd1; end
+          IO_SZERO: begin swe = 1'b1; swaddr = {j_e, wi}; end
+          IO_SREMASK: if (!sph) begin sre = 1'b1; sraddr = {j_e, wi}; end
                   else begin
-                    swe = 1'b1; swaddr = {j_e, li};
-                    swd0 = srd0 ^ rnd; swd1 = srd1 ^ rnd; rnd_take = 1'b1;
+                    swe = 1'b1; swaddr = {j_e, wi};
+                    swd0 = srd0 ^ rnd[15:0]; swd1 = srd1 ^ rnd[15:0]; rnd_take = 1'b1;
                   end
           IO_SCMP: if (sph == 2'd0) begin
-                    if (lane_on) begin sre = 1'b1; sraddr = {j_e, li}; end
+                    if (lane_on) begin sre = 1'b1; sraddr = {j_e, wi}; end
                   end else if (sph == 2'd1) begin
-                    if (lane_on) begin bre = 1'b1; braddr = j_ba + {7'd0, li}; end
+                    if (lane_on) begin bre = 1'b1; braddr = {j_ba + {7'd0, li}, wk}; end
                   end else if (lane_on && ((um0 ^ um1) != brdata)) bad_set = 1'b1;
           // message header: lane 0 = send counter, lane 1 = length (kept), lanes 2, 3 = 0
           IO_CTRW: if (sph && li != 2'd1) begin
-                    bwe = 1'b1; bwaddr = j_ba + {7'd0, li};
-                    bwdata = (li == 2'd0) ? ctr_tx : 64'd0;
+                    bwe = 1'b1; bwaddr = {j_ba + {7'd0, li}, wk};
+                    bwdata = (li == 2'd0) ? w16(ctr_tx, wk) : 16'd0;
                   end
-          // replay check against the 64-message window
-          IO_CTRC: if (!sph) begin
-                    bre = 1'b1; braddr = j_ba + {7'd0, li};
-                  end else if (li == 2'd0 && !fresh) bad_set = 1'b1;
           default: ;
         endcase
       end
@@ -280,51 +311,62 @@ module pqse_io (
     end else if (start) begin
       J      <= ins;
       busy_r <= 1'b1;
-      L      <= 64'd0;
-      lb     <= 7'd0;
+      L      <= 16'd0;
+      lb     <= 5'd0;
       cy     <= 12'd0;
       cb     <= 4'd0;
+      ar     <= 13'd0;
+      rb     <= 1'b0;
+      ec     <= 1'b0;
+      dc     <= 4'd0;
       pend   <= 1'b0;
-      la     <= ins[79:71];
+      la     <= {ins[79:71], 2'b00};
       ci     <= 9'd0;
       wpend  <= 1'b0;
       es     <= E_RD;
       ew     <= 7'd0;
       eph    <= 1'b0;
-      li     <= 2'd0;
+      wi     <= 4'd0;
       sph    <= 2'd0;
       tl     <= 8'd0;
-      tq     <= 6'd0;
-      sq     <= 4'd0;
+      tq     <= 8'd0;
+      sq     <= 6'd0;
+      ab     <= 1'b0;
+      nb     <= 1'b0;
+      ahi    <= 1'b0;
+      nhi    <= 1'b0;
     end else if (busy_r) begin
       if (seq) begin
-        if (sq[0] && sq <= 4'd7) begin sa0 <= srd0; sa1 <= srd1; end          // e lane
-        if (!sq[0] && sq >= 4'd2) begin sd0 <= sa0 ^ srd0; sd1 <= sa1 ^ srd1; end // ^ e2 lane
-        sq <= sq + 4'd1;
-        if (sq == 4'd9) busy_r <= 1'b0;
+        if (sq[0] && sq <= 6'd31) begin sa0 <= srd0; sa1 <= srd1; end          // e word
+        if (!sq[0] && sq >= 6'd2) begin sd0 <= sa0 ^ srd0; sd1 <= sa1 ^ srd1; end // ^ e2 word
+        sq <= sq + 6'd1;
+        if (sq == 6'd33) busy_r <= 1'b0;
       end else if (trunc) begin
-        if (tq == 6'd1) begin
-          mlen <= brdata[7:0];
-          // bad length, or cmp = 1: check only (OPEN, before the tag is checked)
-          if (brdata == 64'd0 || brdata > 64'd128 || j_cmp) busy_r <= 1'b0;
-        end
-        tq <= tq + 6'd1;
-        if (tq == 6'd33) busy_r <= 1'b0;
+        if (tq == 8'd1) mlen <= brdata[7:0];
+        // bad length, or cmp = 1: check only (OPEN, before the tag is checked)
+        if ((tchk && tbad) || (tq == 8'd4 && j_cmp)) busy_r <= 1'b0;
+        tq <= tq + 8'd1;
+        if (tq == 8'd132) busy_r <= 1'b0;
       end else if (dec) begin
-        // one bit per clock from L into cy; a new lane when L is empty
-        pend <= rd_lane;
-        if (rd_lane) la <= la + 9'd1;
+        // one bit per clock from L into cy; a new word when L is empty
+        pend <= rd_word;
+        if (rd_word) la <= la + 11'd1;
         if (pend) begin
           L  <= brdata;
-          lb <= 7'd64;
-        end else if (dneed && lb != 7'd0) begin
-          cy <= {L[0], cy[11:1]};
-          L  <= {1'b0, L[63:1]};
-          lb <= lb - 7'd1;
+          lb <= 5'd16;
+        end else if (dneed && lb != 5'd0) begin
+          cy <= cy | ({11'd0, dbit} << cb);
+          ar <= {1'b0, dsum[12:1]};
+          rb <= dsum[0];
+          L  <= {1'b0, L[15:1]};
+          lb <= lb - 5'd1;
           cb <= cb + 4'd1;
         end
         if (ext) begin
           cb <= 4'd0;
+          cy <= 12'd0;
+          ar <= 13'd0;
+          rb <= 1'b0;
           ci <= ci + 9'd1;
           if (!ci[0]) v0q <= val;
           else begin
@@ -338,16 +380,33 @@ module pqse_io (
         case (es)
           E_RD: es <= E_LD;                                  // word ew read
           E_LD: begin wq <= rdata; eph <= 1'b0; es <= E_CV; end
-          E_CV: begin cy <= cv; cb <= j_d; es <= E_SH; end    // coefficient eph, d bits
+          E_CV: begin                                        // coefficient eph
+            ar <= {1'b0, ex};
+            cy <= j_cmp ? 12'd0 : ex;
+            dc <= j_cmp ? j_d : 4'd0;
+            es <= E_DV;
+          end
+          E_DV: begin                                        // Compress_d: d division steps
+            if (dc != 4'd0) begin
+              ar <= dge ? (r2 - Q13) : r2;
+              cy <= {cy[10:0], dge};
+              dc <= dc - 4'd1;
+            end else begin
+              ec <= j_cmp && (ar >= 13'd1665);               // round half up (q is odd)
+              cb <= j_d;
+              es <= E_SH;
+            end
+          end
           E_SH: begin
-            if (efull) begin                                 // lane L written this clock
-              la <= la + 9'd1;
-              lb <= 7'd0;
+            if (efull) begin                                 // word L written this clock
+              la <= la + 11'd1;
+              lb <= 5'd0;
             end else if (cb != 4'd0) begin                   // one bit into the top of L
-              L  <= {cy[0], L[63:1]};
+              L  <= {ebit, L[15:1]};
+              ec <= cy[0] & ec;
               cy <= {1'b0, cy[11:1]};
               cb <= cb - 4'd1;
-              lb <= lb + 7'd1;
+              lb <= lb + 5'd1;
             end else if (!eph) begin
               eph <= 1'b1;
               es  <= E_CV;
@@ -358,23 +417,41 @@ module pqse_io (
               es <= E_FIN;
             end
           end
-          default: begin                                     // E_FIN: the last lane is out
-            if (efull) begin la <= la + 9'd1; lb <= 7'd0; end
+          default: begin                                     // E_FIN: the last word is out
+            if (efull) begin la <= la + 11'd1; lb <= 5'd0; end
             else busy_r <= 1'b0;
           end
         endcase
       end else if (t2b) begin
         if (t_valid) begin
-          tl <= tl + 8'd1;
-          if (tl == 8'd135) busy_r <= 1'b0;
+          wi <= wi + 4'd1;                                   // (wk: word of the TRNG word)
+          if (wk == 2'd3) begin
+            tl <= tl + 8'd1;
+            if (tl == 8'd135) busy_r <= 1'b0;
+          end
+        end
+      end else if (ctrc) begin
+        if (!sph) begin
+          sph <= 2'd1;
+        end else begin
+          ctr_rx <= {brdata, ctr_rx[63:16]};
+          ab  <= ad[16];  nb  <= nd[16];
+          alo <= alo_n;   nlo <= nlo_n;
+          ahi <= ahi_n;   nhi <= nhi_n;
+          sph <= 2'd0;
+          wi  <= wi + 4'd1;
+          if (wk == 2'd3) begin
+            busy_r  <= 1'b0;
+            rx_new  <= newer;
+            rx_dist <= newer ? (nhi_n ? 7'd64 : {1'b0, nlo_n}) : (ahi_n ? 7'd64 : {1'b0, alo_n});
+          end
         end
       end else begin
         if (unm && sph == 2'd1 && lane_on) begin um0 <= srd0; um1 <= srd1; end
-        if (j_op == IO_CTRC && sph == 2'd1 && li == 2'd0) ctr_rx <= brdata;
         if (ph_end) begin
-          li  <= li + 2'd1;
+          wi  <= wi + 4'd1;
           sph <= 2'd0;
-          if (li == 2'd3) busy_r <= 1'b0;
+          if (wi == 4'd15) busy_r <= 1'b0;
         end else begin
           sph <= sph + 2'd1;
         end

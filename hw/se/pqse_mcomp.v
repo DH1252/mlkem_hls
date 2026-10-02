@@ -10,6 +10,10 @@
 //                    accumulators in pqse_masked.v                    (c' == c ?)
 //   mode 2 (d = 4, 10): the bits are unmasked (they are ciphertext, public)
 //                    and written into buffer lanes from lane ba       (Encaps)
+// v5: the buffer and the seed registers are 16-bit word memories; a word's 2d
+// ciphertext bits (d = 4: 8 bits at offset 0 / 8, d = 10: 20 bits at offset
+// 0, 4, 8, 12) span at most two buffer words, m' bits 2w, 2w + 1 sit in seed
+// word w / 8.
 //
 // Method (per coefficient):
 //   1. per share, in its own domain:  y_s = round(x_s * 2^K / q) mod 2^K,
@@ -44,9 +48,9 @@
 // do not line up (this is what the published attacks on masked Kyber's message
 // decoding average over).
 // Every word therefore reads and writes its own place:
-//   mode 0: read-modify-write of the m' seed lane that holds its 2 bits
-//   mode 1: reads the 1-2 ciphertext lanes that hold its 2d bits
-//   mode 2: read-modify-write of the 1-2 ciphertext lanes
+//   mode 0: read-modify-write of the m' seed word that holds its 2 bits
+//   mode 1: reads the 1-2 ciphertext words that hold its 2d bits
+//   mode 2: read-modify-write of the 1-2 ciphertext words
 //
 // RAM reads: share 0 word (RAM 0), a public word of RAM 0 (S_T word 0), an idle
 // clock, share 1 word (RAM 1). The two RAMs' output registers, the read mux
@@ -75,20 +79,20 @@ module pqse_mcomp (
   input  wire [23:0] rdata,
   // buffer: ciphertext in (mode 1) / out (mode 2, unmasked - it is ciphertext)
   output reg         bre,
-  output reg  [8:0]  braddr,
-  input  wire [63:0] brdata,
+  output reg  [10:0] braddr,
+  input  wire [15:0] brdata,
   output reg         bwe,
-  output reg  [8:0]  bwaddr,
-  output reg  [63:0] bwdata,
+  output reg  [10:0] bwaddr,
+  output reg  [15:0] bwdata,
   // seed registers (mode 0: m')
   output reg         sre,
-  output reg  [5:0]  sraddr,
-  input  wire [63:0] srd0,
-  input  wire [63:0] srd1,
+  output reg  [7:0]  sraddr,
+  input  wire [15:0] srd0,
+  input  wire [15:0] srd1,
   output reg         swe,
-  output reg  [5:0]  swaddr,
-  output reg  [63:0] swd0,
-  output reg  [63:0] swd1,
+  output reg  [7:0]  swaddr,
+  output reg  [15:0] swd0,
+  output reg  [15:0] swd1,
   // compare output, one Boolean-shared bit per clock when nd_valid
   output reg         nd_valid,
   output reg         nd0,
@@ -120,10 +124,10 @@ module pqse_mcomp (
   reg [4:0]  i;          // adder bit
   reg [4:0]  K;
   reg [28:0] M;
-  reg [5:0]  sub;        // bit offset of the word in its first lane
-  reg [5:0]  lane;       // first lane of the word (relative to bar)
-  reg [63:0] WL, WH;     // ciphertext window: lanes lane, lane + 1
-  reg [63:0] G0, G1;     // m' seed lane, share 0 / share 1
+  reg [3:0]  sub;        // bit offset of the word in its first buffer word
+  reg [7:0]  cwo;        // first buffer word of the word (relative to bar)
+  reg [15:0] WL, WH;     // ciphertext window: buffer words cwo, cwo + 1
+  reg [15:0] G0, G1;     // m' seed word, share 0 / share 1
   // domain 0 registers (X0w takes the share 0 word off the RAM read bus and
   // hands it to Z0 before the share 1 word arrives: no register whose input
   // is that bus ever holds share 0 while the bus carries share 1)
@@ -139,7 +143,7 @@ module pqse_mcomp (
   // DOM AND partial products (registered)
   reg        p00, p01, p10, p11;
   reg        sov;        // mode 2: so0 / so1 hold a ciphertext bit to place
-  reg  [6:0] cpd;        // ... at this window position
+  reg  [4:0] cpd;        // ... at this window position
 
   assign busy = start | (st != S_IDLE);
   assign rnd_hi = (st == S_AD);
@@ -158,7 +162,10 @@ module pqse_mcomp (
   // the word to process next, and where its ciphertext bits sit
   assign      pq_idx = w;
   wire [6:0]  wsh  = shf ? pq_val : w;                  // T[w]: uniformly random order
-  wire [11:0] offc = {4'd0, wsh, 1'b0} * {8'd0, dd};   // bit offset of coefficient 2 wsh
+  // bit offset of coefficient 2 wsh: 2 wsh d, d = 1, 4 or 10 (shifts and one add)
+  wire [11:0] offc = (dd == 4'd10) ? ({1'b0, wsh, 4'd0} + {3'd0, wsh, 2'd0}) :
+                     (dd == 4'd4)  ? {2'd0, wsh, 3'd0} : {4'd0, wsh, 1'b0};
+  wire [10:0] cba  = {bar, 2'b00};                      // ciphertext base word
   wire [3:0]  dhi  = hi ? dd : 4'd0;
 
   wire [11:0] x0c = hi ? Z0[23:12] : Z0[11:0];
@@ -174,30 +181,30 @@ module pqse_mcomp (
   wire top  = (i >= 5'd14);                              // an output bit
   wire [4:0] j = i - 5'd14;                              // which output bit
   wire rb   = rnd[48];
-  // position of output bit j of this coefficient in the ciphertext window / seed lane
-  wire [6:0] cpos = {1'b0, sub} + {3'd0, dhi} + {2'd0, j};
-  wire [127:0] Wn = {WH, WL};
+  // position of output bit j of this coefficient in the ciphertext window / seed word
+  wire [4:0] cpos = {1'b0, sub} + {1'b0, dhi} + j;
+  wire [31:0] Wn = {WH, WL};
   wire cbit = Wn[cpos];
-  wire [5:0] gpos = {ws[4:0], hi};
-  // the second ciphertext lane is touched only if the word's 2d bits cross into it
-  wire [6:0] wend = {1'b0, sub} + {2'd0, dd, 1'b0};
-  wire       two  = (wend > 7'd64);
+  wire [3:0] gpos = {ws[2:0], hi};
+  // the second ciphertext word is touched only if the word's 2d bits cross into it
+  wire [5:0] wend = {2'd0, sub} + {1'b0, dd, 1'b0};
+  wire       two  = (wend > 6'd16);
 
   always @* begin
     re = 1'b0; raddr = 11'd0;
-    bre = 1'b0; braddr = 9'd0; bwe = 1'b0; bwaddr = 9'd0; bwdata = 64'd0;
-    sre = 1'b0; sraddr = 6'd0; swe = 1'b0; swaddr = 6'd0; swd0 = 64'd0; swd1 = 64'd0;
+    bre = 1'b0; braddr = 11'd0; bwe = 1'b0; bwaddr = 11'd0; bwdata = 16'd0;
+    sre = 1'b0; sraddr = 8'd0; swe = 1'b0; swaddr = 8'd0; swd0 = 16'd0; swd1 = 16'd0;
     nd_valid = 1'b0; nd0 = 1'b0; nd1 = 1'b0;
     rnd_take = 1'b0;
     case (st)
       S_R0: begin
         re = 1'b1; raddr = {s0, wsh};                     // share 0 word
-        if (md == 2'd0) begin sre = 1'b1; sraddr = {en_, wsh[6:5]}; end
-        else begin bre = 1'b1; braddr = bar + {3'd0, offc[11:6]}; end
+        if (md == 2'd0) begin sre = 1'b1; sraddr = {en_, wsh[6:3]}; end
+        else begin bre = 1'b1; braddr = cba + {3'd0, offc[11:4]}; end
       end
       S_R1: begin
         re = 1'b1; raddr = {S_T, 7'd0};                   // public word of RAM 0: precharge
-        if (md != 2'd0) begin bre = 1'b1; braddr = bar + {3'd0, lane} + 9'd1; end
+        if (md != 2'd0) begin bre = 1'b1; braddr = cba + {3'd0, cwo} + 11'd1; end
       end
       S_RD1: begin re = 1'b1; raddr = {s1, ws}; end       // share 1 word
       S_RF: rnd_take = 1'b1;
@@ -210,13 +217,13 @@ module pqse_mcomp (
         end
       end
       S_WB0: begin
-        if (md == 2'd0) begin                             // m' lane back, both shares
-          swe = 1'b1; swaddr = {en_, ws[6:5]}; swd0 = G0; swd1 = G1;
+        if (md == 2'd0) begin                             // m' word back, both shares
+          swe = 1'b1; swaddr = {en_, ws[6:3]}; swd0 = G0; swd1 = G1;
         end else if (md == 2'd2) begin
-          bwe = 1'b1; bwaddr = bar + {3'd0, lane}; bwdata = WL;
+          bwe = 1'b1; bwaddr = cba + {3'd0, cwo}; bwdata = WL;
         end
       end
-      S_WB1: begin bwe = 1'b1; bwaddr = bar + {3'd0, lane} + 9'd1; bwdata = WH; end
+      S_WB1: begin bwe = 1'b1; bwaddr = cba + {3'd0, cwo} + 11'd1; bwdata = WH; end
       default: ;
     endcase
   end
@@ -237,7 +244,7 @@ module pqse_mcomp (
           // carries other instructions' words, possibly the other share), and
           // no share of m' or of a coefficient stays behind (zeroization)
           X0w <= 24'd0; X1w <= 24'd0; Z0 <= 24'd0;
-          G0  <= 64'd0; G1  <= 64'd0; y0r <= 24'd0; y1r <= 24'd0;
+          G0  <= 16'd0; G1  <= 16'd0; y0r <= 24'd0; y1r <= 24'd0;
           A0  <= 24'd0; A1  <= 24'd0; B0  <= 24'd0; B1  <= 24'd0;
           C0  <= 1'b0;  C1  <= 1'b0;  ad0 <= 1'b0;  ad1 <= 1'b0;
         end else begin
@@ -260,14 +267,14 @@ module pqse_mcomp (
         end
         S_R0: begin
           ws   <= wsh;
-          sub  <= offc[5:0];
-          lane <= offc[11:6];
+          sub  <= offc[3:0];
+          cwo  <= offc[11:4];
           st   <= S_R1;
         end
         S_R1: begin
           X0w <= rdata;                                     // share 0 word
-          if (md == 2'd0) begin G0 <= srd0; G1 <= srd1; end // m' lane (both shares)
-          else WL <= brdata;                                // ciphertext lane
+          if (md == 2'd0) begin G0 <= srd0; G1 <= srd1; end // m' word (both shares)
+          else WL <= brdata;                                // ciphertext word
           st  <= S_R2;
         end
         S_R2: begin
@@ -319,8 +326,8 @@ module pqse_mcomp (
           C0 <= ad0 ^ p00 ^ p01;                          // carry share 0 (domain 0 + masked cross term)
           C1 <= ad1 ^ p11 ^ p10;                          // carry share 1
           if (sov) begin                                  // ciphertext bit: public
-            if (cpd[6]) WH[cpd[5:0]] <= so0 ^ so1;
-            else        WL[cpd[5:0]] <= so0 ^ so1;
+            if (cpd[4]) WH[cpd[3:0]] <= so0 ^ so1;
+            else        WL[cpd[3:0]] <= so0 ^ so1;
           end
           sov <= 1'b0;
           if (i == K - 5'd1) begin
