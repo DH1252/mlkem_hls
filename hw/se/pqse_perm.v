@@ -44,6 +44,8 @@ module pqse_perm (
   reg [6:0] Tb [0:127];
 `elsif YOSYS
   (* no_rw_check *) reg [6:0] T [0:127];
+`elsif PQSE_GOWIN_EDA
+  reg [6:0] T [0:127];
 `else
   (* ramstyle = "MLAB, no_rw_check" *) reg [6:0] T [0:127];
 `endif

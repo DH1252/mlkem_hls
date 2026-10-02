@@ -42,6 +42,9 @@ module pqse_ram_1r1w #(
       // "ramstyle" as a demand for a RAM type of that name and stops without one
 `ifdef YOSYS
       (* no_rw_check *) reg [DW-1:0] mem [0:(1<<AW)-1];
+`elsif PQSE_GOWIN_EDA
+      // GowinSynthesis: shadow SRAM (its own attribute; no read/write bypass by default)
+      reg [DW-1:0] mem [0:(1<<AW)-1] /* synthesis syn_ramstyle = "distributed_ram" */;
 `else
       (* ramstyle = "MLAB, no_rw_check" *) reg [DW-1:0] mem [0:(1<<AW)-1];
 `endif
@@ -56,6 +59,8 @@ module pqse_ram_1r1w #(
     end else begin : g_def
 `ifdef YOSYS
       (* no_rw_check *) reg [DW-1:0] mem [0:(1<<AW)-1];
+`elsif PQSE_GOWIN_EDA
+      reg [DW-1:0] mem [0:(1<<AW)-1];     // GowinSynthesis: no bypass logic by default
 `else
       (* ramstyle = "no_rw_check" *) reg [DW-1:0] mem [0:(1<<AW)-1];
 `endif
