@@ -429,7 +429,9 @@ SRAM_EPB_WR ?= 0.8
 SRAM_E0     ?= 2.0
 GLD       := $(BUILD)/sepower/gl
 GL_DUMP   := gate.$(if $(filter vcd,$(GL_FMT)),vcd,saif)
-GL_TRACE  := $(if $(filter vcd,$(GL_FMT)),--trace,--trace-saif)
+# --trace-underscore: Yosys names every internal net _<n>_, and Verilator leaves
+# names starting with "_" out of the dump unless told otherwise
+GL_TRACE  := $(if $(filter vcd,$(GL_FMT)),--trace,--trace-saif) --trace-underscore
 # speed: GL_JOBS parallel C++ compiles of the (large) Verilator model (default:
 # all cores); GL_THREADS > 1 runs the model multithreaded (worth it for the
 # whole netlist: try 4); GL_TRACE_THREADS=1 writes the VCD from a separate
