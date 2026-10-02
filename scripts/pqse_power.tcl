@@ -37,6 +37,12 @@ set scope   [env_or SCOPE ""]
 if {$lib eq ""} { puts "set SKY130_LIB"; exit 1 }
 
 read_liberty $lib
+# RAM_MACRO=1: the RAM macro stubs (no power: the report covers the logic only)
+set ramlib  [env_or RAM_LIB ""]
+if {$ramlib ne ""} {
+  read_liberty $ramlib
+  puts "RAMs as SRAM macros ($ramlib): their power is NOT included"
+}
 read_verilog $netlist
 link_design pqse_top
 
