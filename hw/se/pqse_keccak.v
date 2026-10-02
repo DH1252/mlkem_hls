@@ -167,6 +167,7 @@ module pqse_keccak #(
   reg  [319:0] C1v;                // ... share 1 (masked jobs only); registers, not a RAM
   reg  [2:0]  wbx;                 // chi write-back: column of the lane
   reg         wby0;                // ... the lane is in plane 0
+  reg         wbacc;               // ... goes into the parities (rounds 0..22)
   reg  [63:0] X0r, X1r, Y0r, Y1r;  // chi: DOM operands
   reg  [63:0] d00, d01, d10, d11;  // chi: DOM partial products
   reg         wbv;                 // chi: write-back pending (this clock)
@@ -299,8 +300,10 @@ module pqse_keccak #(
       wbv <= 1'b0;
       // theta of the next round: the written lane into its column parity (the
       // first lane of a column, in plane 0, replaces the old parity). Not in
-      // the last round: there C is cleared when the permutation ends.
-      if (wbv && (rnd_i != 5'd23)) begin
+      // the last round: there C is cleared when the permutation ends. (wbacc is
+      // set with the write-back: the round's last write-back lands the clock
+      // after rnd_i has moved on)
+      if (wbv && wbacc) begin
         C0v[{wbx, 6'd0} +: 64] <= wby0 ? wd0 : (C0v[{wbx, 6'd0} +: 64] ^ wd0);
         if (use1) C1v[{wbx, 6'd0} +: 64] <= wby0 ? wd1 : (C1v[{wbx, 6'd0} +: 64] ^ wd1);
       end
@@ -413,6 +416,7 @@ module pqse_keccak #(
               wbi  <= lidx(chx, cy);
               wbx  <= chx;
               wby0 <= (cy == 3'd0);
+              wbacc <= (rnd_i != 5'd23);
               cs   <= 2'd0;
               if (cj == 3'd4) begin
                 cj <= 3'd0;
