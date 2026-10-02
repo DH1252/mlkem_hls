@@ -36,11 +36,11 @@ module pqse_parse (
   reg   [3:0] sl;
 
   wire        can  = !fin && (bcnt >= 5'd3);
-  wire  [7:0] b0   = sbuf[7:0];
-  wire  [7:0] b1   = sbuf[15:8];
-  wire  [7:0] b2   = sbuf[23:16];
-  wire [11:0] d1   = {b1[3:0], b0};
-  wire [11:0] d2   = {b2, b1[7:4]};
+  // the next 3 bytes b0 b1 b2 = sbuf[23:0]: d1 = {b1[3:0], b0}, d2 = {b2, b1[7:4]}
+  // (taken straight from sbuf: GowinSynthesis fails with SP00018 "error bus
+  // name set" on byte wires that d1 / d2 are then built from)
+  wire [11:0] d1   = sbuf[11:0];
+  wire [11:0] d2   = sbuf[23:12];
   wire        a1   = can && (d1 < 12'd3329);
   wire  [8:0] n1   = n + {8'd0, a1};
   wire        a2   = can && (d2 < 12'd3329) && (n1 < 9'd256);
