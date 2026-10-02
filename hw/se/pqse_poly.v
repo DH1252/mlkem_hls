@@ -24,6 +24,11 @@
 // unit flips to it ("next"), waiting for "ready" if needed. Each layer drains
 // before the next starts, so any order is correct.
 //
+// v5 (area): one zeta ROM with a registered read (block RAM / ROM) shared by
+// the NTT and PWM, one "+ product" modular adder shared by the NTT's a + zb and
+// PWM's four accumulations, and one add-or-subtract unit per coefficient for
+// ADD / SUB / MSPLIT (instead of an adder and a subtractor each).
+//
 // Low power: every pipeline register is enabled only while its operation
 // runs, operands are forced to zero outside their issue clocks, the RAM is
 // read only in clocks that need the data.
@@ -84,12 +89,21 @@ module pqse_poly (
       w_of = w8[6:0];
     end
   endfunction
-  function [11:0] z_of(input [5:0] gs, input [2:0] pp, input inv);
+  function [6:0] zi_of(input [5:0] gs, input [2:0] pp, input inv);   // zeta index of group gs
     reg [7:0] blk, zi;
     begin
-      blk  = {2'b00, gs} >> pp;
-      zi   = inv ? ((8'd2 << (3'd6 - pp)) - 8'd1 - blk) : ((8'd1 << (3'd6 - pp)) + blk);
-      z_of = zeta(zi[6:0]);
+      blk   = {2'b00, gs} >> pp;
+      zi    = inv ? ((8'd2 << (3'd6 - pp)) - 8'd1 - blk) : ((8'd1 << (3'd6 - pp)) + blk);
+      zi_of = zi[6:0];
+    end
+  endfunction
+  // x + y (sb = 0) or x - y (sb = 1) mod q: one adder / subtractor and one correction
+  function [11:0] asq(input [11:0] x, input [11:0] y, input sb);
+    reg [12:0] s, t;
+    begin
+      s   = sb ? ({1'b0, x} - {1'b0, y}) : ({1'b0, x} + {1'b0, y});
+      t   = sb ? (s + 13'd3329) : (s - 13'd3329);
+      asq = sb ? (s[12] ? t[11:0] : s[11:0]) : ((s >= 13'd3329) ? t[11:0] : s[11:0]);
     end
   endfunction
 
@@ -99,6 +113,7 @@ module pqse_poly (
   // a delay line instead of three more permutation lookups
   reg  [5:0] gd1, gd2, gd3, gd4, gd5, gd6, gd7, gd8, gd9, gd10;
   wire [5:0] g_st  = gd2;                                       // group staged (tc even 2..128)
+  // (its zeta is read one clock earlier, from gd1, which becomes gd2)
   wire [5:0] g_w1  = gd9;                                       // group whose word w is written
   wire [5:0] g_w2  = gd10;                                      // group whose word w+2^p is written
   wire [6:0] wr_w  = w_of(g_rd, p);
@@ -119,6 +134,13 @@ module pqse_poly (
 
   pqse_mulred u_mul (.clk(clk), .en(m_en), .a(ma), .b(mb), .r(mr));
 
+  // ---- zeta ROM, registered read: NTT reads the staged group's zeta at odd tc
+  // (zr loads it at the next, even tc), PWM reads gamma's zeta in phase 1 ----
+  reg         zen;
+  reg  [6:0]  zidx;
+  reg  [11:0] zq;
+  always @(posedge clk) if (zen) zq <= zeta(zidx);
+
   wire        feed0 = is_ntt && tc[0]  && (tc >= 8'd3) && (tc <= 8'd129);
   wire        feed1 = is_ntt && !tc[0] && (tc >= 8'd4) && (tc <= 8'd130);
   wire [11:0] bf_oa = intt ? s5 : o_add;
@@ -134,12 +156,21 @@ module pqse_poly (
   pqse_modq24 u_r1 (.x(rnd[47:24]), .r(rq1));
 
   wire [6:0]  kcur  = shuf ? pq_val : cur[6:0];                       // word order: T[cur]
-  assign pq_idx = is_ntt ? {1'b0, tc[6:1]} : cur[6:0];
+  // the permutation lookup is registered (pqse_perm.v): it gets the index of
+  // the next clock (tc / cur as they will be then; 0 for the first)
   wire        cur_v = (cur < 8'd128);
   wire        prv_v = (cur >= 8'd1) && (cur <= 8'd128);
   wire        pp_v  = (cur >= 8'd2) && (cur <= 8'd129);
-  wire [11:0] gz    = zeta({1'b1, kh1[6:1]});
-  wire [11:0] gam   = kh1[0] ? negq(gz) : gz;
+  wire [11:0] gam   = kh1[0] ? negq(zq) : zq;                     // zq: zeta({1, kh1[6:1]}) (phase 1)
+
+  // shared "+ product" adder: NTT a + z b, PWM c0 + m1, c1 + m3, + m4, + m5
+  wire [11:0] msel  = is_ntt ? ad4 : (ph == 3'd0) ? e1 : (ph == 3'd1) ? cq[11:0] :
+                      (ph == 3'd3) ? cq[23:12] : o1;
+  wire [11:0] madd  = addq(msel, mr);
+  // ADD / SUB: c +/- a (a = rdata), MSPLIT: c - R, per coefficient
+  wire        as_sb = (op == P_SUB) || (op == P_MSPLIT);
+  wire [23:0] as_y  = (op == P_MSPLIT) ? {R1, R0} : rdata;
+  wire [23:0] asr   = {asq(cq[23:12], as_y[23:12], as_sb), asq(cq[11:0], as_y[11:0], as_sb)};
 
   wire [2:0] ph_last = (op == P_PWM) ? 3'd5 : (op == P_MSPLIT) ? 3'd3 :
                        ((op == P_ADD) || (op == P_SUB)) ? 3'd1 : 3'd0;
@@ -150,6 +181,9 @@ module pqse_poly (
   wire       lay_end  = busy_r && is_ntt && (tc == 8'd136) && !ntt_last;
   wire       hold     = lay_end && shuf && !pq_ready;
   assign     pq_next  = lay_end && shuf && pq_ready;
+  wire [7:0] tc_n     = hold ? tc : (tc == 8'd136) ? 8'd0 : tc + 8'd1;
+  wire [7:0] cur_n    = (ph == ph_last) ? cur + 8'd1 : cur;
+  assign     pq_idx   = (start || !busy_r) ? 7'd0 : is_ntt ? {1'b0, tc_n[6:1]} : cur_n[6:0];
 
   // ---- combinational: RAM ports, multiplier inputs, butterfly inputs --------------------------
   always @* begin
@@ -158,6 +192,7 @@ module pqse_poly (
     ma = 12'd0; mb = 12'd0;
     fa = 12'd0; fb = 12'd0; fz = 12'd0;
     rnd_take = 1'b0;                     // (MSPLIT masks below; orders come from pqse_perm.v)
+    zen = 1'b0; zidx = 7'd0;
     if (busy_r) begin
       case (op)
         P_NTT, P_INTT: begin
@@ -165,6 +200,7 @@ module pqse_poly (
             re    = 1'b1;
             raddr = {cs, tc[0] ? wr_w2 : wr_w};
           end
+          if (tc[0] && tc <= 8'd127) begin zen = 1'b1; zidx = zi_of(gd1, p, intt); end
           if (feed0) begin fa = a0r; fb = b0r; fz = zr; end
           if (feed1) begin fa = a1r; fb = b1r; fz = zr; end
           if (intt) begin ma = z1; mb = d1; end
@@ -188,10 +224,13 @@ module pqse_poly (
               if (pp_v) begin
                 we    = 1'b1;
                 waddr = {cs, kh2};
-                wdata = {o2, addq(e1, mr)};                               // m5 out
+                wdata = {o2, madd};                                       // e1 + m5 out
               end
             end
-            3'd1: if (cur_v) begin re = 1'b1; raddr = {bs_, kcur}; end
+            3'd1: begin
+              if (cur_v) begin re = 1'b1; raddr = {bs_, kcur}; end
+              if (prv_v) begin zen = 1'b1; zidx = {1'b1, kh1[6:1]}; end  // gamma, for m5
+            end
             3'd2: begin
               if (cur_v && acc) begin re = 1'b1; raddr = {cs, kcur}; end
               if (prv_v) begin ma = mr; mb = gam; end                     // m5 = (a1*b1)*gamma
@@ -214,7 +253,7 @@ module pqse_poly (
           if (ph == 3'd2 && cur_v) begin
             we    = 1'b1;
             waddr = {cs, kcur};
-            wdata = {subq(cq[23:12], R1), subq(cq[11:0], R0)};
+            wdata = asr;                                                  // c - R
           end
         end
         P_ZERO: if (cur_v) begin we = 1'b1; waddr = {cs, cur[6:0]}; wdata = 24'd0; end
@@ -293,11 +332,11 @@ module pqse_poly (
       if (!tc[0] && tc >= 8'd2 && tc <= 8'd128) begin
         a0r <= wq[11:0];     a1r <= wq[23:12];
         b0r <= rdata[11:0];  b1r <= rdata[23:12];
-        zr  <= z_of(g_st, p, intt);
+        zr  <= zq;                                       // zeta of g_st (read last clock)
       end
       // NTT (CT): a delayed to the product z*b
       ad1 <= fa; ad2 <= ad1; ad3 <= ad2; ad4 <= ad3;
-      o_add <= addq(ad4, mr);
+      o_add <= madd;
       o_sub <= subq(ad4, mr);
       // INTT (GS): (a+b)/2 and (b-a)/2, product z*(b-a)/2 one clock later
       s1 <= halfq(addq(fa, fb));
@@ -315,22 +354,21 @@ module pqse_poly (
       case (ph)
         3'd1: begin
           if (cur_v) aq <= rdata;
-          if (prv_v) e1 <= addq(cq[11:0], mr);           // c0 + m1
+          if (prv_v) e1 <= madd;                         // c0 + m1
         end
         3'd2: if (cur_v) bq <= rdata;
         3'd3: begin
-          if (prv_v) o1 <= addq(cq[23:12], mr);          // c1 + m3 (previous pair's cq)
+          if (prv_v) o1 <= madd;                         // c1 + m3 (previous pair's cq)
           if (cur_v) cq <= acc ? rdata : 24'd0;
         end
-        3'd4: if (prv_v) o2 <= addq(o1, mr);             // + m4
+        3'd4: if (prv_v) o2 <= madd;                     // + m4
         default: ;
       endcase
     end
     if (busy_r && (op == P_ADD || op == P_SUB)) begin
       if (ph == 3'd1 && cur_v) cq <= rdata;              // c word
       if (ph == 3'd0 && prv_v)                          // rdata = a word of the previous item
-        rsh <= (op == P_SUB) ? {subq(cq[23:12], rdata[23:12]), subq(cq[11:0], rdata[11:0])}
-                             : {addq(cq[23:12], rdata[23:12]), addq(cq[11:0], rdata[11:0])};
+        rsh <= asr;
     end
     if (busy_r && op == P_MSPLIT) begin
       if (ph == 3'd1 && cur_v) begin

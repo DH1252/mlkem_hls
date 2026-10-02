@@ -160,7 +160,6 @@ module pqse_mcomp (
   endfunction
 
   // the word to process next, and where its ciphertext bits sit
-  assign      pq_idx = w;
   wire [6:0]  wsh  = shf ? pq_val : w;                  // T[w]: uniformly random order
   // bit offset of coefficient 2 wsh: 2 wsh d, d = 1, 4 or 10 (shifts and one add)
   wire [11:0] offc = (dd == 4'd10) ? ({1'b0, wsh, 4'd0} + {3'd0, wsh, 2'd0}) :
@@ -189,6 +188,10 @@ module pqse_mcomp (
   // the second ciphertext word is touched only if the word's 2d bits cross into it
   wire [5:0] wend = {2'd0, sub} + {1'b0, dd, 1'b0};
   wire       two  = (wend > 6'd16);
+  // the permutation lookup is registered (pqse_perm.v): it gets the next
+  // clock's word (w + 1 in the clock that advances w, 0 at the start)
+  wire       wadv   = ((st == S_WB0) && !(md == 2'd2 && two)) || (st == S_WB1);
+  assign     pq_idx = (st == S_IDLE) ? 7'd0 : wadv ? (w + 7'd1) : w;
 
   always @* begin
     re = 1'b0; raddr = 11'd0;

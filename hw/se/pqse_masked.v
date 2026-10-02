@@ -250,6 +250,7 @@ module pqse_masked (
   wire [6:0]  mw = mshf ? pq_val : cw[6:0];
   assign      pq_idx = mc_busy ? mc_pq : cw[6:0];
   reg         mreq;
+  reg         pqok;       // T[cw] is on pq_val (the lookup is registered: one clock after cw changes)
   // stage 1 (domain separated)
   reg  [11:0] T, Rd, vd;
   reg         b1d;
@@ -352,7 +353,7 @@ module pqse_masked (
     // seed source, one seed word per word:
     //   MU   bits 2 mw, 2 mw + 1 of m: entry e, word mw / 8
     //   CBD  bits 8 mw .. 8 mw + 7 of the PRF output: word mw / 2 of entries e .. e+3
-    if (b_act && b_sd && !lv && !mreq && cw < 8'd128) begin
+    if (b_act && b_sd && !lv && !mreq && pqok && cw < 8'd128) begin
       sre    = 1'b1;
       sraddr = b_m1 ? {e, mw[6:3]} : {e + {2'b00, mw[6:5]}, mw[4:1]};
     end
@@ -435,13 +436,14 @@ module pqse_masked (
       end else if (start && (i_op == M_MU || i_op == M_CBD)) begin
         b_act <= 1'b1; b_sd <= 1'b1; b_m1 <= (i_op == M_MU); lv <= 1'b0; bi <= 4'd0;
         cbi <= 2'd0; chi <= 1'b0; cw <= 8'd0; s1v <= 1'b0; mreq <= 1'b0;
-        mshf <= shuf;
+        mshf <= shuf; pqok <= 1'b0;
       end else if (b_act) begin
         // word input
         if (!b_sd && s_valid && s_ready) begin L0 <= s_v0; L1 <= s_v1; lv <= 1'b1; bi <= 4'd0; end
         if (b_sd) begin
           // one seed word per word, in the order mw: MU 2 bits of m, CBD 8 PRF bits
-          if (!lv && !mreq && cw < 8'd128) mreq <= 1'b1;
+          if (!lv && !mreq && pqok && cw < 8'd128) mreq <= 1'b1;
+          pqok <= !(b_issue && lastc && chi);              // cw advances this clock
           if (mreq) begin
             L0 <= srd0; L1 <= srd1; lv <= 1'b1; mreq <= 1'b0;
             bi <= b_m1 ? {mw[2:0], 1'b0} : {mw[0], 3'b000};

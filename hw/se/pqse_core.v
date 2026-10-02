@@ -192,8 +192,9 @@ module pqse_core #(
   wire        t_en     = (q == Q_RSD) | t_en_sp | t_en_io;
   wire        pr_reseed = (q == Q_RSD) && (rw == 2'd3);
   // dummy clocks before an engine start; not while pqse_perm draws an NTT layer
-  // order in the background (it takes a word every 2 clocks: no room for a third
-  // taker, and that instruction is shuffled per layer anyway)
+  // order in the background (it takes a word every 3 clocks, and a word is fully
+  // fresh only 2 clocks after a take: no room for another taker; that
+  // instruction is shuffled per layer anyway)
   wire        dly_ok   = hide_en && is_eng && pg_ready;
   wire        dly_take = (q == Q_DLY) && dly_ok && (dly == 4'd0);
   wire        sp_rt, p_rt, io_rt, m_rt, pf_rt, m_hi;
@@ -203,8 +204,12 @@ module pqse_core #(
 
   pqse_trng u_trng (.clk(clk), .rst(rst), .en(t_en), .take(t_take),
                     .word(t_word), .valid(t_valid), .fail(trng_fail), .ok(trng_ok));
+  // the PRNG loads its key and IV from the top 64 bits of rseed, 64 per load
+  // clock (pr_shift: the next 64 move up, zeros behind them)
+  wire        pr_shift;
   pqse_prng u_prng (.clk(clk), .rst(rst), .masked_en(MASKED != 0), .reseed(pr_reseed),
-                    .seed(rseed[159:0]), .busy(pr_busy), .take(r_take), .take_hi(r_hi), .rnd(rnd));
+                    .seed(rseed[191:128]), .seed_shift(pr_shift),
+                    .busy(pr_busy), .take(r_take), .take_hi(r_hi), .rnd(rnd));
   pqse_perm u_perm (.clk(clk), .rst(rst), .start(pg_start), .n64(pg_n64),
                     .next(pg_next), .busy(pg_busy), .ready(pg_ready),
                     .rnd(rnd), .rnd_take(pg_rt), .idx(pq_idx), .val(pq_val));
@@ -388,6 +393,7 @@ module pqse_core #(
         endcase
       end
       if (io_bad | m_bad) bad <= 1'b1;
+      if (pr_shift) rseed <= {rseed[127:0], 64'd0};
     end
   end
 

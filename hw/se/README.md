@@ -101,7 +101,7 @@ change are re-checked with `make se-probe` and the TVLA flow.
 | 7 | `pqse_masked`, `pqse_mcomp` | 16-bit registers in the SEL / tag reader / B2A input / compression windows (a 32-bit ciphertext window instead of 128 bits; the gadgets themselves are bit-serial and unchanged, so the probing model is the same) | done, untested |
 | 4b | PUF cells | column gate nets instead of a per-cell excite flip-flop (-960 FF) | done, untested (board only) |
 | 4c | masks mod q | `pqse_modq24` = floor(x q / 2^24) by three adds instead of Barrett with two multipliers (3 instances: about -6..-9 of the 9K's 20 multipliers) | done, untested |
-| 8 | `pqse_prng`, `pqse_poly` | 16 random bits per clock; shared adders | planned |
+| 8 | `pqse_prng`, `pqse_poly`, `pqse_perm` | PRNG: key and IV enter through Trivium's three insertion points in 4 load clocks (the standard initial state, no 288-bit load multiplexer), output not gated (32 rounds per clock kept: the B2A takes 24 fresh bits every clock). Poly: one registered zeta ROM shared by NTT and PWM, one `+ product` adder shared by the NTT and PWM's four sums, one add-or-subtract unit per coefficient for ADD / SUB / MSPLIT. Perm: the 128 x 7 table in block RAM (two copies, registered reads, 3 clocks per element; an NTT layer waits ~55 clocks for the next layer's order) | done, untested |
 
 The Keccak permutation is the main cost in time: ~50 permutations per KEM
 operation make it ~1 M clocks (~40 ms at 27 MHz, ~75 ms at 13.56 MHz).
