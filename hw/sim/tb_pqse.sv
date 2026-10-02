@@ -36,15 +36,17 @@
 //      never readable, SEAL / OPEN with the internal session key
 //  13  a double-bit fault in m' (the RAM parity cannot see it) is caught by
 //      the second, independent decoding; third fault -> KILLED
-//  14  power cycle (lifecycle and fault counter are volatile in this model),
-//      then a RAM parity error -> R_FAULT, one fault counted
+//  14  power cycle: KILLED and the fault count persist (pqse_nvm), commands
+//      still refused; then a new chip (the NVM model cleared): a RAM parity
+//      error -> R_FAULT, one fault counted, and the count survives a reset
 //  15  SPI (second instance): ID and CONFIG; tamper -> zeroized, KILLED,
 //      commands refused
 //  16  tamper / fault injection (after another power cycle): a bit flipped in
 //      the Keccak state RAM during a permutation and one in a theta column-
 //      parity register both abort KeyGen with R_FAULT (Keccak parity); a bit
 //      flipped in the lifecycle register (laser / glitch on the security
-//      state) is caught by its complemented shadow: KILLED, tampered, wiped
+//      state) is caught by its complemented shadow: KILLED, tampered, wiped -
+//      and still KILLED and tampered after a power cycle
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -164,6 +166,12 @@ module tb_pqse;
   task automatic run(input int c, input bit inj, output int res, output int cyc);
     start(c, inj);
     finish(res, cyc);
+  endtask
+  // a new chip (simulation only): the persistent store blank again
+  task automatic nvm_clear();
+    dut.u_sys.u_host.u_nvm.fa = '0;
+    dut.u_sys.u_host.u_nvm.fb = '0;
+    dut.u_sys.u_host.u_nvm.pc = '0;
   endtask
   task automatic wait_idle();
     logic [31:0] st;
@@ -609,8 +617,20 @@ module tb_pqse;
            int'(res != R_FAULT) + int'(st[7:6] != 2'd3) + int'(st[18:17] != 2'd3) +
            int'(st[2] != 1'b0) + int'(res2 != R_KILLED));
 
-    // 14 power cycle, RAM parity ----------------------------------------------------------------
-    // (the lifecycle and fault counter are volatile in this model; a chip keeps them in fuses)
+    // 14 persistence, power cycle, RAM parity -----------------------------------------------------
+    // KILLED (three faults) survives a power cycle: lifecycle and fault count come
+    // back from the persistent store (pqse_nvm)
+    reset = 1'b1;
+    repeat (5) @(negedge clk);
+    reset = 1'b0;
+    repeat (4) @(negedge clk);
+    wait_idle();
+    rd(STATUS, st);
+    run(KEYGEN, 0, res, cyc);
+    report("persistence: after a power cycle still KILLED, 3 faults, commands refused (result 7)",
+           int'(st[7:6] != 2'd3) + int'(st[18:17] != 2'd3) + int'(res != R_KILLED));
+    // a new chip: the store cleared (simulation only), then a power cycle
+    nvm_clear();
     reset = 1'b1;
     repeat (5) @(negedge clk);
     reset = 1'b0;
@@ -625,12 +645,23 @@ module tb_pqse;
     put(B_XIN, de0_c, 0, CT);
     run(DECAPS, 0, res, cyc);
     rd(STATUS, st);
-    report("after a power cycle: RAM parity error -> R_FAULT, keys wiped, 1 fault counted",
+    report("new chip: RAM parity error -> R_FAULT, keys wiped, 1 fault counted",
            bad + int'(res != R_FAULT) + int'(st[2] != 1'b0) + int'(st[18:17] != 2'd1) +
            int'(st[7:6] != 2'd0));
+    // the count was programmed before the next command could start (write-ahead):
+    // a power cycle right away keeps it
+    reset = 1'b1;
+    repeat (5) @(negedge clk);
+    reset = 1'b0;
+    repeat (4) @(negedge clk);
+    wait_idle();
+    rd(STATUS, st);
+    report("persistence: the fault count survives a power cycle (1 fault, lifecycle TEST)",
+           int'(st[18:17] != 2'd1) + int'(st[7:6] != 2'd0));
 
     // 16 tamper / fault injection on the security state and the Keccak state ------------------
-    // power cycle: fault counter 0, lifecycle TEST
+    // a new chip: fault counter 0, lifecycle TEST
+    nvm_clear();
     reset = 1'b1;
     repeat (5) @(negedge clk);
     reset = 1'b0;
@@ -671,6 +702,24 @@ module tb_pqse;
     report("tamper: a lifecycle bit flipped -> shadow mismatch: KILLED, tampered, keys wiped, commands refused",
            int'(st[5] != 1'b1) + int'(st[2] != 1'b0) + int'(r != 3) + int'(res != R_KILLED) +
            int'(st[18:17] != 2'd3));
+    reset = 1'b1;
+    repeat (5) @(negedge clk);
+    reset = 1'b0;
+    repeat (4) @(negedge clk);
+    wait_idle();
+    rd(STATUS, st);
+    report("persistence: tampered and KILLED survive a power cycle",
+           int'(st[5] != 1'b1) + int'(st[7:6] != 2'd3));
+    // (d) a rolled-back register: the lifecycle forced to TEST below the stored
+    // KILLED -> the store is ahead of the register -> tamper response again
+    @(negedge clk);
+    dut.u_sys.u_host.lc  = 2'd0;
+    dut.u_sys.u_host.lcn = 2'd3;                 // shadow forced too: only the store disagrees
+    repeat (4) @(negedge clk);
+    wait_idle();
+    rd(LIFECYCLE, r);
+    report("tamper: lifecycle register and shadow rolled back below the store -> KILLED again",
+           int'(r != 3));
 
     // 15 SPI + tamper (second instance) ----------------------------------------------------------
     // consecutive reads of different registers and a write/read of both CONFIG

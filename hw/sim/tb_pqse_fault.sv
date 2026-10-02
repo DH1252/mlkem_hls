@@ -2,7 +2,8 @@
 // tb_pqse_fault.sv - random fault-injection campaign on the secure element
 // (make sim-se-fault): how many single-bit faults reach the outside unnoticed.
 //
-// Every run starts from a power cycle, so runs are independent:
+// Every run is a new chip (the persistent store cleared, then a power cycle),
+// so runs are independent and the three-strike kill never carries over:
 //   +op=decaps (default)  import the NIST dk (de0), masked Decaps of the NIST
 //                         ciphertext; expected K = de0_k
 //   +op=keygen            masked KeyGen with the injected NIST seeds d, z;
@@ -76,7 +77,7 @@ module tb_pqse_fault;
   endtask
 
   // ---- fault targets ---------------------------------------------------------------------
-  localparam int NT = 34;
+  localparam int NT = 37;
   string tname[NT] = '{
     "core.pc", "core.pcn", "core.ins_r", "core.q",
     "keccak.ks", "keccak.rnd_i", "keccak.cx", "keccak.T0", "keccak.T1",
@@ -85,7 +86,8 @@ module tb_pqse_fault;
     "masked.ok0", "masked.ok1", "masked.okb0", "masked.L0", "masked.acc0", "masked.wr0",
     "mcomp.X0w", "mcomp.A0", "mcomp.C0",
     "poly.wq", "poly.aq", "io.um0",
-    "pmem0", "pmem1", "seed0", "seed1"};
+    "pmem0", "pmem1", "seed0", "seed1",
+    "host.lc", "host.fcnt", "nvm.fa"};
 
 `define FLIP(sig) begin k = b % $bits(sig); sig[k] = ~sig[k]; end
 `define FLIP1(sig) begin sig = ~sig; end
@@ -127,14 +129,20 @@ module tb_pqse_fault;
       31: `FLIPM(dut.u_sys.u_core.u_pmem1.g_def.mem, 1024)
       32: `FLIPM(dut.u_sys.u_core.u_seed0.g_mlab.mem, 64)
       33: `FLIPM(dut.u_sys.u_core.u_seed1.g_mlab.mem, 64)
+      34: `FLIP(dut.u_sys.u_host.lc)
+      35: `FLIP(dut.u_sys.u_host.fcnt)
+      36: `FLIP(dut.u_sys.u_host.u_nvm.fa)
       default: ;
     endcase
   endtask
 
-  // power cycle, then the command's inputs; the command is started by the caller
+  // new chip + power cycle, then the command's inputs; the caller starts it
   task automatic prepare(input bit kg);
     int res;
     logic [31:0] st;
+    dut.u_sys.u_host.u_nvm.fa = '0;            // persistent store blank (simulation only)
+    dut.u_sys.u_host.u_nvm.fb = '0;
+    dut.u_sys.u_host.u_nvm.pc = '0;
     reset = 1'b1;
     repeat (5) @(negedge clk);
     reset = 1'b0;

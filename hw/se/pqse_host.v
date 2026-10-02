@@ -45,8 +45,14 @@
 //     a mismatch (a bit flipped by a laser, a glitch or an upset) is handled
 //     like the tamper input, and also sets tampered and saturates the counter
 //
-// The lifecycle and fault counter are volatile here (reset = LC_RESET, 0); a
-// chip keeps them in one-time-programmable fuses / NVM.
+// Persistent security state (pqse_nvm, below): the lifecycle, the fault counter
+// and the tampered flag survive a reset / power cycle. At reset the registers
+// load from it (lifecycle = the later of LC_RESET and the stored one); every
+// change is mirrored into it, and after a fault, a kill or a tamper event no
+// command is accepted until the new state is programmed (write-ahead: cutting
+// the power after a detected fault does not reset the three-strike counter).
+// Stored ahead of the registers (they were forced back: a fault, a rolled-back
+// register) is handled like the tamper input.
 // -----------------------------------------------------------------------------
 module pqse_host #(
   parameter [1:0] LC_RESET = 2'd0
@@ -105,6 +111,28 @@ module pqse_host #(
   reg        zrun;           // internal ZEROIZE running
   reg  [1:0] zkind;          // why: power-on, fault, tamper / kill
 
+  // ---- persistent security state ----
+  // bits: [0] PERSO reached [1] USER reached [2] KILLED [3..5] 1st..3rd fault
+  // [6] tampered; thermometer codes (only ever set, like OTP fuses), stored
+  // twice and OR-combined (reading a programmed bit as 0 takes two faults)
+  wire [6:0] nv_q;
+  wire       nv_busy;
+  wire [1:0] lc_nv = nv_q[2] ? 2'd3 : nv_q[1] ? 2'd2 : nv_q[0] ? 2'd1 : 2'd0;
+  wire [1:0] fc_nv = nv_q[5] ? 2'd3 : nv_q[4] ? 2'd2 : nv_q[3] ? 2'd1 : 2'd0;
+  wire       tp_nv = nv_q[6];
+  wire [1:0] lc_rs = (lc_nv > LC_RESET) ? lc_nv : LC_RESET;     // lifecycle at reset
+  wire [6:0] nv_want = {tampered, fcnt == 2'd3, fcnt >= 2'd2, fcnt >= 2'd1,
+                        lc == LC_KILLED, lc >= LC_USER, lc >= LC_PERSO};
+  wire [6:0] nv_miss = nv_want & ~nv_q;                         // to be programmed
+  // fault / kill / tamper bits must be stored before the next command (a
+  // lifecycle advance is programmed in the background: it only lowers rights)
+  wire       nv_crit = |nv_miss[6:2];
+  // stored state ahead of the registers: they were forced back
+  wire       nv_bad  = (lc_nv > lc) | (fc_nv > fcnt) | (tp_nv & !tampered);
+  pqse_nvm #(.NB(7)) u_nvm (
+    .clk(clk), .prog(!rst && (|nv_miss) && !nv_busy), .pmask(nv_want),
+    .busy(nv_busy), .q(nv_q));
+
   assign irq = done_s;
 
   // ---- buffer windows (lane = word >> 1) ----
@@ -126,7 +154,7 @@ module pqse_host #(
                            in_win(ln, B_INJH, 9'd4))) ||
                 (test  && (in_win(ln, B_INJD, 9'd4) || in_win(ln, B_INJM, 9'd4)));
   wire is_buf = !bus_addr[10] && !bus_addr[11];
-  wire idle   = !core_busy && !cmd_start && !zpend && !zrun;
+  wire idle   = !core_busy && !cmd_start && !zpend && !zrun && !nv_crit;
 
   assign h_we    = bus_we && is_buf && can_wr && idle && (lc != LC_KILLED);
   assign h_re    = bus_re && is_buf && can_rd && idle;
@@ -146,17 +174,17 @@ module pqse_host #(
 
   always @(posedge clk) begin
     if (rst) begin
-      begin lc        <= LC_RESET; lcn <= ~(LC_RESET); end
+      begin lc        <= lc_rs; lcn <= ~(lc_rs); end
       done_s    <= 1'b0;
       res       <= 8'd0;
-      begin tampered  <= 1'b0; tampn <= ~(1'b0); end
+      begin tampered  <= tp_nv; tampn <= ~(tp_nv); end
       tsync     <= 3'd0;
       cmd_start <= 1'b0;
       core_rst  <= 1'b1;
       hide_en   <= 1'b1;
       cmd       <= 8'd0;
       cmd_inj   <= 1'b0;
-      begin fcnt      <= 2'd0; fcntn <= ~(2'd0); end
+      begin fcnt      <= fc_nv; fcntn <= ~(fc_nv); end
       zpend     <= 1'b1;            // power-on wipe
       zrun      <= 1'b0;
       zkind     <= Z_POR;
@@ -170,11 +198,11 @@ module pqse_host #(
         begin lc <= bus_wdata[1:0]; lcn <= ~(bus_wdata[1:0]); end
       if (bus_we && bus_addr == 12'h406) hide_en <= bus_wdata[0];
       // ---- events ----
-      if ((tsync[2] && !tampered) || kill_wr || sh_bad) begin
+      if ((tsync[2] && !tampered) || kill_wr || sh_bad || nv_bad) begin
         // tamper / kill / corrupted security state: abort whatever runs, KILLED,
         // then wipe (a corrupted state also counts as tampered, faults saturated:
         // both copies are rewritten consistently, so this fires once)
-        if (sh_bad) begin
+        if (sh_bad || nv_bad) begin
           begin tampered <= 1'b1; tampn <= ~(1'b1); end
           begin fcnt <= 2'd3; fcntn <= ~(2'd3); end
         end
@@ -233,7 +261,7 @@ module pqse_host #(
   end
 
   // ---- reads (latency 1) ----
-  wire busy_s = core_busy | cmd_start | zpend | zrun;
+  wire busy_s = core_busy | cmd_start | zpend | zrun | nv_crit;
   always @(posedge clk) begin
     rd_buf <= bus_re && is_buf;
     rd_ok  <= h_re;
@@ -249,4 +277,47 @@ module pqse_host #(
     endcase
   end
   always @* bus_rdata = rd_buf ? (rd_ok ? h_rdata : 32'd0) : csr_q;
+endmodule
+
+// -----------------------------------------------------------------------------
+// pqse_nvm - persistent storage of the security state: NB bits that can only be
+// set (OTP fuse semantics), each stored twice and read as the OR of the copies.
+// prog sets the bits of pmask (both copies); busy while programming (PROG_CLK
+// clocks, the programming time of a fuse / NVM row); q shows the stored bits.
+// Not reset by rst: the contents survive a reset.
+//
+// This is the behavioural model (simulation; on the FPGA registers that keep
+// their value through a reset but not a power-off - a Gowin GW1NR / GW2AR could
+// use its user flash). A chip replaces this module, same ports, with the
+// wrapper of the PDK's OTP / eFuse macro (program pulses per bit, sense at
+// power-up before rst is released).
+// -----------------------------------------------------------------------------
+module pqse_nvm #(
+  parameter       NB       = 7,
+  parameter [7:0] PROG_CLK = 8'd32
+) (
+  input  wire          clk,
+  input  wire          prog,
+  input  wire [NB-1:0] pmask,
+  output wire          busy,
+  output wire [NB-1:0] q
+);
+  reg [NB-1:0] fa = {NB{1'b0}};       // copy A
+  reg [NB-1:0] fb = {NB{1'b0}};       // copy B
+  reg [NB-1:0] pm = {NB{1'b0}};
+  reg [7:0]    pc = 8'd0;             // programming clocks left
+  assign busy = (pc != 8'd0);
+  assign q    = fa | fb;
+  always @(posedge clk) begin
+    if (pc != 8'd0) begin
+      pc <= pc - 8'd1;
+      if (pc == 8'd1) begin           // the fuses blow at the end of the pulse
+        fa <= fa | pm;
+        fb <= fb | pm;
+      end
+    end else if (prog) begin
+      pm <= pmask;
+      pc <= PROG_CLK;
+    end
+  end
 endmodule
