@@ -115,6 +115,17 @@ set fh  [open $sdc w]
 set per [format %.3f [expr {1000.0 / $FREQ}]]
 set hp  [format %.3f [expr {500.0 / $FREQ}]]
 puts $fh "create_clock -name clk -period $per -waveform {0 $hp} \[get_ports {clk}\]"
+# butterfly PUF: the 32 column gate nets drive the latch gate pins (clock pins
+# to the timing analyser, TA1132 "determined to be a clock but was not
+# created"). Declared as one clock, asynchronous to clk: the cells are
+# deliberately untimed (a gate is set one read ahead, the response is sampled
+# through a 2-flop synchronizer after SETTLE clocks), so no path between the
+# two is analysed.
+# (pqse_puf_raw's register pgate[31:0]; no other net starts with "pgate")
+if {$PUF eq "bfly" && $TOP eq "pqse_gowin_top"} {
+  puts $fh "create_clock -name puf_gate -period 1000 -waveform {0 500} \[get_nets {u_top/u_sys/u_core/u_puf/u_raw/pgate*}\]"
+  puts $fh "set_clock_groups -asynchronous -group \[get_clocks {clk}\] -group \[get_clocks {puf_gate}\]"
+}
 close $fh
 
 # ---- project ----

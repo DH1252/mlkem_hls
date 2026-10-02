@@ -7,9 +7,13 @@
 #       vectorless: every net toggles with probability ACT per clock (default
 #       0.1, a common first guess for a datapath; try 0.05 and 0.2 to see the
 #       range)
+#   make se-power-vcd SKY130_LIB=... [GL_CMD=1] [GL_START=20000] [GL_LEN=2000]
+#       activity from a gate-level simulation of the mapped netlist (Verilator,
+#       cell models generated from the Liberty file, hw/sim/tb_pqse_gate.sv):
+#       GL_LEN clocks of command GL_CMD, from GL_START clocks into it
 #   make se-power SKY130_LIB=... VCD=<dump.vcd> SCOPE=<tb>/<dut instance>
-#       activity from a simulation of the mapped netlist (Icarus / Verilator
-#       with the sky130_fd_sc_hd cell models) running e.g. one Decaps
+#       activity from any other VCD of the same netlist (the net names must
+#       match it)
 #
 # Environment: SKY130_LIB, NETLIST, ACT, VCD, SCOPE, PERIOD_NS (default 20)
 #
@@ -45,6 +49,8 @@ set_load 0.01 [all_outputs]
 if {$vcd ne ""} {
   puts "activity: $vcd (scope $scope)"
   read_vcd -scope $scope $vcd
+  # how many nets / pins the VCD annotated (0: SCOPE does not match the VCD)
+  catch {report_activity_annotation}
 } else {
   puts "activity: vectorless, $act toggles per clock on every net"
   set_power_activity -global -activity $act -duty 0.5
