@@ -8,7 +8,8 @@ Counts the mapped Gowin cells in the last "Printing statistics" block of the log
   LUT4 equivalents = LUT1..LUT4 + ALU (each ALU uses one LUT)
                      + 4 per RAM16SDPx (shadow SRAM: one 4-LUT slice group, an
                        approximation)
-  flip-flops       = every DFF* cell
+  flip-flops       = every DFF* cell + every DL / DLC / DLP ... latch
+                     (the butterfly PUF cells; not the DLL / DLLDLY clock cells)
   BSRAM blocks     = SDPB / SDPX9B / DPB / DPX9B / SP / SPX9 / pROM / pROMX9
   multipliers      = MULT* (18 x 18 equivalents, approximately)
 --modules: the hierarchical statistics (one block per module definition, before
@@ -45,7 +46,7 @@ def cells(block):
 def usage(c):
     lut = sum(n for k, n in c.items() if re.fullmatch(r"LUT[1-4]", k)) + c.get("ALU", 0) + \
         4 * sum(n for k, n in c.items() if k.startswith("RAM16SDP"))
-    ff = sum(n for k, n in c.items() if k.startswith("DFF"))
+    ff = sum(n for k, n in c.items() if k.startswith("DFF") or re.fullmatch(r"DLN?[CP]?E?", k))
     bs = sum(n for k, n in c.items() if k in BSRAM)
     mu = sum(n for k, n in c.items() if k.startswith("MULT"))
     return {"LUT4": lut, "FF": ff, "BSRAM": bs, "MULT": mu}

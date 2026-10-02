@@ -20,7 +20,7 @@
 #                  transitions) of the masked gadgets (also run by sim-se)
 #   make se-area   Yosys gate count of the secure element (MASKED=0/1)
 #   make se-power SKY130_LIB=...  SKY130 power + timing (Yosys + OpenSTA)
-#   make se-gowin [PUF=0] [MASKED=0]  fit on the Tang Nano 20K (GW2AR-18)
+#   make se-gowin [PUF=0|bfly] [MASKED=0]  fit on the Tang Nano 20K (GW2AR-18)
 #   make ip        package the Platform Designer component (quartus/ip)
 #   make sw-emu    build + run the ARM program against a software model
 #   make sw-arm    cross-compile the ARM program for the DE10-Nano
@@ -238,8 +238,10 @@ se-area: | $(BUILD)
 # Fit on the Tang Nano 20K (Gowin GW2AR-18): Yosys synth_gowin (hierarchical,
 # so the report also lists the largest modules), then the LUT / flip-flop /
 # BSRAM / multiplier counts against the device. PUF=1 (default) includes the
-# SRAM-cell latch PUF array (960 cells, as in the FPGA build); PUF=0 synthesizes
-# the simulation PUF model instead. Newer Yosys: GOWIN_OPTS="-family gw2a"
+# SRAM-cell latch PUF array (960 cells, as in the FPGA build); PUF=bfly builds the
+# same array from butterfly cells (two latch-mode flip-flops per bit, no LUTs:
+# ~1,920 LUTs move to ~1,920 flip-flops); PUF=0 synthesizes the simulation PUF
+# model instead. Newer Yosys: GOWIN_OPTS="-family gw2a"
 # selects the GW2A family (the default is GW1N; the cell counts are nearly the same).
 PUF ?= 1
 GOWIN_OPTS ?=
@@ -247,7 +249,7 @@ GW := $(BUILD)/segowin/m$(MASKED)_p$(PUF)
 se-gowin: | $(BUILD)
 	mkdir -p $(BUILD)/segowin
 	yosys -q -l $(GW).log -p "read_verilog -Ihw/se \
-	    -DPQSE_LUTRAM_1R $(if $(filter 1,$(PUF)),-DPQSE_PUF_LATCH) $(SE_SRC); \
+	    -DPQSE_LUTRAM_1R $(if $(filter 1,$(PUF)),-DPQSE_PUF_LATCH)$(if $(filter bfly,$(PUF)),-DPQSE_PUF_BFLY) $(SE_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; synth_gowin -top pqse_top -noflatten $(GOWIN_OPTS); \
 	    tee -q -o $(GW)_modules.txt stat; flatten; stat" 2>&1 \
 	    | { grep -v -E '^(Warning: found logic loop|    cell .*(u_c|g_cell)|      [AB]\[0\] --> Y)' || true; }
