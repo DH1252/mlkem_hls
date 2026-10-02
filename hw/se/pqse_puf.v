@@ -16,7 +16,21 @@
 //                                   whose block RAMs are zeroed by configuration.
 //                                   Every cell is in exactly one response bit, so
 //                                   the bits are independent.
-//                   PQSE_PUF_SRAM   a dedicated SRAM macro (32 x 32) that nothing
+//                   PQSE_PUF_BFLY   the same array and read schedule, but every cell
+//                                   is a butterfly cell (pqse_bflycell): two
+//                                   transparent latches in the logic cells'
+//                                   flip-flops, cross-coupled through their D
+//                                   inputs, one with an asynchronous clear, the
+//                                   other with an asynchronous preset. Exciting
+//                                   forces the pair to 0/1, which the loop cannot
+//                                   hold; on release it falls to 0/0 or 1/1 as the
+//                                   two paths' mismatch decides (Kumar et al.,
+//                                   "The Butterfly PUF", HOST 2008). 2 flip-flops
+//                                   and no LUT per bit: the array moves from
+//                                   ~1,920 LUTs to ~1,920 of the FPGA's flip-flops.
+//                                   Gowin latch primitives (DLC / DLP); implies
+//                                   PQSE_PUF_LATCH (same row / read control).
+//                   PQSE_PUF_SRAM  a dedicated SRAM macro (32 x 32) that nothing
 //                                   writes: its power-up contents are the response
 //                                   (one sample per power-up; repeated reads return
 //                                   the same bits). pqse_puf_sram is a black box for
@@ -59,6 +73,12 @@
 // h >= 0.946 (132 bits at h = 0.95). Measure h with PF_RAW on several devices
 // (scripts/pqse_puf_stats.py) and raise PUF_NB if it is lower.
 // -----------------------------------------------------------------------------
+`ifdef PQSE_PUF_BFLY
+`ifndef PQSE_PUF_LATCH
+`define PQSE_PUF_LATCH          // the butterfly array uses the latch PUF's row control
+`endif
+`endif
+
 module pqse_puf_raw #(
   parameter WIN    = 2048,      // (kept for the interface; the cell PUFs need no window)
   parameter SETTLE = 8          // clocks from releasing a row to sampling a cell
@@ -84,8 +104,17 @@ module pqse_puf_raw #(
     for (g = 0; g < 30; g = g + 1) begin : g_row
       // e = 0: excited (both nodes 1); e = 1: the pair holds what it resolved to
       wire e_row = !(exc && (rsel == g));
+`ifdef PQSE_PUF_BFLY
+      // active-high excite, one net per row: the inversion stays in the row
+      // decode, so the cells themselves need no LUT
+      wire x_row = exc && (rsel == g);
+`endif
       for (gc = 0; gc < 32; gc = gc + 1) begin : g_cell
+`ifdef PQSE_PUF_BFLY
+        pqse_bflycell u_c (.x(x_row), .q(qv[32*g + gc]));
+`else
         pqse_pufcell u_c (.e(e_row), .q(qv[32*g + gc]));
+`endif
       end
     end
   endgenerate
@@ -209,6 +238,28 @@ module pqse_pufcell (
   assign q   = n_a;
 `endif
 endmodule
+
+`ifdef PQSE_PUF_BFLY
+// one butterfly PUF bit: two always-transparent latches (G = 1), each one's D
+// fed by the other's Q, built from the logic cells' flip-flops in latch mode.
+// x = 1: latch a cleared, latch b preset (a = 0, b = 1: a state the loop of
+// two non-inverting stages cannot hold); x = 0: the pair falls to a = b = 0 or
+// a = b = 1 as the mismatch of the two D paths decides, then holds it.
+// No LUT: the cell is two flip-flops and two routes. Place a and b in one
+// logic cell (CLS), or in two neighbouring ones if a CLS cannot mix a clear and
+// a preset register, with matched D routes; keep the x fan-out of a row on one
+// net. (Xilinx: LDCE / LDPE, as in the original butterfly PUF.)
+module pqse_bflycell (
+  input  wire x,
+  output wire q
+);
+  (* keep = 1 *) wire q_a;
+  (* keep = 1 *) wire q_b;
+  (* keep = 1 *) DLC u_a (.D(q_b), .G(1'b1), .CLEAR(x),  .Q(q_a));
+  (* keep = 1 *) DLP u_b (.D(q_a), .G(1'b1), .PRESET(x), .Q(q_b));
+  assign q = q_a;
+endmodule
+`endif
 `endif
 
 `ifdef PQSE_PUF_SRAM
