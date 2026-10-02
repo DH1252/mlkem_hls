@@ -67,6 +67,8 @@ puts "\nPQSE secure element, sky130_fd_sc_hd, clock period $period ns"
 puts "==================== power ===================="
 report_power -digits 4
 puts "==================== timing (slowest path) ===================="
-report_checks -path_delay max -digits 3
+# fanout, load capacitance and slew per stage: a stage with a large fanout and
+# a slow transition is a net a real flow would buffer (placement-based repair)
+report_checks -path_delay max -digits 3 -fields {fanout cap slew}
 report_wns
 report_tns
