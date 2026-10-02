@@ -79,6 +79,31 @@ Speed is no longer a priority (v4): the target is a contactless card, where the 
 
 What the protection costs in time: running NTT, PWM and INTT once per share; the masked compression (two clocks per adder bit, ~50 clocks per coefficient for d = 10); the second decoding of m′ (~10 k clocks); drawing a Fisher–Yates order before every shuffled instruction (128–256 clocks each, the next NTT layer's order is drawn while the current layer runs); the χ DOM AND (4 clocks per lane). A PUF read takes ~15 clocks (excite a row, let it settle, sample), so a reconstruction is ~15 k clocks, and the 3- or 5-read retry ~45 k / ~75 k.
 
+### Version 5: serial core for the Tang Nano 9K (in progress)
+
+Goal: the full feature set (masking, hiding, PUF, secure messaging, fault
+detection) on a Tang Nano 9K (GW1NR-9: 8,640 LUT4, 6,480 flip-flops, 26 BSRAM,
+20 multipliers), trading only clocks. The v4 Gowin fit on the 20K was 15,881
+logic units and 8,774 registers; the 9K needs ~7,300 / ~5,500 for placement to
+close. The engines are replaced one at a time behind the same instruction set,
+microcode, host interface and testbench, so `make sim-se` (NIST answers,
+masked Decaps, PUF, messaging, faults) checks every step; masked gadgets that
+change are re-checked with `make se-probe` and the TVLA flow.
+
+| Step | Unit | Change | Status |
+|---|---|---|---|
+| 1 | PUF read, SampleNTT, seed RAMs | idle-excited rows (column OR/AND instead of a 960-way mux); byte-serial `pqse_parse`; seed RAMs in BSRAM | done, untested |
+| 2 | Keccak | 16-bit words (one 256 x 16 BSRAM per share, 16-bit funnel shifter, 16-bit DOM chi), ~19.3 k clocks per permutation instead of 3.9 k; the sponge waits on the lane port (`rdy`) | done, untested |
+| 3 | Sponge, seed / buffer paths | 16-bit lane words end to end (removes the 64-bit lane registers kept for the v4 interface) | planned |
+| 4 | PUF extractor | key shares and decoder processed serially | planned |
+| 5 | `pqse_io` | 16-bit lane operations (compare, counters, unmask) | planned |
+| 6 | `pqse_core` | engine ports as a narrower, OR-combined bus | planned |
+| 7 | `pqse_masked`, `pqse_mcomp` | 16-bit registers in the SEL / tag / compression gadgets (probing re-check) | planned |
+| 8 | `pqse_prng`, `pqse_poly` | 16 random bits per clock; shared adders | planned |
+
+The Keccak permutation is the main cost in time: ~50 permutations per KEM
+operation make it ~1 M clocks (~40 ms at 27 MHz, ~75 ms at 13.56 MHz).
+
 ## 4. Security design (threat → countermeasure)
 
 | Threat | Countermeasure | Where |

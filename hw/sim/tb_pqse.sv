@@ -657,7 +657,7 @@ module tb_pqse;
   end
 
   initial begin
-    #4s;
+    #20s;                     // v5: the serial Keccak takes ~5x the clocks
     $display("TIMEOUT");
     $finish;
   end

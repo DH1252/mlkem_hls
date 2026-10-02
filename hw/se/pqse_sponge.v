@@ -4,9 +4,11 @@
 // One HASH instruction = one job: clear, absorb part 1 and part 2 (whole
 // lanes), suffix bytes + padding, then squeeze into one sink. The permutation
 // runs only when a block is full or more output is needed.
-// The Keccak state lives in RAM (pqse_keccak.v): absorbing a lane is a
-// read-modify-write inside the core, and a squeezed lane arrives one clock
-// after it is read (H_SRD -> H_SKX, H_STRM -> H_STRV).
+// The Keccak state lives in RAM (pqse_keccak.v, v5: 16-bit words): absorbing
+// a lane is a 4-word read-modify-write inside the core, and a squeezed lane is
+// complete a few clocks after it is read (H_SRD -> H_SKX, H_STRM -> H_STRV).
+// Every request (absorb, read, go) waits for the core's lane port (k_rdy), and
+// so do the states that use a read lane, the TRNG intake and the stream output.
 //
 // Sources (per part): SEED (seed registers, lanes entry*4 + i, both shares),
 //                     BUF (I/O buffer lanes, public), TRNG (raw 64-bit words).
@@ -143,12 +145,13 @@ module pqse_sponge #(
   reg  [63:0] k_v0, k_v1;
   wire [63:0] k_r0, k_r1;
   wire        k_busy;
+  wire        k_rdy;        // the Keccak lane port takes a request (v5: a lane is 4 words)
 
   pqse_keccak #(.MASKED(MASKED)) u_keccak (
     .clk(clk), .rst(rst), .msk(j_msk),
     .clr(k_clr), .ax_en(k_ax), .ax_idx(k_idx), .ax_v0(k_v0), .ax_v1(k_v1),
     .rd_en(k_rd), .rd_idx(pos), .rd_v0(k_r0), .rd_v1(k_r1),
-    .go(k_go), .busy(k_busy), .rnd(rnd), .rnd_take(rnd_take)
+    .go(k_go), .busy(k_busy), .rdy(k_rdy), .rnd(rnd), .rnd_take(rnd_take)
   );
 
   // ---- padding ------------------------------------------------------------------------
@@ -181,12 +184,12 @@ module pqse_sponge #(
   reg  [63:0] kx0, kx1;
 
   assign trng_en   = (hs != H_IDLE) && ((j_p1src == SRC_TRNG) || (j_p2src == SRC_TRNG));
-  assign trng_take = (hs == H_AWR) && (csrc == SRC_TRNG) && trng_valid;
+  assign trng_take = (hs == H_AWR) && (csrc == SRC_TRNG) && trng_valid && k_rdy;
 
   // ---- squeeze stream ---------------------------------------------------------------------
   wire strm_end = (j_sink == SNK_SNTT) ? samp_done : (ocnt == j_onl);
   // H_STRM reads lane pos, H_STRV presents it until the sink takes it
-  assign so_valid = (hs == H_STRV) && !strm_end;
+  assign so_valid = (hs == H_STRV) && !strm_end && k_rdy;     // the lane is complete
   assign so_v0    = so_valid ? k_r0 : 64'd0;
   assign so_v1    = (so_valid && j_msk) ? k_r1 : 64'd0;
 
@@ -291,7 +294,7 @@ module pqse_sponge #(
           else if (j_p2src != SRC_NONE) begin part <= 1'b1; hs <= H_ARD; end
           else                          hs <= H_FIN1;
         end
-        H_KA: begin
+        H_KA: if (k_rdy) begin
           if (pos == 5'd1) begin
             kc   <= 3'd0;
             hret <= H_KR;
@@ -300,7 +303,7 @@ module pqse_sponge #(
             pos <= pos + 5'd1;
           end
         end
-        H_KR: begin
+        H_KR: if (k_rdy) begin
           if (kc < 3'd4) begin
             hs <= H_KW;
           end else begin                  // block B complete: permute, then X (part 2)
@@ -310,7 +313,7 @@ module pqse_sponge #(
             hs   <= H_PGO;
           end
         end
-        H_KW: begin
+        H_KW: if (k_rdy) begin
           kp0 <= kd0;
           kp1 <= kd1;
           kc  <= kc + 3'd1;
@@ -324,7 +327,7 @@ module pqse_sponge #(
             hs <= H_AWR;
           end
         end
-        H_AWR: if (in_ok) begin
+        H_AWR: if (in_ok && k_rdy) begin
           pos <= pos + 5'd1;
           if (lcnt == cn - 8'd1) begin
             lcnt <= 8'd0;
@@ -339,7 +342,7 @@ module pqse_sponge #(
             hs   <= H_ARD;
           end
         end
-        H_FIN1: begin
+        H_FIN1: if (k_rdy) begin
           if (pos == rl) begin
             hret <= H_FIN1;
             hs   <= H_PGO;
@@ -347,19 +350,19 @@ module pqse_sponge #(
             hs <= H_FIN2;
           end
         end
-        H_FIN2: begin
+        H_FIN2: if (k_rdy) begin
           pos  <= rl;          // the block is complete: permute, then squeeze
           hret <= H_SQ0;
           hs   <= H_PGO;
         end
-        H_PGO: hs <= H_PW;
+        H_PGO: if (k_rdy) hs <= H_PW;                  // go is taken while rdy
         H_PW:  if (!k_busy) begin
           pos <= 5'd0;
           hs  <= hret;
         end
         H_SQ0: hs <= ((j_sink == SNK_SEED) || (j_sink == SNK_SXOR) || (j_sink == SNK_BXOR)) ?
                      H_SRD : H_STRM;
-        H_SRD: begin
+        H_SRD: if (k_rdy) begin
           if (ocnt == j_onl) begin
             hs <= H_IDLE;
           end else if (pos == rl) begin
@@ -369,7 +372,7 @@ module pqse_sponge #(
             hs <= H_SKX;                             // state lane read issued
           end
         end
-        H_SKX: begin                                 // the lane is on k_r0 / k_r1
+        H_SKX: if (k_rdy) begin                      // the lane is on k_r0 / k_r1
           if (j_sink == SNK_BXOR) begin              // keystream lane, per share
             kx0 <= k_r0;
             kx1 <= j_msk ? k_r1 : 64'd0;
@@ -381,7 +384,7 @@ module pqse_sponge #(
           ocnt <= ocnt + 8'd1;
           hs   <= H_SRD;
         end
-        H_STRM: begin                                // read lane pos
+        H_STRM: if (k_rdy) begin                     // read lane pos
           if (strm_end) begin
             hs <= H_WAIT;
           end else if (pos == rl) begin
@@ -394,7 +397,7 @@ module pqse_sponge #(
         H_STRV: begin                                // lane pos offered until taken
           if (strm_end) begin
             hs <= H_WAIT;
-          end else if (so_ready) begin
+          end else if (so_ready && k_rdy) begin
             pos  <= pos + 5'd1;
             ocnt <= ocnt + 8'd1;
             hs   <= H_STRM;
