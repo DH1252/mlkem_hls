@@ -408,6 +408,8 @@ se-power: | $(BUILD)
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
 	@grep -h "Converted .* FFs" $(BUILD)/sepower/yosys$(PW_TAG).log | sed 's/^/clockgate: /' || true
 	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(BUILD)/sepower/pqse_top_sky130.v
+	$(PYTHON) scripts/power/pqse_ff_report.py $(BUILD)/sepower/pqse_top_sky130.v > $(BUILD)/sepower/ffs$(PW_TAG).txt
+	@head -25 $(BUILD)/sepower/ffs$(PW_TAG).txt; echo "(all: $(BUILD)/sepower/ffs$(PW_TAG).txt)"
 	SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(BUILD)/sepower/pqse_top_sky130.v ACT=$(ACT) VCD=$(VCD) SCOPE=$(SCOPE) \
 	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(BUILD)/sepower/power$(PW_TAG).txt
 
