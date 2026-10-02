@@ -65,7 +65,8 @@
 //                           (bit x ^ xm, xm fresh per block), so the read
 //                           schedule does not line up across reconstructions.
 //                           Decoding = maximum likelihood over the 64 codewords
-//                           (Hamming distance, one codeword pair per clock).
+//                           (Hamming distance, one bit per clock: 32 clocks per
+//                           codeword pair, v5).
 //                   RAW     960 single reads -> buffer (TEST only: measure the
 //                           bit-error rate and uniformity, scripts/pqse_puf_stats.py)
 //                 The KEK is SHA3-256 of the 180-bit key, computed by the masked sponge.
@@ -381,12 +382,16 @@ module pqse_puf #(
 );
   `include "pqse_defs.vh"
 
-  localparam [3:0] U_IDLE = 4'd0, U_KRD = 4'd1, U_BLK = 4'd2, U_HLD = 4'd3, U_MSK = 4'd4,
-                   U_REQ  = 4'd5, U_WAIT = 4'd6, U_DEC = 4'd7, U_HWR = 4'd8, U_RWR = 4'd9,
-                   U_KWR  = 4'd10,
-                   U_HB   = 4'd11;   // enroll: second half of the helper bit (share 1)
+  // v5 (serial core): the key shares K0 / K1 only ever shift right by ONE bit
+  // (load, rotate, insert, write back), so they are plain enabled shift
+  // registers; the decoder adds one bit per clock instead of a 32-bit popcount.
+  localparam [4:0] U_IDLE = 5'd0,  U_KRQ = 5'd1,  U_KRD = 5'd2,  U_BLK  = 5'd3,
+                   U_HLD  = 5'd4,  U_MSK = 5'd5,  U_REQ = 5'd6,  U_WAIT = 5'd7,
+                   U_DEC  = 5'd8,  U_INS = 5'd9,  U_HB  = 5'd10, U_ROT  = 5'd11,
+                   U_HWR  = 5'd12, U_RWR = 5'd13, U_FIN = 5'd14, U_KWR  = 5'd15,
+                   U_KSH  = 5'd16;
 
-  reg  [3:0]   st;
+  reg  [4:0]   st;
   reg  [1:0]   mode;         // 0 enroll, 1 reconstruct, 2 raw
   reg  [2:0]   nrd;          // reconstruct: reads per response bit (1, 3 or 5, majority)
   reg  [3:0]   ent;
@@ -395,16 +400,19 @@ module pqse_puf #(
   reg  [4:0]   blk;          // block 0..29
   reg  [4:0]   x;            // bit within the block
   reg  [9:0]   b;            // response bit (raw mode)
-  reg  [2:0]   rv, ones;     // majority voting (enroll)
+  reg  [2:0]   rv, ones;     // majority voting
   reg  [63:0]  hl;           // helper lane in / out, raw lane
   reg  [31:0]  wm;           // w XOR C(R) for the block (reconstruct)
   reg  [31:0]  y;            // y = r XOR w XOR C(R)
-  reg  [5:0]  R;            // block mask
-  reg  [4:0]  xm;           // reconstruct: read order of the block, bit x ^ xm (random per block)
-  reg  [4:0]   u;            // decoder: codeword index
+  reg  [5:0]   R;            // block mask
+  reg  [4:0]   xm;           // reconstruct: read order of the block, bit x ^ xm (random per block)
+  reg  [4:0]   u;            // decoder: codeword pair
+  reg  [4:0]   bi;           // decoder: bit of the codeword
+  reg  [5:0]   acc;          // decoder: distance so far
   reg  [5:0]   best;
   reg  [5:0]   bm;           // best message
   reg  [2:0]   kc;           // seed lane counter
+  reg  [5:0]   sc;           // shift counter
 
   wire raw_done, raw_bit;
   reg  raw_req;
@@ -428,56 +436,44 @@ module pqse_puf #(
       for (i = 0; i < 32; i = i + 1) cwv[i] = cw(m, i[4:0]);
     end
   endfunction
-  function [5:0] pop32(input [31:0] v);
-    integer i;
-    begin
-      pop32 = 6'd0;
-      for (i = 0; i < 32; i = i + 1) pop32 = pop32 + {5'd0, v[i]};
-    end
-  endfunction
 
   // enrollment: majority of 5 reads; reconstruction: majority of nrd (1, 3, 5)
   wire [2:0] ones_n = ones + {2'b00, raw_bit};
   wire       maj    = (ones_n >= 3'd3);
   wire       rmaj   = ({ones_n, 1'b0} > {1'b0, nrd});
-  // key shares, block by block without 30-way indexing: the current block's 6
-  // bits are always K[5:0]; after a block the registers shift right by 6
-  // (enroll: rotate; reconstruct: the decoded block enters at the top). After
-  // the 30 blocks the canonical 180-bit key is K[191:12] in both modes.
+  // the current block's 6 key bits are always K[5:0]
   wire [5:0] k0b    = K0[5:0];
   wire [5:0] k1b    = K1[5:0];
   // helper bit w = r ^ C(k0) ^ C(k1), in two clocks: hp = r ^ C(k0) is
   // registered first (masked by C(k1)), so no gate sees C(k0) ^ C(k1) = C(k)
   reg        hp;
 
-  // decoder: distance to the codeword pair (u, 0) / (u, 1)
-  // ("dist" is a SystemVerilog keyword, hence hdist)
-  wire [5:0] hdist  = pop32(y ^ cwv({u, 1'b0}));
-  wire [5:0] dinv   = 6'd32 - hdist;
-  wire       use1   = (dinv < hdist);
-  wire [5:0] cand   = use1 ? dinv : hdist;
+  // decoder, one bit per clock: distance of y to the codeword (u, 0); the
+  // pair's other word (u, 1) is at 32 - distance. y rotates once per codeword.
+  wire [5:0] acc_n  = acc + {5'd0, y[0] ^ cw({u, 1'b0}, bi)};
+  wire [5:0] dinv   = 6'd32 - acc_n;
+  wire       use1   = (dinv < acc_n);
+  wire [5:0] cand   = use1 ? dinv : acc_n;
+
+  // a key lane bit, loading (enroll): bit sc of the held seed RAM output
+  wire       kin0   = srd0[sc];
+  wire       kin1   = srd1[sc];
 
   always @* begin
     bre = 1'b0; braddr = 9'd0; bwe = 1'b0; bwaddr = 9'd0; bwdata = 64'd0;
-    sre = 1'b0; sraddr = 6'd0; swe = 1'b0; swaddr = 6'd0; swd0 = 64'd0; swd1 = 64'd0;
+    sre = 1'b0; sraddr = 6'd0; swe = 1'b0; swaddr = 6'd0;
+    // write-back data: always the low lane of the shift registers (each bus
+    // one share; the core uses it only while this unit writes)
+    swd0 = K0[63:0]; swd1 = K1[63:0];
     rnd_take = 1'b0; raw_req = 1'b0;
     case (st)
-      U_KRD: if (kc < 3'd3) begin sre = 1'b1; sraddr = {ent, kc[1:0]}; end
+      U_KRQ: begin sre = 1'b1; sraddr = {ent, kc[1:0]}; end
       U_BLK: if (mode == 2'd1 && !blk[0]) begin bre = 1'b1; braddr = hb + {4'd0, blk[4:1]}; end
       U_MSK: rnd_take = 1'b1;
       U_REQ: raw_req = 1'b1;
       U_HWR: begin bwe = 1'b1; bwaddr = hb + {4'd0, blk[4:1]}; bwdata = hl; end
       U_RWR: begin bwe = 1'b1; bwaddr = hb + {3'd0, b[9:6]} - 9'd1; bwdata = hl; end
-      U_KWR: begin
-        swe    = 1'b1;
-        swaddr = {ent, kc[1:0]};
-        case (kc)
-          3'd0: begin swd0 = K0[75:12];            swd1 = K1[75:12];            end
-          3'd1: begin swd0 = K0[139:76];           swd1 = K1[139:76];           end
-          3'd2: begin swd0 = {12'd0, K0[191:140]}; swd1 = {12'd0, K1[191:140]}; end
-          default: ;                                   // lane 3 = 0
-        endcase
-      end
+      U_KWR: begin swe = 1'b1; swaddr = {ent, kc[1:0]}; end   // lane 3: K is 0 by then
       default: ;
     endcase
   end
@@ -503,18 +499,22 @@ module pqse_puf #(
           rv   <= 3'd0;
           ones <= 3'd0;
           kc   <= 3'd0;
+          sc   <= 6'd0;
           K0   <= 192'd0;
           K1   <= 192'd0;
-          st   <= (ins[91:88] == PF_ENROLL) ? U_KRD : (ins[91:88] == PF_RAW) ? U_REQ : U_BLK;
+          st   <= (ins[91:88] == PF_ENROLL) ? U_KRQ : (ins[91:88] == PF_RAW) ? U_REQ : U_BLK;
         end
-        // ---- enroll: read the key shares (3 lanes) ----
+        // ---- enroll: the key shares from seed lanes 0..2, one bit per clock:
+        // after 192 shifts K = {lane 2, lane 1, lane 0} ----
+        U_KRQ: begin sc <= 6'd0; st <= U_KRD; end         // the lane arrives next clock (held)
         U_KRD: begin
-          if (kc != 3'd0) begin                         // lanes 0, 1, 2 shift in: K = {l2, l1, l0}
-            K0 <= {srd0, K0[191:64]};
-            K1 <= {srd1, K1[191:64]};
+          K0 <= {kin0, K0[191:1]};
+          K1 <= {kin1, K1[191:1]};
+          sc <= sc + 6'd1;
+          if (sc == 6'd63) begin
+            if (kc == 3'd2) begin kc <= 3'd0; st <= U_REQ; end
+            else begin kc <= kc + 3'd1; st <= U_KRQ; end
           end
-          if (kc == 3'd3) begin kc <= 3'd0; st <= U_REQ; end
-          else kc <= kc + 3'd1;
         end
         // ---- reconstruct: start of a block ----
         U_BLK: st <= blk[0] ? U_MSK : U_HLD;
@@ -546,7 +546,7 @@ module pqse_puf #(
                 y[xr] <= rmaj ^ wm[xr];                   // bit xr of y = r' ^ w ^ C(R)
                 x <= x + 5'd1;
                 if (x == 5'd31) begin
-                  u <= 5'd0; best <= 6'd63; st <= U_DEC;
+                  u <= 5'd0; bi <= 5'd0; acc <= 6'd0; best <= 6'd63; st <= U_DEC;
                 end else st <= U_REQ;
               end
             end
@@ -557,41 +557,77 @@ module pqse_puf #(
             end
           endcase
         end
-        // ---- decoder: one codeword pair per clock ----
+        // ---- decoder: one bit per clock, 32 clocks per codeword pair ----
         U_DEC: begin
-          if (cand < best) begin
-            best <= cand;
-            bm   <= {u, use1};
+          y  <= {y[0], y[31:1]};                          // 32 rotations: y is back
+          bi <= bi + 5'd1;
+          if (bi == 5'd31) begin
+            acc <= 6'd0;
+            if (cand < best) begin
+              best <= cand;
+              bm   <= {u, use1};
+            end
+            u <= u + 5'd1;
+            if (u == 5'd31) begin sc <= 6'd0; st <= U_INS; end
+          end else begin
+            acc <= acc_n;
           end
-          u <= u + 5'd1;
-          if (u == 5'd31) begin
-            // decoded k^R (with this clock's candidate if it is the best) enters at the top
-            K0 <= {((cand < best) ? {u, use1} : bm), K0[191:6]};
-            K1 <= {R, K1[191:6]};
-            if (blk == PUF_NB - 1) begin kc <= 3'd0; st <= U_KWR; end
+        end
+        // decoded k ^ R and R enter at the top, LSB first (6 shifts)
+        U_INS: begin
+          K0 <= {bm[0], K0[191:1]}; bm <= {1'b0, bm[5:1]};
+          K1 <= {R[0],  K1[191:1]}; R  <= {1'b0, R[5:1]};
+          sc <= sc + 6'd1;
+          if (sc == 6'd5) begin
+            sc <= 6'd0;
+            if (blk == PUF_NB - 1) st <= U_FIN;
             else begin blk <= blk + 5'd1; st <= U_BLK; end
           end
         end
         U_HB: begin                                       // + C(k1): the public helper bit
           hl <= {hp ^ cw(k1b, x), hl[63:1]};
           x  <= x + 5'd1;
-          if (x == 5'd31) begin
-            K0 <= {K0[5:0], K0[191:6]};                   // next block's bits to K[5:0]
-            K1 <= {K1[5:0], K1[191:6]};
+          if (x == 5'd31) begin sc <= 6'd0; st <= U_ROT; end
+          else st <= U_REQ;
+        end
+        // enroll: rotate by 6, the next block's bits to K[5:0]
+        U_ROT: begin
+          K0 <= {K0[0], K0[191:1]};
+          K1 <= {K1[0], K1[191:1]};
+          sc <= sc + 6'd1;
+          if (sc == 6'd5) begin
+            sc <= 6'd0;
             if (blk[0]) st <= U_HWR;                      // two blocks = one helper lane
             else begin blk <= blk + 5'd1; st <= U_REQ; end
-          end else st <= U_REQ;
+          end
         end
         U_HWR: begin
-          // enrolled: write the key back in its canonical form (lanes 0..2, top 12
-          // bits of lane 2 and lane 3 zero), so the microcode can hash its check value
-          if (blk == PUF_NB - 1) begin kc <= 3'd0; st <= U_KWR; end
+          if (blk == PUF_NB - 1) begin sc <= 6'd0; st <= U_FIN; end
           else begin blk <= blk + 5'd1; st <= U_REQ; end
         end
         U_RWR: st <= (b == PUF_NR) ? U_IDLE : U_REQ;
-        U_KWR: begin
-          kc <= kc + 3'd1;
-          if (kc == 3'd3) st <= U_IDLE;
+        // ---- the key in canonical form at K[179:0], top 12 bits 0: after the
+        // 30 blocks it sits at K[191:12] (reconstruct: zeros below; enroll:
+        // rotated by 180, so the unused top 12 bits of seed lane 2 below), so
+        // 12 more shifts with zeros (enroll: this drops those 12 bits) ----
+        U_FIN: begin
+          K0 <= {1'b0, K0[191:1]};
+          K1 <= {1'b0, K1[191:1]};
+          sc <= sc + 6'd1;
+          if (sc == 6'd11) begin sc <= 6'd0; kc <= 3'd0; st <= U_KWR; end
+        end
+        // ---- write the key back (lanes 0..3): lane kc = K[63:0] this clock,
+        // then 64 shifts with zeros bring the next lane down (and clear K) ----
+        U_KWR: begin                                      // lane kc written this clock
+          sc <= 6'd0;
+          if (kc == 3'd3) st <= U_IDLE;                   // lanes 0..3 written
+          else st <= U_KSH;                               // after lane 2's shifts K is all 0: lane 3 = 0
+        end
+        U_KSH: begin                                      // the next lane down to K[63:0]
+          K0 <= {1'b0, K0[191:1]};
+          K1 <= {1'b0, K1[191:1]};
+          sc <= sc + 6'd1;
+          if (sc == 6'd63) begin kc <= kc + 3'd1; st <= U_KWR; end
         end
         default: st <= U_IDLE;
       endcase
@@ -606,7 +642,7 @@ module pqse_puf #(
     if (st == U_KWR && kc == 3'd0)
       $display("[%0t] PUF %s (%0d read(s) per bit): key = %h (180 bits, simulation only)", $time,
                (mode == 2'd0) ? "enroll" : "reconstruct", (mode == 2'd0) ? 5 : nrd,
-               (K0[191:12] ^ K1[191:12]));                // canonical after the 30 blocks
+               (K0[179:0] ^ K1[179:0]));                  // canonical after U_FIN
   end
 `endif
 endmodule
