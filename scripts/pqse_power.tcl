@@ -89,12 +89,12 @@ if {[catch {report_power -highest_power_instances 25 -digits 4} err]} {
   puts "(not available in this OpenSTA: $err)"
 }
 
-# Clock gating: how many integrated clock gates, and whether this OpenSTA lets
-# a gated clock toggle less than the clock. Current OpenSTA gives a gate's
-# output the clock activity x the enable's duty (vectorless) or the simulated
-# toggles (VCD / SAIF); older versions give every clock pin the full clock
-# activity, and then clock gating shows no saving at all. Compared: one
-# flip-flop behind a gate and one on the bare clock.
+# Clock gating: how many integrated clock gates and gated flip-flops, and one
+# flip-flop behind a gate next to one on the bare clock. Vectorless
+# (set_power_activity -global) OpenSTA does not propagate activity at all:
+# every clock pin gets the full clock, so the two are equal and clock gating
+# shows no saving. With a VCD / SAIF the clock pins carry their simulated
+# toggles, and a gated flip-flop draws less (make se-power-vcd).
 puts "==================== clock gating ===================="
 if {[catch {
   set icgs [get_cells -quiet -filter "ref_name =~ *dlclkp*" *]
@@ -122,8 +122,13 @@ if {[catch {
     }
     puts "flip-flops: $nff, behind a clock gate: $ngated"
     if {$gff ne "" && $uff ne ""} {
-      puts "one gated and one ungated flip-flop (equal internal power: this OpenSTA"
-      puts "ignores clock gating; a gated one should draw less):"
+      if {$vcd eq ""} {
+        puts "one gated and one ungated flip-flop (vectorless: equal by construction,"
+        puts "clock gating is only visible with simulated activity):"
+      } else {
+        puts "one gated and one ungated flip-flop (simulated activity: the gated one"
+        puts "should draw less; equal means its clock pin was not annotated):"
+      }
       report_power -instances [list $gff $uff] -digits 4
     }
   }

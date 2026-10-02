@@ -7,6 +7,14 @@ make se-power-vcd (scripts/pqse_power.tcl report + tb_pqse_gate.sv results).
         [--command-clocks N] [--card-mhz 3.39]
         [--epb-rd 0.5] [--epb-wr 0.8] [--e0 2.0] [--sram-table <file>]
         [--sram-leak-uw 0]
+    python3 scripts/power/pqse_energy.py --windows <dir>... --command-clocks N
+        [--no-sram] [same options]
+
+--windows (make se-power-sample): every <dir> holds one window's
+power_gl.txt, gl_run.txt, gate.saif / gate.vcd and sram_access.txt; the
+energy per clock is the total over all windows / their clocks, x the
+command's clocks, with the standard error of the per-window values as the
+uncertainty (windows sample different phases: Keccak, NTT, sampling, I/O).
 
 Logic: OpenSTA's average power over the dump (toggle counts divided by the
 dump's time span) times that span is the energy of the window: exactly the
@@ -174,8 +182,10 @@ def eng(x, unit):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('power')
-    ap.add_argument('--run', required=True)
+    ap.add_argument('power', nargs='?')
+    ap.add_argument('--windows', nargs='+')
+    ap.add_argument('--no-sram', action='store_true')
+    ap.add_argument('--run')
     ap.add_argument('--dump')
     ap.add_argument('--sram')
     ap.add_argument('--command-clocks', type=int, default=0)
@@ -186,7 +196,101 @@ def main():
     ap.add_argument('--sram-table')
     ap.add_argument('--sram-leak-uw', type=float, default=0.0)
     a = ap.parse_args()
+    if a.windows:
+        sampled(a)
+    elif a.power and a.run:
+        single(a)
+    else:
+        ap.error('give <power report> --run <gl_run.txt>, or --windows <dir>...')
 
+
+def window(d, a):
+    """One sampled window: (clocks, period, cmd, dynamic energy logic, SRAM,
+    leakage power, annotated share, start) from the files of its directory."""
+    groups, annot = parse_power(os.path.join(d, 'power_gl.txt'))
+    run = parse_kv(os.path.join(d, 'gl_run.txt'))
+    period = run.get('period_ns', 20.0) * 1e-9
+    nclk = int(run.get('window_clocks', 0))
+    if nclk <= 0:
+        sys.exit('pqse_energy: no window_clocks in %s/gl_run.txt' % d)
+    span = None
+    for dn in ('gate.saif', 'gate.saif.gz', 'gate.vcd'):
+        f = os.path.join(d, dn)
+        if os.path.exists(f):
+            span = saif_span(f) if 'saif' in dn else vcd_span(f)
+            break
+    if not span or span <= 0:
+        span = nclk * period
+    i, sw, l, t = groups['Total']
+    table = parse_table(a.sram_table) if a.sram_table else {}
+    e_sram, p_sram_leak = 0.0, a.sram_leak_uw * 1e-6
+    if not a.no_sram:
+        for shape, (nr, nw, ninst) in parse_sram(os.path.join(d, 'sram_access.txt')).items():
+            dw = int(shape.split('_d')[1])
+            if shape in table:
+                er, ew, lk = table[shape]
+                p_sram_leak += lk * 1e-6 * ninst
+            else:
+                er, ew = a.e0 + dw * a.epb_rd, a.e0 + dw * a.epb_wr
+            e_sram += (nr * er + nw * ew) * 1e-12
+    tot = annot.get('vcd', 0) + annot.get('saif', 0)
+    una = annot.get('unannotated', 0)
+    share = tot / float(tot + una) if tot + una else float('nan')
+    return dict(nclk=nclk, period=period, cmd=int(run.get('cmd', 0)), e_logic=(i + sw) * span,
+                e_sram=e_sram, p_leak=l + p_sram_leak, share=share, span=span)
+
+
+def sampled(a):
+    import math
+    dirs = sorted(a.windows, key=lambda d: [int(x) if x.isdigit() else x
+                                             for x in re.split(r'(\d+)', d)])
+    ws = [window(d, a) for d in dirs]
+    period, cmd = ws[0]['period'], ws[0]['cmd']
+    print('PQSE energy (sky130_fd_sc_hd, tt 25C 1.8 V), command %d, %d sampled windows'
+          % (cmd, len(ws)))
+    print('=' * 72)
+    print('  %-28s %8s %10s %12s %12s %12s' % ('window', 'clocks', 'annotated', 'logic/clk',
+                                             'SRAM/clk', 'total/clk'))
+    per = []
+    for d, w in zip(dirs, ws):
+        lc, sc = w['e_logic'] / w['nclk'], w['e_sram'] / w['nclk']
+        per.append(lc + sc)
+        print('  %-28s %8d %9.1f%% %12s %12s %12s' % (os.path.basename(d.rstrip('/')), w['nclk'],
+              100 * w['share'], eng(lc, 'J'), eng(sc, 'J'), eng(lc + sc, 'J')))
+        if w['share'] < 0.8:
+            print('    WARNING: under 80 % of the pins annotated in this window')
+    nclk = sum(w['nclk'] for w in ws)
+    e_clk = sum(w['e_logic'] + w['e_sram'] for w in ws) / nclk
+    e_clk_logic = sum(w['e_logic'] for w in ws) / nclk
+    p_leak = sum(w['p_leak'] * w['nclk'] for w in ws) / nclk
+    n = len(per)
+    sd = math.sqrt(sum((x - sum(per) / n) ** 2 for x in per) / (n - 1)) if n > 1 else 0.0
+    se = sd / math.sqrt(n) if n > 1 else 0.0
+    print('\nmean per clock     %s dynamic (logic %s, SRAM %s), +/- %s (standard error, %d windows)'
+          % (eng(e_clk, 'J'), eng(e_clk_logic, 'J'), eng(e_clk - e_clk_logic, 'J'), eng(se, 'J'), n))
+    print('                   per-window spread %s .. %s: the phases differ' % (eng(min(per), 'J'),
+                                                                               eng(max(per), 'J')))
+    print('average power      %s at %.1f MHz' % (eng(e_clk / period + p_leak, 'W'), 1e-6 / period))
+    ncmd = a.command_clocks
+    print('\nper command (%s)' % ('KeyGen' if cmd == 1 else 'Encaps' if cmd == 2 else
+                                'Decaps' if cmd == 3 else 'command %d' % cmd))
+    if not ncmd:
+        print('  pass --command-clocks <clocks of the command> (GL_CLOCKS=<n>)')
+        return
+    for f, name in ((1.0 / period, '%.1f MHz' % (1e-6 / period)),
+                    (a.card_mhz * 1e6, '%.2f MHz card clock' % a.card_mhz)):
+        t_cmd = ncmd / f
+        e_cmd = e_clk * ncmd + p_leak * t_cmd
+        print('  %-22s %10d clocks  %12s  %12s +/- %s  avg %s' % (
+            name, ncmd, eng(t_cmd, 's'), eng(e_cmd, 'J'), eng(se * ncmd, 'J'), eng(e_cmd / t_cmd, 'W')))
+    print('  (%d sampled clocks = %.1f %% of the command; more or longer windows: smaller error)'
+          % (nclk, 100.0 * nclk / ncmd))
+    if not a.no_sram and a.sram_table is None:
+        print('  (SRAM: E0 %.2f pJ + %.2f / %.2f pJ per bit read / written - an assumption)'
+              % (a.e0, a.epb_rd, a.epb_wr))
+
+
+def single(a):
     groups, annot = parse_power(a.power)
     run = parse_kv(a.run)
     period = run.get('period_ns', 20.0) * 1e-9

@@ -22,6 +22,8 @@
 #   make se-power SKY130_LIB=...  SKY130 power + timing (Yosys + OpenSTA)
 #   make se-power-vcd SKY130_LIB=... RAM_MACRO=1  energy per command from a
 #                  gate-level simulation (Verilator SAIF + OpenSTA)
+#   make se-power-sample SKY130_LIB=... RAM_MACRO=1 GL_FMT=vcd GL_CLOCKS=<n>
+#                  the same from sampled windows (fast with VCD)
 #   make se-gowin [PUF=0|bfly] [MASKED=0] [FLAT=0]  fit on the Tang Nano 20K (GW2AR-18)
 #   make se-gowin-eda [PUF=0|bfly] [MASKED=0]  the same with GowinSynthesis + Gowin P&R (gw_sh)
 #   make se-gowin-bisect           GowinSynthesis errors per module (diagnosis)
@@ -66,7 +68,7 @@ BAMBU_SIM   := --generate-tb=../../hls/tb_accel.c --simulate --simulator=VERILAT
 VERILATOR_ROOT_DIR := $(shell $(VERILATOR) --getenv VERILATOR_ROOT 2>/dev/null)
 HLS_ENV := CPATH="$(VERILATOR_ROOT_DIR)/include/vltstd$${CPATH:+:$$CPATH}"
 
-.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-power-vcd se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
+.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-power-vcd se-power-gl-build se-power-sample se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
 
 all: test
 
@@ -428,10 +430,21 @@ SRAM_E0     ?= 2.0
 GLD       := $(BUILD)/sepower/gl
 GL_DUMP   := gate.$(if $(filter vcd,$(GL_FMT)),vcd,saif)
 GL_TRACE  := $(if $(filter vcd,$(GL_FMT)),--trace,--trace-saif)
-se-power-vcd: | $(BUILD)
+# speed: GL_JOBS parallel C++ compiles of the (large) Verilator model (default:
+# all cores); GL_THREADS > 1 runs the model multithreaded (worth it for the
+# whole netlist: try 4); GL_TRACE_THREADS=1 writes the VCD from a separate
+# thread (VCD only)
+GL_JOBS          ?= $(shell nproc 2>/dev/null || echo 2)
+GL_THREADS       ?= 1
+GL_TRACE_THREADS ?= 0
+GL_VFLAGS := -j $(GL_JOBS) --build-jobs $(GL_JOBS) $(if $(filter-out 0 1,$(GL_THREADS)),--threads $(GL_THREADS)) \
+	    $(if $(and $(filter vcd,$(GL_FMT)),$(filter-out 0,$(GL_TRACE_THREADS))),--trace-threads $(GL_TRACE_THREADS))
+# the netlist, its cell / SRAM models and the Verilator model (shared by
+# se-power-vcd and se-power-sample)
+se-power-gl-build: | $(BUILD)
 	@test -n "$(SKY130_LIB)" || { echo "set SKY130_LIB=<path to sky130_fd_sc_hd__tt_025C_1v80.lib>"; exit 1; }
 	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
-	    echo "or use OpenROAD, which contains it: make se-power-vcd STA=openroad"; exit 1; }
+	    echo "or use OpenROAD, which contains it: STA=openroad"; exit 1; }
 	mkdir -p $(GLD)
 	$(PW_ABCGEN)
 	$(if $(PW_RAMLIB),$(PYTHON) scripts/power/pqse_sram_lib.py $(PW_RAMLIB) --models $(GLD)/sram_models.sv)
@@ -440,18 +453,51 @@ se-power-vcd: | $(BUILD)
 	    write_verilog -noattr -noexpr $(GLD)/pqse_top_gl.v"
 	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(GLD)/pqse_top_gl.v
 	$(PYTHON) scripts/pqse_lib2v.py $(SKY130_LIB) $(GLD)/pqse_top_gl.v $(GLD)/sky130_cells.v
-	rm -f $(GLD)/gate.vcd $(GLD)/gate.saif $(GLD)/gl_run.txt $(GLD)/sram_access.txt
-	cd $(GLD) && $(VERILATOR) --binary --timing $(GL_TRACE) -j 2 -Wno-fatal -Wno-lint -Wno-style \
+	cd $(GLD) && $(VERILATOR) --binary --timing $(GL_TRACE) $(GL_VFLAGS) -Wno-fatal -Wno-lint -Wno-style \
 	    --x-assign 0 --x-initial 0 --timescale 1ns/1ps --top-module tb_pqse_gate -Mdir obj -o ../vtb_gl \
 	    $(CURDIR)/hw/sim/tb_pqse_gate.sv sky130_cells.v $(if $(PW_RAMLIB),sram_models.sv) pqse_top_gl.v > build.log 2>&1 \
 	    || { tail -30 build.log; exit 1; }
+
+PW_EARGS = --card-mhz $(CARD_MHZ) --epb-rd $(SRAM_EPB_RD) --epb-wr $(SRAM_EPB_WR) --e0 $(SRAM_E0) \
+	    $(if $(GL_CLOCKS),--command-clocks $(GL_CLOCKS))
+se-power-vcd: se-power-gl-build
+	rm -f $(GLD)/gate.vcd $(GLD)/gate.saif $(GLD)/gl_run.txt $(GLD)/sram_access.txt
 	cd $(GLD) && ./vtb_gl +cmd=$(GL_CMD) +start=$(GL_START) +len=$(GL_LEN) +max=$(GL_MAX) +vcd=$(GL_DUMP)
 	SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(GLD)/pqse_top_gl.v VCD=$(GLD)/$(GL_DUMP) SCOPE=$(GL_SCOPE) \
 	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(GLD)/power_gl$(PW_TAG).txt
 	$(PYTHON) scripts/power/pqse_energy.py $(GLD)/power_gl$(PW_TAG).txt --run $(GLD)/gl_run.txt \
 	    --dump $(GLD)/$(GL_DUMP) $(if $(PW_RAMLIB),--sram $(GLD)/sram_access.txt) \
-	    $(if $(GL_CLOCKS),--command-clocks $(GL_CLOCKS)) --card-mhz $(CARD_MHZ) \
-	    --epb-rd $(SRAM_EPB_RD) --epb-wr $(SRAM_EPB_WR) --e0 $(SRAM_E0) | tee $(GLD)/energy$(PW_TAG).txt
+	    $(PW_EARGS) | tee $(GLD)/energy$(PW_TAG).txt
+
+# Sampled energy per command, the fast way with VCD: GL_WINDOWS windows of
+# GL_WLEN clocks, one in the middle of each 1/GL_WINDOWS of the command
+# (GL_CLOCKS clocks long: make sim-se prints it), simulated GL_PAR at a time
+# (each simulation runs untraced, fast, up to its window and stops at its
+# end); one OpenSTA run per window (GL_STA_PAR at a time: each needs the
+# whole netlist in memory), then pqse_energy.py: the mean energy per clock x
+# GL_CLOCKS, with the spread between the windows as its uncertainty.
+#   make se-power-sample SKY130_LIB=... RAM_MACRO=1 GL_FMT=vcd GL_CLOCKS=<n>
+#        [GL_WINDOWS=8] [GL_WLEN=2000] [GL_PAR=4] [GL_STA_PAR=2]
+# 8 x 2000 clocks is ~2 % of a v5 KeyGen: ~1-3 GB of VCD instead of ~100 GB.
+# Results in build/sepower/gl/win/w<i>/ and build/sepower/gl/energy_sampled<tag>.txt.
+GL_WINDOWS ?= 8
+GL_WLEN    ?= 2000
+GL_PAR     ?= 4
+GL_STA_PAR ?= 2
+se-power-sample: se-power-gl-build
+	@test -n "$(GL_CLOCKS)" || { echo "set GL_CLOCKS=<clocks of the command> (make sim-se prints them)"; exit 1; }
+	rm -rf $(GLD)/win && mkdir -p $(GLD)/win
+	seq 0 $$(($(GL_WINDOWS) - 1)) | xargs -P $(GL_PAR) -I{} sh -c '\
+	    i={}; s=$$(( $(GL_CLOCKS) * (2 * i + 1) / (2 * $(GL_WINDOWS)) - $(GL_WLEN) / 2 )); [ $$s -ge 0 ] || s=0; \
+	    mkdir -p $(GLD)/win/w$$i && cd $(GLD)/win/w$$i && \
+	    ../../vtb_gl +cmd=$(GL_CMD) +start=$$s +len=$(GL_WLEN) +max=$(GL_MAX) +vcd=$(GL_DUMP) > sim.log 2>&1 \
+	    && echo "window $$i (clocks $$s..$$((s + $(GL_WLEN)))): simulated" || { echo "window $$i: simulation failed"; tail -5 sim.log; exit 1; }'
+	ls -d $(GLD)/win/w* | xargs -P $(GL_STA_PAR) -I{} sh -c '\
+	    SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(GLD)/pqse_top_gl.v VCD={}/$(GL_DUMP) SCOPE=$(GL_SCOPE) \
+	    $(STA) -no_splash -exit scripts/pqse_power.tcl > {}/power_gl.txt 2>&1 && echo "{}: power done" \
+	    || { echo "{}: OpenSTA failed"; tail -5 {}/power_gl.txt; exit 1; }'
+	$(PYTHON) scripts/power/pqse_energy.py --windows $(GLD)/win/w* $(PW_EARGS) \
+	    $(if $(PW_RAMLIB),,--no-sram) | tee $(GLD)/energy_sampled$(PW_TAG).txt
 
 # Exact robust-probing check (glitches + transitions, first order) of the
 # masked gadgets' gate-level equations: DOM AND, the B2A / adder carry, the
