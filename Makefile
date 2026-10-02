@@ -22,6 +22,7 @@
 #   make se-power SKY130_LIB=...  SKY130 power + timing (Yosys + OpenSTA)
 #   make se-gowin [PUF=0|bfly] [MASKED=0] [FLAT=0]  fit on the Tang Nano 20K (GW2AR-18)
 #   make se-gowin-eda [PUF=0|bfly] [MASKED=0]  the same with GowinSynthesis + Gowin P&R (gw_sh)
+#   make se-gowin-bisect           GowinSynthesis errors per module (diagnosis)
 #   make ip        package the Platform Designer component (quartus/ip)
 #   make sw-emu    build + run the ARM program against a software model
 #   make sw-arm    cross-compile the ARM program for the DE10-Nano
@@ -63,7 +64,7 @@ BAMBU_SIM   := --generate-tb=../../hls/tb_accel.c --simulate --simulator=VERILAT
 VERILATOR_ROOT_DIR := $(shell $(VERILATOR) --getenv VERILATOR_ROOT 2>/dev/null)
 HLS_ENV := CPATH="$(VERILATOR_ROOT_DIR)/include/vltstd$${CPATH:+:$$CPATH}"
 
-.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-gowin se-gowin-eda se-probe ip sw-emu sw-arm vectors clean
+.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
 
 all: test
 
@@ -286,6 +287,24 @@ GW_SH ?= gw_sh
 se-gowin-eda:
 	PUF=$(PUF) MASKED=$(MASKED) MAP=$(MAP) STEP=$(STEP) \
 	    $(GW_SH) gowin/pqse_gowin.tcl
+
+# Diagnosis: synthesize every secure-element module on its own with
+# GowinSynthesis (STEP=syn) and count its errors, to find the module behind a
+# GowinSynthesis error that names no source line. Leaves first: the first
+# module with errors is the culprit (its parents inherit them). One log per
+# module in build/gowin/bisect/<module>.log.
+SE_MODULES := pqse_mulred pqse_modq24 pqse_ram_1r1w pqse_spi pqse_parse pqse_cbd \
+              pqse_ro_src pqse_trng pqse_prng pqse_perm pqse_keccak pqse_sponge pqse_poly \
+              pqse_io pqse_masked pqse_mcomp pqse_puf_raw pqse_puf pqse_ucode pqse_host \
+              pqse_core pqse_sys pqse_top
+se-gowin-bisect:
+	@mkdir -p $(BUILD)/gowin/bisect
+	@for m in $(SE_MODULES); do \
+	  log=$(BUILD)/gowin/bisect/$$m.log; \
+	  PUF=$(PUF) MASKED=$(MASKED) STEP=syn TOP=$$m $(GW_SH) gowin/pqse_gowin.tcl > $$log 2>&1; \
+	  printf '%-16s %3s SP00018  %3s ERROR total\n' $$m \
+	    "$$(grep -c 'SP00018' $$log)" "$$(grep -c 'ERROR' $$log)"; \
+	done
 
 # Power and timing estimate on SkyWater 130 nm: Yosys maps the design to
 # sky130_fd_sc_hd, OpenSTA (sta) reports power (vectorless with ACT toggles
