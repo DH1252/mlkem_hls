@@ -94,6 +94,8 @@ proc try_option {args} {
   }
 }
 try_option -global_freq           50
+# every synthesis warning in the log (diagnosis)
+try_option -print_all_synthesis_warning 1
 # area first: the card design has no speed target beyond its 50 MHz clock
 try_option -opt_goal              area
 try_option -map_option            $MAP
