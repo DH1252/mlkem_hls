@@ -214,7 +214,7 @@ def window(d, a):
     if nclk <= 0:
         sys.exit('pqse_energy: no window_clocks in %s/gl_run.txt' % d)
     span = None
-    for dn in ('gate.saif', 'gate.saif.gz', 'gate.vcd'):
+    for dn in ('gate_pins.saif', 'gate.saif', 'gate.saif.gz', 'gate.vcd'):
         f = os.path.join(d, dn)
         if os.path.exists(f):
             span = saif_span(f) if 'saif' in dn else vcd_span(f)
@@ -317,7 +317,7 @@ def single(a):
         share = tot / float(tot + una) if tot + una else 0.0
         print('annotated pins     %d of %d (%.1f %%)' % (tot, tot + una, 100 * share))
         if tot == 0:
-            print('ERROR: no pin carries simulated activity (the dump did not match: SCOPE?) - '
+            print('ERROR: no pin carries simulated activity (the dump did not match) - '
                   'the logic numbers below are OpenSTA\'s propagated guess, NOT a measurement; '
                   'the SRAM access counts are still valid')
         elif share < 0.8:

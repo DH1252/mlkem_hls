@@ -468,12 +468,16 @@ se-power-vcd: se-power-gl-build
 # OpenSTA + energy again on the dump of the last se-power-vcd run (no new
 # simulation), e.g. with other SRAM energies or another SCOPE:
 #   make se-power-vcd-report SKY130_LIB=... RAM_MACRO=1 [GL_FMT=...] [GL_SCOPE=...]
+# The dump holds the netlist's nets; OpenSTA annotates cell pins only, so
+# scripts/power/pqse_pin_saif.py first maps every net's toggles onto the pins it
+# connects (gate_pins.saif), which OpenSTA reads.
 se-power-vcd-report:
 	@test -f $(GLD)/$(GL_DUMP) || { echo "no $(GLD)/$(GL_DUMP): run make se-power-vcd first (same GL_FMT)"; exit 1; }
-	SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(GLD)/pqse_top_gl.v VCD=$(GLD)/$(GL_DUMP) SCOPE=$(GL_SCOPE) \
+	$(PYTHON) scripts/power/pqse_pin_saif.py $(GLD)/pqse_top_gl.v $(GLD)/$(GL_DUMP) $(GLD)/gate_pins.saif --scope $(GL_SCOPE)
+	SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(GLD)/pqse_top_gl.v VCD=$(GLD)/gate_pins.saif SCOPE=auto \
 	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(GLD)/power_gl$(PW_TAG).txt
 	$(PYTHON) scripts/power/pqse_energy.py $(GLD)/power_gl$(PW_TAG).txt --run $(GLD)/gl_run.txt \
-	    --dump $(GLD)/$(GL_DUMP) $(if $(PW_RAMLIB),--sram $(GLD)/sram_access.txt) \
+	    --dump $(GLD)/gate_pins.saif $(if $(PW_RAMLIB),--sram $(GLD)/sram_access.txt) \
 	    $(PW_EARGS) | tee $(GLD)/energy$(PW_TAG).txt
 
 # Sampled energy per command, the fast way with VCD: GL_WINDOWS windows of
@@ -500,7 +504,9 @@ se-power-sample: se-power-gl-build
 	    ../../vtb_gl +cmd=$(GL_CMD) +start=$$s +len=$(GL_WLEN) +max=$(GL_MAX) +vcd=$(GL_DUMP) > sim.log 2>&1 \
 	    && echo "window $$i (clocks $$s..$$((s + $(GL_WLEN)))): simulated" || { echo "window $$i: simulation failed"; tail -5 sim.log; exit 1; }'
 	ls -d $(GLD)/win/w* | xargs -P $(GL_STA_PAR) -I{} sh -c '\
-	    SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(GLD)/pqse_top_gl.v VCD={}/$(GL_DUMP) SCOPE=$(GL_SCOPE) \
+	    $(PYTHON) scripts/power/pqse_pin_saif.py $(GLD)/pqse_top_gl.v {}/$(GL_DUMP) {}/gate_pins.saif --scope $(GL_SCOPE) > {}/pins.log 2>&1 \
+	    || { echo "{}: pin mapping failed"; tail -3 {}/pins.log; exit 1; }; \
+	    SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(GLD)/pqse_top_gl.v VCD={}/gate_pins.saif SCOPE=auto \
 	    $(STA) -no_splash -exit scripts/pqse_power.tcl > {}/power_gl.txt 2>&1 && echo "{}: power done" \
 	    || { echo "{}: OpenSTA failed"; tail -5 {}/power_gl.txt; exit 1; }'
 	$(PYTHON) scripts/power/pqse_energy.py --windows $(GLD)/win/w* $(PW_EARGS) \
