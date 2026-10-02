@@ -18,9 +18,10 @@
 //                SAIF (toggle counts per net: megabytes for a whole command,
 //                where a VCD would be tens of GB)
 //   +max=<n>     give up after n clocks in the window (default 20000000)
-// The dump holds every cell instance's pins ($dumpvars(0, dut)): OpenSTA
-// annotates activity on pins, <instance>/<pin> below the scope. It opens at the
-// window start and the simulation ends at the window end, so the dump's time
+// The dump holds the netlist's nets (the cell models are not traced);
+// scripts/power/pqse_pin_saif.py maps them onto the cell pins, which is what
+// OpenSTA annotates (<instance>/<pin> below the scope). It opens at the window
+// start and the simulation ends at the window end, so the dump's time
 // span is the window (OpenSTA divides the toggle counts by it).
 // win is 1 inside the window (the SRAM macro models count accesses only then).
 // gl_run.txt gets window_clocks <n> / command_clocks <n> (0 for a window: the
@@ -118,7 +119,7 @@ module tb_pqse_gate;
     spi_wr(CTRL, cmd);                       // the command starts at the end of this write
     if (len != 0) repeat (start) @(posedge clk);
     $dumpfile(vcd);
-    $dumpvars(0, dut);                       // nets and every cell instance's pins
+    $dumpvars(0, dut);                       // the netlist's nets (cell models untraced)
     win = 1'b1;
     if (len == 0) wait (irq === 1'b1);       // done
     else          repeat (len) @(posedge clk);
