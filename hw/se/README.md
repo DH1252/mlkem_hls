@@ -67,7 +67,7 @@ A compact, low-power secure-element chip for ML-KEM-768 (FIPS 203), designed sid
 
 ## 3. Speed
 
-Speed is no longer a priority (v4): the target is a contactless card, where the 13.56 MHz field supplies a few milliwatts and the reader allows waiting-time extensions, so v4 trades clocks for area and energy. Version 1 measured (Verilator): KeyGen 108,669 clocks, Encaps 111,935, masked Decaps ~176–182 k. Version 4 estimates (the testbench prints the real numbers; the Keccak permutation now takes ~3,900 clocks instead of 2,064, about 50 permutations per KEM operation):
+Speed is no longer a priority (v4): the target is a contactless card, where the 13.56 MHz field supplies a few milliwatts and the reader allows waiting-time extensions, so v4 trades clocks for area and energy. Version 1 measured (Verilator): KeyGen 108,669 clocks, Encaps 111,935, masked Decaps ~176–182 k. Version 4 estimates (the testbench prints the real numbers; the Keccak permutation now takes ~3,050 clocks instead of 2,064 - ~3,900 before the theta parities moved into the chi write-back - about 50 permutations per KEM operation; measured KeyGen before that change: 242,129 clocks):
 
 | Command | Clocks (estimate) | at 13.56 / 4 = 3.39 MHz (contactless) | at 10 MHz |
 |---|---|---|---|
@@ -104,6 +104,7 @@ Low-power RTL (no change in function or in the masking schedule):
 |---|---|
 | Idle registers cleared once on going idle (not rewritten every idle clock), so they hold and can be clock-gated | `pqse_poly`, `pqse_mcomp`, `pqse_puf`, `pqse_sponge`, `pqse_masked` (gadget registers) |
 | chi DOM registers (384 flip-flops) load only while a permutation runs; the absorb-port registers only around an absorb | `pqse_keccak` |
+| theta column parities in registers, accumulated by the chi write-back: the parity pass runs in round 0 only, RP reads only the 5 lanes of a column (per round 35 of 135 state-RAM reads and 36 of 162 clocks fewer; +640 flip-flops) | `pqse_keccak` |
 | Operand isolation (`PQSE_LOWPOWER`, ASIC builds): the PRNG word, the TRNG word and the shared RAM read buses reach an engine only while it is busy; the shuffle multiplier sees the PRNG word only while drawing | `pqse_core`, `pqse_perm` |
 | Clock gating (Yosys `clockgate`; registers with a synchronous reset over the enable are first rewritten to enable = en \| rst, `CG_SRST=1`) | `make se-power*`, `CLOCKGATE=1` |
 

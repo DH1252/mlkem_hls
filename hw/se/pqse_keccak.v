@@ -5,16 +5,20 @@
 // Boolean share (A0 ^ A1 = state), 64 words x 64 bits each, instead of 3,200
 // flip-flops behind 25-way lane multiplexers. Per share:
 //     words  0..24  the state lanes A[x + 5y]
-//     words 25..29  the column parities C[x] (theta)
 //     words 32..56  B = pi(rho(theta(A))), lane B[y + 5((2x + 3y) mod 5)]
+// The column parities C[x] (theta) live in five 64-bit registers per share.
 // One read and one write per clock (simple dual-port RAM, registered read:
 // an FPGA block RAM, a small SRAM macro or latch register file on a chip).
 // Both shares run in lockstep through the same addresses, each with its own
 // data path; they meet only in the registered DOM cross terms of chi.
 //
-// One round = three passes, 162 clocks (a permutation 3,890 clocks):
-//   TH   26 clocks  C[x] = A[x] ^ A[x+5] ^ ... ^ A[x+20]          -> words 25..29
-//   RP   36 clocks  per column x: D = C[x-1] ^ rol(C[x+1], 1) into T, then
+// One round = two or three passes (a permutation ~3,050 clocks):
+//   TH   26 clocks  round 0 only: C[x] = A[x] ^ A[x+5] ^ ... ^ A[x+20]  -> C registers
+//                   (rounds 1..23: the chi write-back of the round before
+//                   accumulates C of the lanes it writes - low power: no
+//                   parity pass, 25 + 10 RAM reads and 36 clocks fewer per round)
+//   RP   26 clocks  per column x: D = C[x-1] ^ rol(C[x+1], 1) into T (from the
+//                   C registers), then
 //                   B[pi(x, y)] = rol(A[x + 5y] ^ D, r[x, y])          -> words 32..56
 //   CHI 100 clocks  per plane y, lanes in the order 0, 2, 4, 1, 3, 4 clocks each:
 //                     c0  read B[x+1]
@@ -24,6 +28,7 @@
 //                         X and Y cleared
 //                     c0' A[x + 5y] <= B[x] ^ d00 ^ d01 (^ iota)  (share 0)
 //                                      B[x] ^ d11 ^ d10           (share 1)
+//                     and C[x] ^= the written lane (= it, in plane 0), per share
 // DOM AND (Gross et al., "Domain-Oriented Masking", TIS 2016):
 //   d00 = X0&Y0   d01 = X0&Y1 ^ r   d10 = X1&Y0 ^ r   d11 = X1&Y1   (registered)
 // Robust-probing details (first order, glitches + transitions; checked by
@@ -158,6 +163,10 @@ module pqse_keccak #(
   reg  [2:0]  dx, dy, dj;
   // per-share registers
   reg  [63:0] T0, T1;              // theta: parity accumulator / D lane
+  reg  [319:0] C0v;                // theta: column parities C[x] at [64x +: 64], share 0
+  reg  [319:0] C1v;                // ... share 1 (masked jobs only); registers, not a RAM
+  reg  [2:0]  wbx;                 // chi write-back: column of the lane
+  reg         wby0;                // ... the lane is in plane 0
   reg  [63:0] X0r, X1r, Y0r, Y1r;  // chi: DOM operands
   reg  [63:0] d00, d01, d10, d11;  // chi: DOM partial products
   reg         wbv;                 // chi: write-back pending (this clock)
@@ -209,6 +218,10 @@ module pqse_keccak #(
   wire [63:0] rp1  = rol(q1 ^ T1, rot);
   wire [63:0] iota = (wbv && wbi == 5'd0) ? rc_of(rnd_i) : 64'd0;
   wire        rp_w = (ks == K_RP) && dv && (dj >= 3'd2);
+  wire [2:0]  cxm1 = m5({1'b0, cx} + 4'd4);           // RP: column x - 1
+  wire [2:0]  cxp1 = m5({1'b0, cx} + 4'd1);           // RP: column x + 1
+  wire [63:0] dd0  = C0v[{cxm1, 6'd0} +: 64] ^ rol(C0v[{cxp1, 6'd0} +: 64], 6'd1);  // RP: D of column cx, per share
+  wire [63:0] dd1  = C1v[{cxm1, 6'd0} +: 64] ^ rol(C1v[{cxp1, 6'd0} +: 64], 6'd1);
 
   always @* begin
     re = 1'b0; ra = 6'd0; we = 1'b0; wa = 6'd0;
@@ -224,8 +237,6 @@ module pqse_keccak #(
       we = 1'b1; wa = {1'b0, wbi};
     end else if (ks == K_WIPE) begin                    // zeros
       we = 1'b1; wa = wcnt;
-    end else if ((ks == K_TH) && dv && (dy == 3'd4)) begin   // C[x] = T ^ A[x + 20]
-      we = 1'b1; wa = 6'd25 + {3'd0, dx};
     end else if (rp_w) begin
       we = 1'b1; wa = 6'd32 + {1'b0, pdst(rpi)};
     end
@@ -239,11 +250,9 @@ module pqse_keccak #(
       K_TH:
         if (iss) begin re = 1'b1; ra = {1'b0, lidx(cx, cy)}; end
       K_RP:
-        if (iss) begin
+        if (iss) begin                                  // A[x + 5y] (cj = 2 + y)
           re = 1'b1;
-          ra = (cj == 3'd0) ? 6'd25 + {3'd0, m5({1'b0, cx} + 4'd4)} :   // C[x-1]
-               (cj == 3'd1) ? 6'd25 + {3'd0, m5({1'b0, cx} + 4'd1)} :   // C[x+1]
-                              {1'b0, lidx(cx, cj - 3'd2)};              // A[x + 5y]
+          ra = {1'b0, lidx(cx, cj - 3'd2)};
         end
       K_CHI:
         if (cs != 2'd3) begin
@@ -261,6 +270,7 @@ module pqse_keccak #(
       apn <= 1'b0; apv0 <= 64'd0; apv1 <= 64'd0; T0 <= 64'd0; T1 <= 64'd0;
       X0r <= 64'd0; X1r <= 64'd0; Y0r <= 64'd0; Y1r <= 64'd0;
       d00 <= 64'd0; d01 <= 64'd0; d10 <= 64'd0; d11 <= 64'd0;
+      begin C0v <= 320'd0; C1v <= 320'd0; end
     end else begin
       // absorb: the lane is written the next clock (from apv, 0 outside an absorb).
       // Low power: apa / apv load only in an absorb clock and the clock after
@@ -287,6 +297,13 @@ module pqse_keccak #(
         end
       end
       wbv <= 1'b0;
+      // theta of the next round: the written lane into its column parity (the
+      // first lane of a column, in plane 0, replaces the old parity). Not in
+      // the last round: there C is cleared when the permutation ends.
+      if (wbv && (rnd_i != 5'd23)) begin
+        C0v[{wbx, 6'd0} +: 64] <= wby0 ? wd0 : (C0v[{wbx, 6'd0} +: 64] ^ wd0);
+        if (use1) C1v[{wbx, 6'd0} +: 64] <= wby0 ? wd1 : (C1v[{wbx, 6'd0} +: 64] ^ wd1);
+      end
 
       case (ks)
         K_IDLE: begin
@@ -309,6 +326,8 @@ module pqse_keccak #(
         K_WIPE: begin
           wcnt <= wcnt + 6'd1;
           T0 <= 64'd0; T1 <= 64'd0;
+          if (wcnt == 6'd0)
+            begin C0v <= 320'd0; C1v <= 320'd0; end
           if (wcnt == 6'd63) begin
             ks    <= K_IDLE;
             clean <= 1'b1;
@@ -329,10 +348,14 @@ module pqse_keccak #(
           if (dv) begin
             T0 <= (dy == 3'd0) ? q0 : th0;
             T1 <= (dy == 3'd0) ? q1 : th1;
-            if (dx == 3'd4 && dy == 3'd4) begin          // C[4] written this clock
+            if (dy == 3'd4) begin                        // C[x] = T ^ A[x + 20]
+              C0v[{dx, 6'd0} +: 64] <= th0;
+              if (use1) C1v[{dx, 6'd0} +: 64] <= th1;
+            end
+            if (dx == 3'd4 && dy == 3'd4) begin          // C[4] loaded this clock
               ks  <= K_RP;
               cx  <= 3'd0;
-              cj  <= 3'd0;
+              cj  <= 3'd2;
               iss <= 1'b1;
               dv  <= 1'b0;
             end
@@ -343,16 +366,21 @@ module pqse_keccak #(
         K_RP: begin
           if (iss) begin
             if (cj == 3'd6) begin
-              cj <= 3'd0;
+              cj <= 3'd2;
               if (cx == 3'd4) iss <= 1'b0; else cx <= cx + 3'd1;
             end else begin
               cj <= cj + 3'd1;
             end
+            // D of the column whose first lane is read now: in T from the next
+            // clock, when that lane arrives (the column before uses the old T
+            // in this clock's data stage)
+            if (cj == 3'd2) begin
+              T0 <= dd0;
+              T1 <= use1 ? dd1 : 64'd0;
+            end
           end
           dv <= iss; dx <= cx; dj <= cj;
           if (dv) begin
-            if (dj == 3'd0)      begin T0 <= q0;                T1 <= q1;                end
-            else if (dj == 3'd1) begin T0 <= T0 ^ rol(q0, 6'd1); T1 <= T1 ^ rol(q1, 6'd1); end
             if (dx == 3'd4 && dj == 3'd6) begin          // the last B lane written this clock
               ks <= K_CHI;
               cy <= 3'd0;
@@ -381,19 +409,27 @@ module pqse_keccak #(
             default: begin                               // the AND (above); write-back next clock
               X0r <= 64'd0;
               X1r <= 64'd0;
-              wbv <= 1'b1;
-              wbi <= lidx(chx, cy);
-              cs  <= 2'd0;
+              wbv  <= 1'b1;
+              wbi  <= lidx(chx, cy);
+              wbx  <= chx;
+              wby0 <= (cy == 3'd0);
+              cs   <= 2'd0;
               if (cj == 3'd4) begin
                 cj <= 3'd0;
                 if (cy == 3'd4) begin                    // round complete
                   cy <= 3'd0;
                   if (rnd_i == 5'd23) begin
                     ks <= K_IDLE;
+                    // no state parity left behind (zeroization)
+                    begin C0v <= 320'd0; C1v <= 320'd0; end
                   end else begin
+                    // next round: C was accumulated by this round's write-backs
+                    // (the last one lands next clock, in column 3, which D of
+                    // column 0 does not use)
                     rnd_i <= rnd_i + 5'd1;
-                    ks    <= K_TH;
+                    ks    <= K_RP;
                     cx    <= 3'd0;
+                    cj    <= 3'd2;
                     iss   <= 1'b1;
                     dv    <= 1'b0;
                   end
