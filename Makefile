@@ -68,7 +68,7 @@ BAMBU_SIM   := --generate-tb=../../hls/tb_accel.c --simulate --simulator=VERILAT
 VERILATOR_ROOT_DIR := $(shell $(VERILATOR) --getenv VERILATOR_ROOT 2>/dev/null)
 HLS_ENV := CPATH="$(VERILATOR_ROOT_DIR)/include/vltstd$${CPATH:+:$$CPATH}"
 
-.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-power-vcd se-power-gl-build se-power-sample se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
+.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-power-vcd se-power-gl-build se-power-sample se-power-vcd-report se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
 
 all: test
 
@@ -422,7 +422,7 @@ GL_LEN    ?= 0
 GL_FMT    ?= saif
 GL_MAX    ?= 20000000
 GL_CLOCKS ?=
-GL_SCOPE  ?= TOP/tb_pqse_gate/dut
+GL_SCOPE  ?= auto
 CARD_MHZ  ?= 3.39
 SRAM_EPB_RD ?= 0.5
 SRAM_EPB_WR ?= 0.8
@@ -463,6 +463,13 @@ PW_EARGS = --card-mhz $(CARD_MHZ) --epb-rd $(SRAM_EPB_RD) --epb-wr $(SRAM_EPB_WR
 se-power-vcd: se-power-gl-build
 	rm -f $(GLD)/gate.vcd $(GLD)/gate.saif $(GLD)/gl_run.txt $(GLD)/sram_access.txt
 	cd $(GLD) && ./vtb_gl +cmd=$(GL_CMD) +start=$(GL_START) +len=$(GL_LEN) +max=$(GL_MAX) +vcd=$(GL_DUMP)
+	$(MAKE) --no-print-directory se-power-vcd-report
+
+# OpenSTA + energy again on the dump of the last se-power-vcd run (no new
+# simulation), e.g. with other SRAM energies or another SCOPE:
+#   make se-power-vcd-report SKY130_LIB=... RAM_MACRO=1 [GL_FMT=...] [GL_SCOPE=...]
+se-power-vcd-report:
+	@test -f $(GLD)/$(GL_DUMP) || { echo "no $(GLD)/$(GL_DUMP): run make se-power-vcd first (same GL_FMT)"; exit 1; }
 	SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(GLD)/pqse_top_gl.v VCD=$(GLD)/$(GL_DUMP) SCOPE=$(GL_SCOPE) \
 	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(GLD)/power_gl$(PW_TAG).txt
 	$(PYTHON) scripts/power/pqse_energy.py $(GLD)/power_gl$(PW_TAG).txt --run $(GLD)/gl_run.txt \
