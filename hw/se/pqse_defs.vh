@@ -141,7 +141,8 @@ localparam [3:0] ST_KEYV = 4'd0, ST_KEYC = 4'd1, ST_BADC = 4'd2, ST_RESEED = 4'd
 
 // branch conditions (BR: [91:88] condition, [87:78] target pc)
 localparam [3:0] BC_ALWAYS = 4'd0, BC_BAD = 4'd1, BC_NBAD = 4'd2, BC_INJ = 4'd3, BC_NOKEY = 4'd4,
-                 BC_NINJ = 4'd5, BC_WRAP = 4'd6, BC_KEXP = 4'd7, BC_NOSK = 4'd8, BC_ROLE = 4'd9;
+                 BC_NINJ = 4'd5, BC_WRAP = 4'd6, BC_KEXP = 4'd7, BC_NOSK = 4'd8, BC_ROLE = 4'd9,
+                 BC_KGEN = 4'd10;   // the command is KEYGEN / KGWRAP (not UNWRAP): run the PCT
 
 // secure-messaging KMAC customization strings S (HASH J[1:0], pqse_sponge.v):
 // keystream "E1" / "E2", tag "T1" / "T2"; 1 = initiator -> responder,

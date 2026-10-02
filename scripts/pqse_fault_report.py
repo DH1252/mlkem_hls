@@ -15,9 +15,11 @@ Outcomes:
   SILENT      a different output with result 0: KeyGen gave a wrong ek, or
               Decaps a K that is neither K nor K' - the fault reached the
               outside unnoticed (the case fault attacks exploit)
-  hang        no done within the time limit (the host can only reset)
+  hang        no done within the time limit, past the host watchdog (which
+              ends a hung command with FAULT: a hang means the watchdog failed)
 Also counted: runs in which the PRNG handed out a random word twice (r=1:
-masks reused, the masking weakened for that run - not visible in the output).
+masks reused). The hardware check (pqse_prng ferr) aborts such a command with
+FAULT; a reuse in a run that was not detected is listed as an escape.
 Target "none" flips nothing (null control): it must always come out unchanged;
 otherwise the harness, not the design, is wrong and nothing else counts.
 """
@@ -80,12 +82,15 @@ def main():
     tot = defaultdict(int)
     per = defaultdict(lambda: defaultdict(int))
     nre = 0
+    nre_esc = 0                     # reused masks, and the command did not end with an error
     for tgt, bit, word, clk, res, cls, reuse in runs:
         tot[cls] += 1
         per[tgt][cls] += 1
         if reuse:
             nre += 1
             per[tgt]['reuse'] += 1
+            if cls != 'detected':
+                nre_esc += 1
     nul = [r for r in runs if r[0] == 'none']
     nul_bad = [r for r in nul if r[5] != 'unchanged']
     n = len(runs)
@@ -95,7 +100,8 @@ def main():
     print('=' * 78)
     for c in classes:
         print('  %-10s %6d  %5.1f %%' % (c, tot[c], 100.0 * tot[c] / n))
-    print('  %-10s %6d  (PRNG word handed out twice: masks reused)' % ('PRNG reuse', nre))
+    print('  %-10s %6d  (PRNG word handed out twice: masks reused; %d not detected)' %
+          ('PRNG reuse', nre, nre_esc))
     print('  null control ("none", no fault): %d runs, %d not unchanged' % (len(nul), len(nul_bad)))
     if nul_bad:
         print('\nHARNESS ERROR: runs without a fault gave a different result - the counts '
@@ -120,8 +126,8 @@ def main():
     if nul_bad:
         print('\nRESULT: harness error (null control failed)')
     else:
-        print('\nRESULT: %s, %d PRNG reuse(s)' % ('no silent fault' if not sil else
-                                                 '%d silent fault(s)' % len(sil), nre))
+        print('\nRESULT: %s, %d hang(s), %d undetected PRNG reuse(s)' %
+              ('no silent fault' if not sil else '%d silent fault(s)' % len(sil), tot['hang'], nre_esc))
 
 
 if __name__ == '__main__':

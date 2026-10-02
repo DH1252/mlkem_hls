@@ -164,6 +164,13 @@ module pqse_keccak #(
   // pass counters (issue stage)
   reg  [2:0]  cx, cy, cj;
   reg  [1:0]  cs;         // chi: clock within the lane slot
+  // fault protection of the control: complemented shadow copies written in the
+  // same statements (a flipped bit - e.g. in the round counter, which would cut
+  // rounds - shows as a mismatch the next clock: perr, the command aborts)
+  reg  [2:0]  ks_n, cx_n, cy_n, cj_n;
+  reg  [4:0]  rnd_i_n;
+  reg  [1:0]  cs_n;
+  reg         pctl;        // control mismatch (registered)
   reg         iss;        // TH / RP: reads left to issue
   // data stage (TH / RP: the read issued last clock)
   reg         dv;
@@ -244,7 +251,9 @@ module pqse_keccak #(
   wire        cchk = (ks == K_RP) && iss && (cj == 3'd2);
   wire        cbad0 = (^C0v[{cxm1, 6'd0} +: 64] ^ Cp0[cxm1]) | (^C0v[{cxp1, 6'd0} +: 64] ^ Cp0[cxp1]);
   wire        cbad1 = (^C1v[{cxm1, 6'd0} +: 64] ^ Cp1[cxm1]) | (^C1v[{cxp1, 6'd0} +: 64] ^ Cp1[cxp1]);
-  assign perr = pe0 | pe1 | pc0 | pc1;    // each 0 unless a fault hit
+  wire        ctl_bad = (ks != ~ks_n) | (rnd_i != ~rnd_i_n) | (cx != ~cx_n) | (cy != ~cy_n) |
+                        (cj != ~cj_n) | (cs != ~cs_n);
+  assign perr = pe0 | pe1 | pc0 | pc1 | pctl;    // each 0 unless a fault hit
 
   always @* begin
     re = 1'b0; ra = 6'd0; we = 1'b0; wa = 6'd0;
@@ -289,12 +298,18 @@ module pqse_keccak #(
   // ---- control and registers --------------------------------------------------------------
   always @(posedge clk) begin
     if (rst) begin
-      ks <= K_IDLE; mj <= 1'b0; clean <= 1'b0; ap <= 1'b0; wbv <= 1'b0; dv <= 1'b0; iss <= 1'b0;
+      begin ks <= K_IDLE; ks_n <= ~(K_IDLE); end mj <= 1'b0; clean <= 1'b0; ap <= 1'b0; wbv <= 1'b0; dv <= 1'b0; iss <= 1'b0;
       apn <= 1'b0; apv0 <= 64'd0; apv1 <= 64'd0; T0 <= 64'd0; T1 <= 64'd0;
       X0r <= 64'd0; X1r <= 64'd0; Y0r <= 64'd0; Y1r <= 64'd0;
       d00 <= 64'd0; d01 <= 64'd0; d10 <= 64'd0; d11 <= 64'd0;
       begin C0v <= 320'd0; C1v <= 320'd0; end
       Cp0 <= 5'd0; Cp1 <= 5'd0; pchk <= 1'b0;
+      begin rnd_i <= 5'd0; rnd_i_n <= ~(5'd0); end
+      begin cx <= 3'd0; cx_n <= ~(3'd0); end
+      begin cy <= 3'd0; cy_n <= ~(3'd0); end
+      begin cj <= 3'd0; cj_n <= ~(3'd0); end
+      begin cs <= 2'd0; cs_n <= ~(2'd0); end
+      pctl <= 1'b0;
       rv0 <= 1'b0; rv1 <= 1'b0; pe0 <= 1'b0; pe1 <= 1'b0; pc0 <= 1'b0; pc1 <= 1'b0;
     end else begin
       // parity checks: a read lane (the clock after the read), the C lanes D uses
@@ -304,6 +319,7 @@ module pqse_keccak #(
       pe1 <= rv1 && (^q1p);
       pc0 <= cchk && cbad0;
       pc1 <= cchk && use1 && cbad1;
+      pctl <= ctl_bad;
       // absorb: the lane is written the next clock (from apv, 0 outside an absorb).
       // Low power: apa / apv load only in an absorb clock and the clock after
       // it (back to 0), then hold 0 - their clock can be gated between absorbs
@@ -347,16 +363,16 @@ module pqse_keccak #(
         K_IDLE: begin
           if (ax_en) clean <= 1'b0;
           if (go) begin
-            ks    <= K_TH;
+            begin ks    <= K_TH; ks_n <= ~(K_TH); end
             mj    <= msk;
-            rnd_i <= 5'd0;
+            begin rnd_i <= 5'd0; rnd_i_n <= ~(5'd0); end
             clean <= 1'b0;
-            cx    <= 3'd0;
-            cy    <= 3'd0;
+            begin cx    <= 3'd0; cx_n <= ~(3'd0); end
+            begin cy    <= 3'd0; cy_n <= ~(3'd0); end
             iss   <= 1'b1;
             dv    <= 1'b0;
           end else if (clr && !clean && !ax_en && !ap && !wbv) begin
-            ks   <= K_WIPE;
+            begin ks   <= K_WIPE; ks_n <= ~(K_WIPE); end
             wcnt <= 6'd0;
           end
         end
@@ -367,7 +383,7 @@ module pqse_keccak #(
           if (wcnt == 6'd0)
             begin C0v <= 320'd0; C1v <= 320'd0; Cp0 <= 5'd0; Cp1 <= 5'd0; end
           if (wcnt == 6'd63) begin
-            ks    <= K_IDLE;
+            begin ks    <= K_IDLE; ks_n <= ~(K_IDLE); end
             clean <= 1'b1;
             pchk  <= 1'b1;                               // every word now has a valid parity bit
           end
@@ -377,10 +393,10 @@ module pqse_keccak #(
         K_TH: begin
           if (iss) begin
             if (cy == 3'd4) begin
-              cy <= 3'd0;
-              if (cx == 3'd4) iss <= 1'b0; else cx <= cx + 3'd1;
+              begin cy <= 3'd0; cy_n <= ~(3'd0); end
+              if (cx == 3'd4) iss <= 1'b0; else begin cx <= cx + 3'd1; cx_n <= ~(cx + 3'd1); end
             end else begin
-              cy <= cy + 3'd1;
+              begin cy <= cy + 3'd1; cy_n <= ~(cy + 3'd1); end
             end
           end
           dv <= iss; dx <= cx; dy <= cy;
@@ -396,9 +412,9 @@ module pqse_keccak #(
               end
             end
             if (dx == 3'd4 && dy == 3'd4) begin          // C[4] loaded this clock
-              ks  <= K_RP;
-              cx  <= 3'd0;
-              cj  <= 3'd2;
+              begin ks  <= K_RP; ks_n <= ~(K_RP); end
+              begin cx  <= 3'd0; cx_n <= ~(3'd0); end
+              begin cj  <= 3'd2; cj_n <= ~(3'd2); end
               iss <= 1'b1;
               dv  <= 1'b0;
             end
@@ -409,10 +425,10 @@ module pqse_keccak #(
         K_RP: begin
           if (iss) begin
             if (cj == 3'd6) begin
-              cj <= 3'd2;
-              if (cx == 3'd4) iss <= 1'b0; else cx <= cx + 3'd1;
+              begin cj <= 3'd2; cj_n <= ~(3'd2); end
+              if (cx == 3'd4) iss <= 1'b0; else begin cx <= cx + 3'd1; cx_n <= ~(cx + 3'd1); end
             end else begin
-              cj <= cj + 3'd1;
+              begin cj <= cj + 3'd1; cj_n <= ~(cj + 3'd1); end
             end
             // D of the column whose first lane is read now: in T from the next
             // clock, when that lane arrives (the column before uses the old T
@@ -425,10 +441,10 @@ module pqse_keccak #(
           dv <= iss; dx <= cx; dj <= cj;
           if (dv) begin
             if (dx == 3'd4 && dj == 3'd6) begin          // the last B lane written this clock
-              ks <= K_CHI;
-              cy <= 3'd0;
-              cj <= 3'd0;
-              cs <= 2'd0;
+              begin ks <= K_CHI; ks_n <= ~(K_CHI); end
+              begin cy <= 3'd0; cy_n <= ~(3'd0); end
+              begin cj <= 3'd0; cj_n <= ~(3'd0); end
+              begin cs <= 2'd0; cs_n <= ~(2'd0); end
               dv <= 1'b0;
               T0 <= 64'd0; T1 <= 64'd0;
             end
@@ -438,16 +454,16 @@ module pqse_keccak #(
         // ---- chi + iota: 4 clocks per lane ----
         K_CHI: begin
           case (cs)
-            2'd0: cs <= 2'd1;
+            2'd0: begin cs <= 2'd1; cs_n <= ~(2'd1); end
             2'd1: begin                                  // X = ~B[x+1] (NOT on share 0 only)
               X0r <= ~q0;
               X1r <= use1 ? q1 : 64'd0;
-              cs  <= 2'd2;
+              begin cs  <= 2'd2; cs_n <= ~(2'd2); end
             end
             2'd2: begin                                  // Y = B[x+2]
               Y0r <= q0;
               Y1r <= use1 ? q1 : 64'd0;
-              cs  <= 2'd3;
+              begin cs  <= 2'd3; cs_n <= ~(2'd3); end
             end
             default: begin                               // the AND (above); write-back next clock
               X0r <= 64'd0;
@@ -457,37 +473,37 @@ module pqse_keccak #(
               wbx  <= chx;
               wby0 <= (cy == 3'd0);
               wbacc <= (rnd_i != 5'd23);
-              cs   <= 2'd0;
+              begin cs   <= 2'd0; cs_n <= ~(2'd0); end
               if (cj == 3'd4) begin
-                cj <= 3'd0;
+                begin cj <= 3'd0; cj_n <= ~(3'd0); end
                 if (cy == 3'd4) begin                    // round complete
-                  cy <= 3'd0;
+                  begin cy <= 3'd0; cy_n <= ~(3'd0); end
                   if (rnd_i == 5'd23) begin
-                    ks <= K_IDLE;
+                    begin ks <= K_IDLE; ks_n <= ~(K_IDLE); end
                     // no state parity left behind (zeroization)
                     begin C0v <= 320'd0; C1v <= 320'd0; Cp0 <= 5'd0; Cp1 <= 5'd0; end
                   end else begin
                     // next round: C was accumulated by this round's write-backs
                     // (the last one lands next clock, in column 3, which D of
                     // column 0 does not use)
-                    rnd_i <= rnd_i + 5'd1;
-                    ks    <= K_RP;
-                    cx    <= 3'd0;
-                    cj    <= 3'd2;
+                    begin rnd_i <= rnd_i + 5'd1; rnd_i_n <= ~(rnd_i + 5'd1); end
+                    begin ks    <= K_RP; ks_n <= ~(K_RP); end
+                    begin cx    <= 3'd0; cx_n <= ~(3'd0); end
+                    begin cj    <= 3'd2; cj_n <= ~(3'd2); end
                     iss   <= 1'b1;
                     dv    <= 1'b0;
                   end
                 end else begin
-                  cy <= cy + 3'd1;
+                  begin cy <= cy + 3'd1; cy_n <= ~(cy + 3'd1); end
                 end
               end else begin
-                cj <= cj + 3'd1;
+                begin cj <= cj + 3'd1; cj_n <= ~(cj + 3'd1); end
               end
             end
           endcase
         end
 
-        default: ks <= K_IDLE;
+        default: begin ks <= K_IDLE; ks_n <= ~(K_IDLE); end
       endcase
     end
   end

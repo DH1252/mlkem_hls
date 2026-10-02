@@ -69,6 +69,8 @@ module pqse_core #(
                    Q_PG = 4'd7,     // decide: does this instruction need a fresh permutation?
                    Q_PW = 4'd8;     // wait for the Fisher-Yates shuffle (pqse_perm.v)
   reg  [3:0]  q;
+  reg  [3:0]  q_n;          // always ~q (fault detection: a flipped state bit could stop the
+                            // sequencer in Q_IDLE mid-command, or jump between states)
   reg  [9:0]  pc;           // 1024-entry microcode ROM
   reg  [9:0]  pcn;          // always ~pc (fault detection)
   reg  [95:0] ins_r;
@@ -77,6 +79,7 @@ module pqse_core #(
   wire        rom_p = ^rom_q;
   reg         bad, wrap, inj, kx;
   reg         zc;           // the command is ZEROIZE (runs even with a failed TRNG)
+  reg         kgc;          // the command generates a key pair (KEYGEN / KGWRAP): PCT
   reg         role;         // session key role: 0 initiator (Encaps), 1 responder (Decaps)
   reg  [63:0] ctr_tx;       // secure messaging: counter of the next message sent
   reg         rx_any;       // secure messaging: a message was accepted with this key
@@ -105,6 +108,7 @@ module pqse_core #(
 
   // ---- engine busy / start ----
   wire sp_busy, p_busy, io_busy, m_busy, pf_busy, pr_busy;
+  wire pr_ferr;                                // PRNG word taken stale (pqse_prng)
   wire io_bad, m_bad, m_fault, io_fault;
   wire any_busy = sp_busy | p_busy | io_busy | m_busy | pf_busy;
 
@@ -154,6 +158,7 @@ module pqse_core #(
       BC_KEXP:   br_take = kx;
       BC_NOSK:   br_take = !sk_valid;
       BC_ROLE:   br_take = role;
+      BC_KGEN:   br_take = kgc;
       default:   br_take = 1'b0;
     endcase
   end
@@ -201,7 +206,8 @@ module pqse_core #(
   pqse_trng u_trng (.clk(clk), .rst(rst), .en(t_en), .take(t_take),
                     .word(t_word), .valid(t_valid), .fail(trng_fail), .ok(trng_ok));
   pqse_prng u_prng (.clk(clk), .rst(rst), .masked_en(MASKED != 0), .reseed(pr_reseed),
-                    .seed(rseed[159:0]), .busy(pr_busy), .take(r_take), .take_hi(r_hi), .rnd(rnd));
+                    .seed(rseed[159:0]), .busy(pr_busy), .take(r_take), .take_hi(r_hi), .rnd(rnd),
+                    .ferr(pr_ferr));
   pqse_perm u_perm (.clk(clk), .rst(rst), .start(pg_start), .n64(pg_n64),
                     .next(pg_next), .busy(pg_busy), .ready(pg_ready),
                     .rnd(rnd), .rnd_take(pg_rt), .idx(pq_idx), .val(pq_val));
@@ -220,15 +226,15 @@ module pqse_core #(
   // ---- fault sources ----
   wire perr;                                   // RAM parity error (below)
   wire perr_k;                                 // Keccak state parity error (pqse_sponge / pqse_keccak)
-  wire f_ctl = run && ((pcn != ~pc) || ((q == Q_EXEC) && (^ins_r != ins_p)));
+  wire f_ctl = (q != ~q_n) || (run && ((pcn != ~pc) || ((q == Q_EXEC) && (^ins_r != ins_p))));
   wire f_eng = (q == Q_WAIT) && wfirst && is_eng && !one_clk && !any_busy;
-  wire f_any = f_ctl | f_eng | perr | perr_k | m_fault | io_fault;
+  wire f_any = f_ctl | f_eng | perr | perr_k | m_fault | io_fault | pr_ferr;
 
   always @(posedge clk) begin
     if (rst) begin
-      q <= Q_IDLE; done <= 1'b0; key_valid <= 1'b0; sk_valid <= 1'b0; result <= 8'd0;
+      begin q <= Q_IDLE; q_n <= ~(Q_IDLE); end done <= 1'b0; key_valid <= 1'b0; sk_valid <= 1'b0; result <= 8'd0;
       cycles <= 32'd0; dly <= 4'd0; bad <= 1'b0; wrap <= 1'b0; inj <= 1'b0; kx <= 1'b0;
-      zc <= 1'b0; role <= 1'b0; ctr_tx <= 64'd0;
+      zc <= 1'b0; kgc <= 1'b0; role <= 1'b0; ctr_tx <= 64'd0;
       rx_any <= 1'b0; rx_max <= 64'd0; rx_bits <= 64'd0;
       pc <= 10'd0; pcn <= 10'h3FF; rw <= 2'd0; wfirst <= 1'b0; fault <= 1'b0; ins_p <= 1'b0;
       ins_r <= 96'd0; fr <= 1'b0;
@@ -236,12 +242,12 @@ module pqse_core #(
       done <= 1'b0;
       if (q != Q_FETCH) fr <= 1'b0;          // a fetch always starts with the ROM read
       if (run) cycles <= cycles + 32'd1;
-      if (f_any && run) fault <= 1'b1;
+      if (f_any && (run || (q != ~q_n))) fault <= 1'b1;
       if (fault) begin                         // abort the command
         result <= R_FAULT;
         done   <= 1'b1;
         fault  <= 1'b0;
-        q      <= Q_IDLE;
+        begin q      <= Q_IDLE; q_n <= ~(Q_IDLE); end
       end else begin
         case (q)
           Q_IDLE: if (cmd_start) begin
@@ -250,11 +256,12 @@ module pqse_core #(
             inj    <= cmd_inj;
             kx     <= kexp;
             zc     <= (cmd == CMD_ZEROIZE);
+            kgc    <= (cmd == CMD_KEYGEN) || (cmd == CMD_KGWRAP);
             cycles <= 32'd0;
             if (ep_ok) begin
               pc  <= ep;
               pcn <= ~ep;
-              q   <= Q_FETCH;
+              begin q   <= Q_FETCH; q_n <= ~(Q_FETCH); end
             end else begin
               result <= R_UNKNOWN;
               done   <= 1'b1;
@@ -267,24 +274,24 @@ module pqse_core #(
               fr     <= 1'b0;
               result <= R_RNGFAIL;
               done   <= 1'b1;
-              q      <= Q_IDLE;
+              begin q      <= Q_IDLE; q_n <= ~(Q_IDLE); end
             end else begin
               fr    <= 1'b0;
               ins_r <= rom_q;
               ins_p <= rom_p;
-              q     <= Q_PG;
+              begin q     <= Q_PG; q_n <= ~(Q_PG); end
             end
           end
-          Q_PG: q <= pg_need ? Q_PW : Q_DLY;    // pg_start pulses here
-          Q_PW: if (!pg_busy) q <= Q_DLY;
+          Q_PG: begin q <= pg_need ? Q_PW : Q_DLY; q_n <= ~(pg_need ? Q_PW : Q_DLY); end    // pg_start pulses here
+          Q_PW: if (!pg_busy) begin q <= Q_DLY; q_n <= ~(Q_DLY); end
           Q_DLY: begin
             if (dly_ok && dly == 4'd0 && rnd[3:0] != 4'd0) begin
               dly <= rnd[3:0];            // 1..15 dummy clocks before the engine starts
             end else if (dly != 4'd0) begin
               dly <= dly - 4'd1;
-              if (dly == 4'd1) q <= Q_EXEC;
+              if (dly == 4'd1) begin q <= Q_EXEC; q_n <= ~(Q_EXEC); end
             end else begin
-              q <= Q_EXEC;
+              begin q <= Q_EXEC; q_n <= ~(Q_EXEC); end
             end
           end
           Q_EXEC: begin
@@ -292,12 +299,12 @@ module pqse_core #(
               C_END: begin
                 result <= ins_r[7:0];
                 done   <= 1'b1;
-                q      <= Q_IDLE;
+                begin q      <= Q_IDLE; q_n <= ~(Q_IDLE); end
               end
               C_BR: begin
                 pc  <= br_take ? ins_r[87:78] : pc + 10'd1;
                 pcn <= br_take ? ~ins_r[87:78] : ~(pc + 10'd1);
-                q   <= Q_FETCH;
+                begin q   <= Q_FETCH; q_n <= ~(Q_FETCH); end
               end
               C_SET: begin
                 case (ins_r[91:88])
@@ -335,16 +342,16 @@ module pqse_core #(
                 endcase
                 if (ins_r[91:88] == ST_RESEED) begin
                   rw <= 2'd0;
-                  q  <= Q_RSD;
+                  begin q  <= Q_RSD; q_n <= ~(Q_RSD); end
                 end else begin
                   pc  <= pc + 10'd1;
                   pcn <= ~(pc + 10'd1);
-                  q   <= Q_FETCH;
+                  begin q   <= Q_FETCH; q_n <= ~(Q_FETCH); end
                 end
               end
               default: begin             // an engine was started this clock
                 wfirst <= 1'b1;
-                q      <= Q_WAIT;
+                begin q      <= Q_WAIT; q_n <= ~(Q_WAIT); end
               end
             endcase
           end
@@ -353,12 +360,12 @@ module pqse_core #(
             if (!any_busy) begin
               pc  <= pc + 10'd1;
               pcn <= ~(pc + 10'd1);
-              q   <= Q_FETCH;
+              begin q   <= Q_FETCH; q_n <= ~(Q_FETCH); end
             end
           end
           Q_RSD: begin                    // collect 3 TRNG words, then reseed the PRNG
             if (rw == 2'd3) begin
-              q <= Q_RSW;
+              begin q <= Q_RSW; q_n <= ~(Q_RSW); end
             end else if (t_valid) begin
               rseed <= {rseed[127:0], t_word};
               rw    <= rw + 2'd1;
@@ -367,9 +374,9 @@ module pqse_core #(
           Q_RSW: if (!pr_busy) begin
             pc  <= pc + 10'd1;
             pcn <= ~(pc + 10'd1);
-            q   <= Q_FETCH;
+            begin q   <= Q_FETCH; q_n <= ~(Q_FETCH); end
           end
-          default: q <= Q_IDLE;
+          default: begin q <= Q_IDLE; q_n <= ~(Q_IDLE); end
         endcase
       end
       if (io_bad | m_bad) bad <= 1'b1;
@@ -622,8 +629,9 @@ module pqse_core #(
 `ifdef PQSE_TRACE
   always @(posedge clk) begin
     if (exec) $display("[%0t] pc %0d class %0d ins %h", $time, pc, cls, ins_r);
-    if (f_any && run) $display("[%0t] FAULT detected: ctl %b engine %b parity %b keccak %b okchk %b decoder %b",
-                               $time, f_ctl, f_eng, perr, perr_k, m_fault, io_fault);
+    if (f_any && (run || (q != ~q_n)))
+      $display("[%0t] FAULT detected: ctl %b engine %b parity %b keccak %b okchk %b decoder %b prng %b",
+               $time, f_ctl, f_eng, perr, perr_k, m_fault, io_fault, pr_ferr);
     if (done) $display("[%0t] command done: result %0d, %0d cycles", $time, result, cycles);
   end
 `endif

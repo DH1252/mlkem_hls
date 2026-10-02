@@ -189,13 +189,17 @@ module pqse_prng (
   output wire         busy,
   input  wire         take,        // the bits on rnd are used this clock
   input  wire         take_hi,     // ... and only bits 63:32 (allowed one clock after a take)
-  output wire [63:0]  rnd
+  output wire [63:0]  rnd,
+  output reg          ferr         // a take of a stale word (masks reused): a fault
 );
   // v4 (area): 32 Trivium rounds per clock instead of 64. The 64-bit word W
   // gets 32 fresh bits at the top on every advance, so it is entirely fresh
   // two advances after a take; the generator keeps advancing until it is.
-  // Rule (checked in simulation below): a take uses a fully fresh word, except
+  // Rule (checked in hardware below): a take uses a fully fresh word, except
   // a take_hi one clock after a take (it uses only the top half, which is fresh).
+  // The microcode and the engines never break it; a fault can (a flipped fr,
+  // a skipped wait, a take forced early), and the reused mask bits would unmask
+  // a share: ferr is set (until the engine reset) and the core aborts with FAULT.
   reg  [287:0] s;
   reg  [5:0]   icnt;
   reg          init;
@@ -224,6 +228,13 @@ module pqse_prng (
   assign busy = init | reseed | (masked_en && fr != 2'd2);
   assign rnd  = (masked_en && !init) ? W : 64'd0;
 
+  wire stale = masked_en && !init && !reseed && take && fr != 2'd2 && !take_hi;
+
+  always @(posedge clk) begin
+    if (rst) ferr <= 1'b0;
+    else     ferr <= ferr | stale;
+  end
+
   always @(posedge clk) begin
     if (rst) begin
       s    <= 288'd0;
@@ -249,19 +260,16 @@ module pqse_prng (
   end
 
 `ifdef PQSE_FAULT_CAMPAIGN
-  // fault campaign (tb_pqse_fault.sv): a reuse is an outcome of the injected
-  // fault (masks reused: the masking weakened), recorded, not a stop
+  // fault campaign (tb_pqse_fault.sv): records that a reuse happened (the core
+  // then aborts with FAULT through ferr); cleared by the testbench only
   reg reuse = 1'b0;
   always @(posedge clk)
-    if (!rst && masked_en && !init && !reseed && take && fr != 2'd2 && !take_hi) reuse <= 1'b1;
+    if (!rst && stale) reuse <= 1'b1;
 `elsif SYNTHESIS
 `else
-  // a take of a word that is not fully fresh would reuse mask bits: stop the simulation
-  always @(posedge clk) begin
-    if (!rst && masked_en && !init && !reseed && take && fr != 2'd2 && !take_hi) begin
-      $display("PRNG ERROR: random word taken %0d advance(s) after the previous take (t=%0t)", fr, $time);
-      $finish;
-    end
-  end
+  always @(posedge clk)
+    if (!rst && stale)
+      $display("PRNG: random word taken %0d advance(s) after the previous take (t=%0t): fault",
+               fr, $time);
 `endif
 endmodule

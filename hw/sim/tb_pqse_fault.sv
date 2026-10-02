@@ -24,9 +24,10 @@
 // with outcome "ok" (the output is right), "bad" (KeyGen: a wrong ek), "K=<hex>"
 // (Decaps: a different K - scripts/pqse_fault_report.py tells the implicit
 // rejection K' = J(z || c), harmless, from any other K, a silent fault) or
-// "hang" (no done within 2 C + 20000 clocks), and r=1 when the PRNG handed out a
-// random word twice in that run (masks reused: the masking weakened, invisible in
-// the output). Target "none" flips nothing: the null control - every "none" run
+// "hang" (no done within 2 C + 20000 clocks after the host watchdog's limit,
+// 2^PQSE_WD_LOG2 clocks: make sim-se-fault sets 21), and r=1 when the PRNG handed
+// out a random word twice in that run (masks reused; the hardware check then
+// aborts the command with FAULT). Target "none" flips nothing: the null control - every "none" run
 // must come out unchanged, else the harness itself is wrong. The script
 // summarizes per target.
 // -----------------------------------------------------------------------------
@@ -37,6 +38,11 @@ module tb_pqse_fault;
   localparam int B_EKOWN = 0, B_XIN = 164, B_K = 448, B_INJD = 452, B_INJZ = 456, B_INJH = 464;
   localparam int CTRL = 'h402, STATUS = 'h403, CYCLES = 'h404;
   localparam int KEYGEN = 1, DECAPS = 3, IMPORT = 4;
+`ifdef PQSE_WD_LOG2
+  localparam int WD = 1 << `PQSE_WD_LOG2;    // host command watchdog (pqse_host.v)
+`else
+  localparam int WD = 1 << 22;
+`endif
 
   logic        clk = 1'b0;
   logic        reset = 1'b1;
@@ -83,7 +89,7 @@ module tb_pqse_fault;
   endtask
 
   // ---- fault targets ---------------------------------------------------------------------
-  localparam int NT = 38;                 // the last one, "none", is the null control
+  localparam int NT = 39;                 // the last one, "none", is the null control
   string tname[NT] = '{
     "core.pc", "core.pcn", "core.ins_r", "core.q",
     "keccak.ks", "keccak.rnd_i", "keccak.cx", "keccak.T0", "keccak.T1",
@@ -93,7 +99,7 @@ module tb_pqse_fault;
     "mcomp.X0w", "mcomp.A0", "mcomp.C0",
     "poly.wq", "poly.aq", "io.um0",
     "pmem0", "pmem1", "seed0", "seed1",
-    "host.lc", "host.fcnt", "nvm.fa", "none"};
+    "host.lc", "host.fcnt", "nvm.fa", "prng.fr", "none"};
 
 `define FLIP(sig) begin k = b % $bits(sig); sig[k] = ~sig[k]; end
 `define FLIP1(sig) begin sig = ~sig; end
@@ -138,6 +144,7 @@ module tb_pqse_fault;
       34: `FLIP(dut.u_sys.u_host.lc)
       35: `FLIP(dut.u_sys.u_host.fcnt)
       36: `FLIP(dut.u_sys.u_host.u_nvm.fa)
+      37: `FLIP(dut.u_sys.u_core.u_prng.fr)
       default: ;
     endcase
   endtask
@@ -199,7 +206,7 @@ module tb_pqse_fault;
     repeat (clk_at) @(posedge clk);
     @(negedge clk);
     flip(t, b, w);
-    finish_to(2 * cref + 20000, res);
+    finish_to(WD + 2 * cref + 20000, res);
     if (res < 0) oc = "hang";
     else if (res != 0) oc = "-";
     else if (kg) begin

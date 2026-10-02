@@ -240,7 +240,8 @@ sim-se-tvla: | $(BUILD)
 # RAM, both shares) at a random clock of a NIST-vector masked Decaps (FOP=decaps)
 # or KeyGen (FOP=keygen); scripts/pqse_fault_report.py sorts the outcomes into
 # unchanged / detected / implicit rejection / SILENT (a wrong output with
-# result 0: what fault attacks exploit) / hang, per target.
+# result 0: what fault attacks exploit) / hang, per target. The host watchdog
+# is shortened to 2^21 clocks here (a hung run then ends with FAULT sooner).
 #   make sim-se-fault [FOP=decaps|keygen] [FN=200] [SEED=1] [LOWPOWER=1] [FPAR=4]
 # Every run is its own simulation process (a cold chip: nothing a fault left in
 # a RAM or an unreset register carries into the next run), FPAR at a time.
@@ -258,7 +259,8 @@ sim-se-fault: | $(BUILD)
 	cp -r hw/sim/vectors $(FTD)/
 	cd $(FTD) && $(VERILATOR) --binary --timing -j 2 -O3 -Wno-fatal -Wno-lint -Wno-style \
 	    --top-module tb_pqse_fault -Mdir obj -o ../vfault -I../../hw/se \
-	    +define+PQSE_SIM_INIT +define+PQSE_FAULT_CAMPAIGN $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
+	    +define+PQSE_SIM_INIT +define+PQSE_FAULT_CAMPAIGN +define+PQSE_WD_LOG2=21 \
+	    $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
 	    ../../hw/sim/tb_pqse_fault.sv $(addprefix ../../,$(SE_SRC)) > build.log 2>&1 \
 	    || { tail -30 build.log; exit 1; }
 	if [ "$(FMODE)" = chain ]; then \

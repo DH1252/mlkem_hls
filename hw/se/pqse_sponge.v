@@ -122,6 +122,9 @@ module pqse_sponge #(
   reg  [63:0] kp0, kp1;                 // previous key lane, per share
 
   reg  [4:0] hs, hret;
+  reg  [4:0] hs_n, hret_n;              // complemented shadows (fault protection)
+  reg        hbad;                      // state mismatch (registered)
+  wire       k_perr;
   reg        idl;                       // the idle registers are cleared
   reg  [4:0] pos;
   reg        part;
@@ -150,8 +153,10 @@ module pqse_sponge #(
     .clk(clk), .rst(rst), .msk(j_msk),
     .clr(k_clr), .ax_en(k_ax), .ax_idx(k_idx), .ax_v0(k_v0), .ax_v1(k_v1),
     .rd_en(k_rd), .rd_idx(pos), .rd_v0(k_r0), .rd_v1(k_r1),
-    .go(k_go), .busy(k_busy), .rnd(rnd), .rnd_take(rnd_take), .perr(perr)
+    .go(k_go), .busy(k_busy), .rnd(rnd), .rnd_take(rnd_take), .perr(k_perr)
   );
+
+  assign perr = k_perr | hbad;          // Keccak state / control, sponge state: a fault
 
   // ---- padding ------------------------------------------------------------------------
   // SHA3 0x06, SHAKE 0x1F, cSHAKE / KMAC 0x04; KMAC appends right_encode(L) itself
@@ -274,9 +279,12 @@ module pqse_sponge #(
 
   always @(posedge clk) begin
     if (rst) begin
-      hs  <= H_IDLE;
+      begin hs  <= H_IDLE; hs_n <= ~(H_IDLE); end
+      begin hret <= H_IDLE; hret_n <= ~(H_IDLE); end
+      hbad <= 1'b0;
       idl <= 1'b0;
     end else begin
+      hbad <= (hs != ~hs_n) | (hret != ~hret_n);
       case (hs)
         H_IDLE: if (!start) begin
           // no key / keystream left (cleared once on entering idle, then held:
@@ -292,45 +300,45 @@ module pqse_sponge #(
           part <= 1'b0;
           lcnt <= 8'd0;
           ocnt <= 8'd0;
-          hs   <= H_CLR;
+          begin hs   <= H_CLR; hs_n <= ~(H_CLR); end
         end
         H_CLR: if (!k_busy) begin       // the state RAMs are wiped (pqse_keccak.v)
-          if (j_kmac)                   hs <= H_KA;
-          else if (j_p1src != SRC_NONE) hs <= H_ARD;
-          else if (j_p2src != SRC_NONE) begin part <= 1'b1; hs <= H_ARD; end
-          else                          hs <= H_FIN1;
+          if (j_kmac)                   begin hs <= H_KA; hs_n <= ~(H_KA); end
+          else if (j_p1src != SRC_NONE) begin hs <= H_ARD; hs_n <= ~(H_ARD); end
+          else if (j_p2src != SRC_NONE) begin part <= 1'b1; begin hs <= H_ARD; hs_n <= ~(H_ARD); end end
+          else                          begin hs <= H_FIN1; hs_n <= ~(H_FIN1); end
         end
         H_KA: begin
           if (pos == 5'd1) begin
             kc   <= 3'd0;
-            hret <= H_KR;
-            hs   <= H_PGO;                // permute block A
+            begin hret <= H_KR; hret_n <= ~(H_KR); end
+            begin hs   <= H_PGO; hs_n <= ~(H_PGO); end                // permute block A
           end else begin
             pos <= pos + 5'd1;
           end
         end
         H_KR: begin
           if (kc < 3'd4) begin
-            hs <= H_KW;
+            begin hs <= H_KW; hs_n <= ~(H_KW); end
           end else begin                  // block B complete: permute, then X (part 2)
             part <= 1'b1;
             lcnt <= 8'd0;
-            hret <= H_ARD;
-            hs   <= H_PGO;
+            begin hret <= H_ARD; hret_n <= ~(H_ARD); end
+            begin hs   <= H_PGO; hs_n <= ~(H_PGO); end
           end
         end
         H_KW: begin
           kp0 <= kd0;
           kp1 <= kd1;
           kc  <= kc + 3'd1;
-          hs  <= H_KR;
+          begin hs  <= H_KR; hs_n <= ~(H_KR); end
         end
         H_ARD: begin
           if (pos == rl) begin
-            hret <= H_ARD;
-            hs   <= H_PGO;
+            begin hret <= H_ARD; hret_n <= ~(H_ARD); end
+            begin hs   <= H_PGO; hs_n <= ~(H_PGO); end
           end else begin
-            hs <= H_AWR;
+            begin hs <= H_AWR; hs_n <= ~(H_AWR); end
           end
         end
         H_AWR: if (in_ok) begin
@@ -339,43 +347,44 @@ module pqse_sponge #(
             lcnt <= 8'd0;
             if (!part && (j_p2src != SRC_NONE)) begin
               part <= 1'b1;
-              hs   <= H_ARD;
+              begin hs   <= H_ARD; hs_n <= ~(H_ARD); end
             end else begin
-              hs <= H_FIN1;
+              begin hs <= H_FIN1; hs_n <= ~(H_FIN1); end
             end
           end else begin
             lcnt <= lcnt + 8'd1;
-            hs   <= H_ARD;
+            begin hs   <= H_ARD; hs_n <= ~(H_ARD); end
           end
         end
         H_FIN1: begin
           if (pos == rl) begin
-            hret <= H_FIN1;
-            hs   <= H_PGO;
+            begin hret <= H_FIN1; hret_n <= ~(H_FIN1); end
+            begin hs   <= H_PGO; hs_n <= ~(H_PGO); end
           end else begin
-            hs <= H_FIN2;
+            begin hs <= H_FIN2; hs_n <= ~(H_FIN2); end
           end
         end
         H_FIN2: begin
           pos  <= rl;          // the block is complete: permute, then squeeze
-          hret <= H_SQ0;
-          hs   <= H_PGO;
+          begin hret <= H_SQ0; hret_n <= ~(H_SQ0); end
+          begin hs   <= H_PGO; hs_n <= ~(H_PGO); end
         end
-        H_PGO: hs <= H_PW;
+        H_PGO: begin hs <= H_PW; hs_n <= ~(H_PW); end
         H_PW:  if (!k_busy) begin
           pos <= 5'd0;
-          hs  <= hret;
+          begin hs  <= hret; hs_n <= ~(hret); end
         end
-        H_SQ0: hs <= ((j_sink == SNK_SEED) || (j_sink == SNK_SXOR) || (j_sink == SNK_BXOR)) ?
-                     H_SRD : H_STRM;
+        H_SQ0: begin hs <= ((j_sink == SNK_SEED) || (j_sink == SNK_SXOR) || (j_sink == SNK_BXOR)) ?
+                     H_SRD : H_STRM; hs_n <= ~(((j_sink == SNK_SEED) || (j_sink == SNK_SXOR) || (j_sink == SNK_BXOR)) ?
+                     H_SRD : H_STRM); end
         H_SRD: begin
           if (ocnt == j_onl) begin
-            hs <= H_IDLE;
+            begin hs <= H_IDLE; hs_n <= ~(H_IDLE); end
           end else if (pos == rl) begin
-            hret <= H_SRD;
-            hs   <= H_PGO;
+            begin hret <= H_SRD; hret_n <= ~(H_SRD); end
+            begin hs   <= H_PGO; hs_n <= ~(H_PGO); end
           end else begin
-            hs <= H_SKX;                             // state lane read issued
+            begin hs <= H_SKX; hs_n <= ~(H_SKX); end                             // state lane read issued
           end
         end
         H_SKX: begin                                 // the lane is on k_r0 / k_r1
@@ -383,34 +392,34 @@ module pqse_sponge #(
             kx0 <= k_r0;
             kx1 <= j_msk ? k_r1 : 64'd0;
           end
-          hs <= H_SWR;
+          begin hs <= H_SWR; hs_n <= ~(H_SWR); end
         end
         H_SWR: begin
           pos  <= pos + 5'd1;
           ocnt <= ocnt + 8'd1;
-          hs   <= H_SRD;
+          begin hs   <= H_SRD; hs_n <= ~(H_SRD); end
         end
         H_STRM: begin                                // read lane pos
           if (strm_end) begin
-            hs <= H_WAIT;
+            begin hs <= H_WAIT; hs_n <= ~(H_WAIT); end
           end else if (pos == rl) begin
-            hret <= H_STRM;
-            hs   <= H_PGO;
+            begin hret <= H_STRM; hret_n <= ~(H_STRM); end
+            begin hs   <= H_PGO; hs_n <= ~(H_PGO); end
           end else begin
-            hs <= H_STRV;
+            begin hs <= H_STRV; hs_n <= ~(H_STRV); end
           end
         end
         H_STRV: begin                                // lane pos offered until taken
           if (strm_end) begin
-            hs <= H_WAIT;
+            begin hs <= H_WAIT; hs_n <= ~(H_WAIT); end
           end else if (so_ready) begin
             pos  <= pos + 5'd1;
             ocnt <= ocnt + 8'd1;
-            hs   <= H_STRM;
+            begin hs   <= H_STRM; hs_n <= ~(H_STRM); end
           end
         end
-        H_WAIT: if (sink_done) hs <= H_IDLE;
-        default: hs <= H_IDLE;
+        H_WAIT: if (sink_done) begin hs <= H_IDLE; hs_n <= ~(H_IDLE); end
+        default: begin hs <= H_IDLE; hs_n <= ~(H_IDLE); end
       endcase
     end
   end

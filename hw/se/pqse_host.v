@@ -40,6 +40,8 @@
 //     keys wiped, the fault counted, and the command reports R_FAULT; the third
 //     fault moves the lifecycle to KILLED
 //   - tamper input or LIFECYCLE := KILLED: abort, KILLED, wipe (result R_KILLED)
+//   - a command still running after 2^22 clocks (watchdog: a fault hung the
+//     core) counts as a detected fault; a hung internal wipe moves to KILLED
 //   - the security state (lifecycle, fault counter, tampered flag) is held
 //     twice, the second copy complemented and written in the same statements;
 //     a mismatch (a bit flipped by a laser, a glitch or an upset) is handled
@@ -111,6 +113,37 @@ module pqse_host #(
   reg        zrun;           // internal ZEROIZE running
   reg  [1:0] zkind;          // why: power-on, fault, tamper / kill
 
+  // ---- command watchdog ----
+  // Every command ends in a bounded number of clocks (the longest, KeyGen with
+  // its pairwise consistency test, ~0.9 M). A command still running after 2^22
+  // clocks (~84 ms at 50 MHz) has hung: a fault stopped the sequencer, an engine
+  // or a wait on the TRNG. It is handled like a detected fault (engines reset,
+  // counted, wiped); a hung internal wipe like a failed one (KILLED). The
+  // counter is here, not in the core: a fault that stops the core also stops
+  // its cycle counter.
+`ifdef PQSE_WD_LOG2
+  localparam WD_LOG2 = `PQSE_WD_LOG2;    // shorter in the fault campaign (make sim-se-fault)
+`else
+  localparam WD_LOG2 = 22;
+`endif
+  reg        pend;           // a command (or the internal wipe) is running; busy until
+                             // it ends, also when a fault stopped the core silently
+  reg [WD_LOG2:0] wdc;
+  wire       wd_hit = pend && wdc[WD_LOG2];
+  always @(posedge clk) begin
+    if (rst || core_rst || wd_hit) begin      // wd_hit: handled once (below)
+      pend <= 1'b0;
+      wdc  <= {(WD_LOG2+1){1'b0}};
+    end else if (cmd_start) begin
+      pend <= 1'b1;
+      wdc  <= {(WD_LOG2+1){1'b0}};
+    end else if (core_done) begin
+      pend <= 1'b0;
+    end else if (pend) begin
+      wdc  <= wdc + 1'b1;
+    end
+  end
+
   // ---- persistent security state ----
   // bits: [0] PERSO reached [1] USER reached [2] KILLED [3..5] 1st..3rd fault
   // [6] tampered; thermometer codes (only ever set, like OTP fuses), stored
@@ -154,7 +187,7 @@ module pqse_host #(
                            in_win(ln, B_INJH, 9'd4))) ||
                 (test  && (in_win(ln, B_INJD, 9'd4) || in_win(ln, B_INJM, 9'd4)));
   wire is_buf = !bus_addr[10] && !bus_addr[11];
-  wire idle   = !core_busy && !cmd_start && !zpend && !zrun && !nv_crit;
+  wire idle   = !core_busy && !cmd_start && !zpend && !zrun && !nv_crit && !pend;
 
   assign h_we    = bus_we && is_buf && can_wr && idle && (lc != LC_KILLED);
   assign h_re    = bus_re && is_buf && can_rd && idle;
@@ -170,7 +203,8 @@ module pqse_host #(
   wire       ctrl_wr = bus_we && (bus_addr == 12'h402);
   wire       kill_wr = bus_we && (bus_addr == 12'h405) && (bus_wdata[1:0] == LC_KILLED) &&
                        (lc != LC_KILLED);
-  wire       fault_done = core_done && !zrun && (core_result == R_FAULT);
+  wire       fault_done = (core_done && !zrun && (core_result == R_FAULT)) ||
+                          (wd_hit && !zrun);                 // a hung command
 
   always @(posedge clk) begin
     if (rst) begin
@@ -219,6 +253,13 @@ module pqse_host #(
         zpend    <= 1'b1;
         zkind    <= Z_FAULT;
         core_rst <= 1'b1;
+      end else if (wd_hit && zrun) begin
+        // the internal wipe hung: give up, like a failed wipe
+        zrun     <= 1'b0;
+        begin lc <= LC_KILLED; lcn <= ~(LC_KILLED); end
+        res      <= R_FAULT;
+        done_s   <= 1'b1;
+        core_rst <= 1'b1;
       end else if (core_done && zrun) begin
         // internal wipe finished
         zrun <= 1'b0;
@@ -261,7 +302,7 @@ module pqse_host #(
   end
 
   // ---- reads (latency 1) ----
-  wire busy_s = core_busy | cmd_start | zpend | zrun | nv_crit;
+  wire busy_s = core_busy | cmd_start | zpend | zrun | nv_crit | pend;
   always @(posedge clk) begin
     rd_buf <= bus_re && is_buf;
     rd_ok  <= h_re;

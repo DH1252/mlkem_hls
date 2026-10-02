@@ -47,6 +47,13 @@
 //      flipped in the lifecycle register (laser / glitch on the security
 //      state) is caught by its complemented shadow: KILLED, tampered, wiped -
 //      and still KILLED and tampered after a power cycle
+//  17  fault hardening (new chips, two faults each): a flipped Keccak round
+//      counter and a flipped sponge state bit (complemented shadows), a
+//      flipped sequencer state bit (shadow) and a hung command (state and
+//      shadow both forced idle: the host watchdog), a PRNG word taken stale
+//      (masks reused) and a dk corrupted after KeyGen computed ek (2 bits,
+//      parity-blind: the pairwise consistency test) - each aborts with R_FAULT
+// Every KeyGen also runs the pairwise consistency test (sections 2, 8, 16).
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -66,6 +73,14 @@ module tb_pqse;
   localparam logic [9:0] PC_DC_INTT = 10'd366,   // INTT of u_0's share 1 (re-encryption)
                          PC_DC_SEQ  = 10'd341,   // the share-wise compare of the two m' decodings
                          PC_DC_VPWM = 10'd400;   // a PWM in v: after the u comparisons, before OKCHK
+  // KeyGen pairwise consistency test (KEYGEN at 16, PCT at 608)
+  localparam logic [9:0] PC_PCT     = 10'd608,   // PCT start: ek computed, s^ final
+                         PC_PCT_SEQ = 10'd698;   // the share-wise compare of K and K'
+`ifdef PQSE_WD_LOG2
+  localparam int WD_LOG2 = `PQSE_WD_LOG2;        // host command watchdog (pqse_host.v)
+`else
+  localparam int WD_LOG2 = 22;
+`endif
 
   logic        clk = 1'b0;
   logic        reset = 1'b1;
@@ -176,6 +191,15 @@ module tb_pqse;
   task automatic wait_idle();
     logic [31:0] st;
     do rd(STATUS, st); while (st[0]);
+  endtask
+  // a new chip: the store cleared, a power cycle, the power-on wipe
+  task automatic new_chip();
+    nvm_clear();
+    reset = 1'b1;
+    repeat (5) @(negedge clk);
+    reset = 1'b0;
+    repeat (4) @(negedge clk);
+    wait_idle();
   endtask
   task automatic report(input string what, input int bad);
     if (bad == 0) $display("[PASS] %s", what);
@@ -720,6 +744,71 @@ module tb_pqse;
     rd(LIFECYCLE, r);
     report("tamper: lifecycle register and shadow rolled back below the store -> KILLED again",
            int'(r != 3));
+
+    // 17 fault hardening: control shadows, watchdog, PRNG reuse, pairwise consistency ----------
+    // chip A: (a) the Keccak round counter, (b) the sponge state
+    new_chip();
+    start(KEYGEN, 0);
+    wait (dut.u_sys.u_core.u_sponge.u_keccak.ks == 3'd3 && dut.u_sys.u_core.u_sponge.u_keccak.rnd_i == 5'd5);
+    @(negedge clk);
+    dut.u_sys.u_core.u_sponge.u_keccak.rnd_i[1] = ~dut.u_sys.u_core.u_sponge.u_keccak.rnd_i[1];
+    finish(res, cyc);
+    rd(STATUS, st);
+    report("fault: a Keccak round-counter bit flipped (skipped rounds) -> shadow mismatch, R_FAULT",
+           int'(res != R_FAULT) + int'(st[18:17] != 2'd1) + int'(st[2] != 1'b0));
+    start(KEYGEN, 0);
+    wait (dut.u_sys.u_core.u_sponge.hs != 5'd0);
+    repeat (3) @(negedge clk);
+    dut.u_sys.u_core.u_sponge.hs[2] = ~dut.u_sys.u_core.u_sponge.hs[2];
+    finish(res, cyc);
+    rd(STATUS, st);
+    report("fault: a sponge state bit flipped -> shadow mismatch, R_FAULT, 2 faults counted",
+           int'(res != R_FAULT) + int'(st[18:17] != 2'd2) + int'(st[2] != 1'b0));
+    // chip B: (c) the sequencer state, (d) a hang
+    new_chip();
+    start(KEYGEN, 0);
+    do @(negedge clk); while (dut.u_sys.u_core.q != 4'd4);    // Q_WAIT (an engine runs)
+    dut.u_sys.u_core.q = 4'd0;                   // -> Q_IDLE (bit 2 flipped): mid-command, no done
+    finish(res, cyc);
+    rd(STATUS, st);
+    report("fault: the sequencer state flipped to idle mid-command -> shadow mismatch, R_FAULT",
+           int'(res != R_FAULT) + int'(st[18:17] != 2'd1) + int'(st[2] != 1'b0));
+    start(KEYGEN, 0);
+    do @(negedge clk); while (dut.u_sys.u_core.q != 4'd4);
+    dut.u_sys.u_core.q   = 4'd0;                 // state and shadow both forced idle:
+    dut.u_sys.u_core.q_n = 4'hF;                 // the core stops silently
+    repeat (100) @(negedge clk);
+    rd(STATUS, st);
+    bad = int'(st[0] != 1'b1) + int'(st[1] != 1'b0);   // still busy, no result
+    dut.u_sys.u_host.wdc[WD_LOG2] = 1'b1;        // skip ahead: 2^WD_LOG2 clocks have passed
+    finish(res, cyc);
+    rd(STATUS, st);
+    report("fault: a hung command -> host watchdog, R_FAULT, keys wiped, 2 faults counted",
+           bad + int'(res != R_FAULT) + int'(st[18:17] != 2'd2) + int'(st[2] != 1'b0));
+    // chip C: (e) a PRNG word taken stale, (f) the pairwise consistency test
+    new_chip();
+    start(KEYGEN, 0);
+    repeat (2000) @(negedge clk);
+    while (!(dut.u_sys.u_core.u_prng.take && !dut.u_sys.u_core.u_prng.take_hi &&
+             !dut.u_sys.u_core.u_prng.init && dut.u_sys.u_core.u_prng.fr == 2'd2))
+      @(negedge clk);
+    dut.u_sys.u_core.u_prng.fr = 2'd0;           // the word on rnd is now the last one taken
+    finish(res, cyc);
+    rd(STATUS, st);
+    report("fault: a PRNG word taken twice (masks reused) -> R_FAULT",
+           int'(res != R_FAULT) + int'(st[18:17] != 2'd1) + int'(st[2] != 1'b0));
+    // s^_0 share 0 (RAM 0, slot 0, word 3), 2 bits (parity-blind), flipped after
+    // ek was computed: ek and dk no longer match
+    start(KEYGEN, 0);
+    wait (dut.u_sys.u_core.pc == PC_PCT);
+    @(negedge clk);
+    dut.u_sys.u_core.u_pmem0.g_def.mem[3] = dut.u_sys.u_core.u_pmem0.g_def.mem[3] ^ 25'h3;
+    wait (dut.u_sys.u_core.done);
+    bad = int'(dut.u_sys.u_core.pc != PC_PCT_SEQ);    // aborted by the K compare
+    finish(res, cyc);
+    rd(STATUS, st);
+    report("fault: dk corrupted after ek was computed -> pairwise consistency test, R_FAULT, key not valid",
+           bad + int'(res != R_FAULT) + int'(st[18:17] != 2'd2) + int'(st[2] != 1'b0));
 
     // 15 SPI + tamper (second instance) ----------------------------------------------------------
     // consecutive reads of different registers and a write/read of both CONFIG

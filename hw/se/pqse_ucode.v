@@ -42,6 +42,14 @@
 //   544      PUFRAW (TEST): 960 raw PUF bits
 //   548      TRNGRAW (TEST): 136 raw TRNG words
 //   560      ZEROIZE
+//   608      KeyGen pairwise consistency test (KEYGEN / KGWRAP, not UNWRAP):
+//            a masked Encaps to the new ek (read back from the buffer, with its
+//            own H(ek)) of a fresh random m, the ciphertext into the output
+//            window, then a Decaps of it with the new s^ (m' decoded once, no
+//            re-encryption: K' = G(m' || h) with the dk's own h); K and K' are
+//            compared share-wise (IO_SEQ): a mismatch aborts with FAULT before
+//            the key is marked valid (FIPS 140-3 pairwise consistency test, and
+//            a check against a fault that corrupted the key pair)
 //
 // PUF key reconstruction (48): the helper data's last lane holds the 64-bit
 // check value H(k || "C") (first 8 bytes of SHA3-256, written by ENROLL). The
@@ -88,7 +96,8 @@ module pqse_ucode (
                    X_BADTAG = 10'd4, X_NOSK = 10'd5, X_REPLAY = 10'd6, X_PUF = 10'd7;
   localparam [9:0] L_KGSEED = 10'd18,  L_KGINJ = 10'd24,  L_UWK = 10'd34, L_UWFAIL = 10'd44,
                    L_PREC   = 10'd48,  L_PROK  = 10'd62,  L_PFAIL = 10'd68,
-                   L_KG     = 10'd80,  L_WRAP  = 10'd144, L_KGEND = 10'd156;
+                   L_KG     = 10'd80,  L_WRAP  = 10'd144, L_KGEND = 10'd156,
+                   L_KGV    = 10'd141, L_PCT   = 10'd608;
 
   // ---- instruction builders --------------------------------------------------------
   function [95:0] u_end(input [7:0] r);
@@ -409,9 +418,10 @@ module pqse_ucode (
       10'd137: ins = padd(Y2, Y2B);
       10'd138: ins = enc12(Y2, B_EKOWN + 9'd96);
       10'd139: ins = h_hbuf(B_EKOWN, 8'd148, E_H);            // H(ek)
-      10'd140: ins = u_set(ST_KEYV);                          // s^ (S0..S5) and z stay masked
-      10'd141: ins = u_br(BC_WRAP, L_WRAP);
-      10'd142: ins = u_br(BC_ALWAYS, L_KGEND);
+      10'd140: ins = u_br(BC_KGEN, L_PCT);                    // KEYGEN / KGWRAP: PCT first
+      10'd141: ins = u_set(ST_KEYV);                          // L_KGV; s^ (S0..S5) and z stay masked
+      10'd142: ins = u_br(BC_WRAP, L_WRAP);
+      10'd143: ins = u_br(BC_ALWAYS, L_KGEND);
 
       // ---------------- wrap (144), KGWRAP only: the KEK is already in E_KEK ----------------
       10'd144: ins = h_trng(E_TMP);
@@ -777,6 +787,111 @@ module pqse_ucode (
       10'd600: ins = u_set(ST_KEYC);
       10'd601: ins = u_set(ST_SKC);
       10'd602: ins = u_end(R_OK);
+
+      // ---------------- KeyGen pairwise consistency test (608), KEYGEN / KGWRAP ----------------
+      // Encaps to the own ek just written (from the buffer, as a peer would), Decaps
+      // with the own s^ (in S0..S5): the two K must agree (masked compare), else FAULT
+      10'd608: ins = pzero(S_Z);                               // L_PCT; the all-zero slot (precharge reads)
+      10'd609: ins = h_trng(E_M);                              // m (masked)
+      10'd610: ins = h_hbuf(B_EKOWN, 8'd148, E_PH);            // H(ek) of the published ek
+      10'd611: ins = h_g(E_M, E_PH, E_K1, E_R);                // (K, r) = G(m || H(ek))
+      10'd612: ins = h_prf(E_R, 8'd0);                         // y_0
+      10'd613: ins = cbd(Y0, Y0B, 1'b0);
+      10'd614: ins = ntt(Y0);
+      10'd615: ins = ntt(Y0B);
+      10'd616: ins = h_prf(E_R, 8'd1);                         // y_1
+      10'd617: ins = cbd(Y1, Y1B, 1'b0);
+      10'd618: ins = ntt(Y1);
+      10'd619: ins = ntt(Y1B);
+      10'd620: ins = h_prf(E_R, 8'd2);                         // y_2
+      10'd621: ins = cbd(Y2, Y2B, 1'b0);
+      10'd622: ins = ntt(Y2);
+      10'd623: ins = ntt(Y2B);
+      // u_i = INTT(sum_j A^[j][i] o y^_j) + e1_i -> c1, written to the output window
+      10'd624: ins = h_xof(RHO_OWN, 8'd0, 8'd0, S_T);
+      10'd625: ins = pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd626: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd627: ins = h_xof(RHO_OWN, 8'd0, 8'd1, S_T);
+      10'd628: ins = pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd629: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd630: ins = h_xof(RHO_OWN, 8'd0, 8'd2, S_T);
+      10'd631: ins = pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd632: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd633: ins = intt(S_ACC0);
+      10'd634: ins = intt(S_ACC1);
+      10'd635: ins = h_prf(E_R, 8'd3);                         // + e1_0
+      10'd636: ins = cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd637: ins = cmpro(4'd10, B_XOUT);                     // c1 part 0
+      10'd638: ins = h_xof(RHO_OWN, 8'd1, 8'd0, S_T);
+      10'd639: ins = pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd640: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd641: ins = h_xof(RHO_OWN, 8'd1, 8'd1, S_T);
+      10'd642: ins = pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd643: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd644: ins = h_xof(RHO_OWN, 8'd1, 8'd2, S_T);
+      10'd645: ins = pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd646: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd647: ins = intt(S_ACC0);
+      10'd648: ins = intt(S_ACC1);
+      10'd649: ins = h_prf(E_R, 8'd4);                         // + e1_1
+      10'd650: ins = cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd651: ins = cmpro(4'd10, B_XOUT + 9'd40);             // c1 part 1
+      10'd652: ins = h_xof(RHO_OWN, 8'd2, 8'd0, S_T);
+      10'd653: ins = pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd654: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd655: ins = h_xof(RHO_OWN, 8'd2, 8'd1, S_T);
+      10'd656: ins = pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd657: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd658: ins = h_xof(RHO_OWN, 8'd2, 8'd2, S_T);
+      10'd659: ins = pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd660: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd661: ins = intt(S_ACC0);
+      10'd662: ins = intt(S_ACC1);
+      10'd663: ins = h_prf(E_R, 8'd5);                         // + e1_2
+      10'd664: ins = cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd665: ins = cmpro(4'd10, B_XOUT + 9'd80);             // c1 part 2
+      // v = INTT(sum_j t^_j o y^_j) + e2 + Decompress_1(m) -> c2
+      10'd666: ins = dec(DM_WR, 4'd12, 1'b0, B_EKOWN, S_T);
+      10'd667: ins = pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd668: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd669: ins = dec(DM_WR, 4'd12, 1'b0, B_EKOWN + 9'd48, S_T);
+      10'd670: ins = pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd671: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd672: ins = dec(DM_WR, 4'd12, 1'b0, B_EKOWN + 9'd96, S_T);
+      10'd673: ins = pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd674: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd675: ins = intt(S_ACC0);
+      10'd676: ins = intt(S_ACC1);
+      10'd677: ins = h_prf(E_R, 8'd6);                         // + e2
+      10'd678: ins = cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd679: ins = mu(E_M);                                  // + mu
+      10'd680: ins = cmpro(4'd4, B_XOUT + 9'd120);             // c2
+      // Decaps: w = v' - INTT(s^T o NTT(u')), each share of s on its own; m' = Compress_1(w)
+      10'd681: ins = dec(DM_WR, 4'd10, 1'b0, B_XOUT, S_T);
+      10'd682: ins = ntt(S_T);
+      10'd683: ins = pwm(1'b0, S_ACC0, S0, S_T);
+      10'd684: ins = pwm(1'b0, S_ACC1, S1, S_T);
+      10'd685: ins = dec(DM_WR, 4'd10, 1'b0, B_XOUT + 9'd40, S_T);
+      10'd686: ins = ntt(S_T);
+      10'd687: ins = pwm(1'b1, S_ACC0, S2, S_T);
+      10'd688: ins = pwm(1'b1, S_ACC1, S3, S_T);
+      10'd689: ins = dec(DM_WR, 4'd10, 1'b0, B_XOUT + 9'd80, S_T);
+      10'd690: ins = ntt(S_T);
+      10'd691: ins = pwm(1'b1, S_ACC0, S4, S_T);
+      10'd692: ins = pwm(1'b1, S_ACC1, S5, S_T);
+      10'd693: ins = intt(S_ACC0);
+      10'd694: ins = intt(S_ACC1);
+      10'd695: ins = dec(DM_RSUB, 4'd4, 1'b0, B_XOUT + 9'd120, S_ACC0); // w0 = v' - acc0
+      10'd696: ins = cmpr1(E_TMP);                             // m'
+      10'd697: ins = h_g(E_TMP, E_H, E_KB, E_R);               // (K', r') = G(m' || h), h of dk
+      10'd698: ins = seq(E_K1, E_KB);                          // K' != K: FAULT (key never valid)
+      10'd699: ins = szero(E_M);
+      10'd700: ins = szero(E_TMP);
+      10'd701: ins = szero(E_K1);
+      10'd702: ins = szero(E_KB);
+      10'd703: ins = pzero(S_ACC0);
+      10'd704: ins = pzero(S_ACC1);
+      10'd705: ins = u_br(BC_ALWAYS, L_KGV);                   // the rest is wiped at L_KGEND
 
       default: ins = u_end(R_UNKNOWN);
     endcase
