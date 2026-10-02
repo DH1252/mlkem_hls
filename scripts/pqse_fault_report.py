@@ -47,7 +47,7 @@ def main():
         c = hexfile(cp)
         k_rej = hashlib.shake_256(z + c).digest(32).hex()
 
-    op, runs = '?', []
+    op, mode, runs = '?', '?', []
     with open(a.log) as f:
         for line in f:
             p = line.split()
@@ -56,6 +56,8 @@ def main():
             if p[0] == '#':
                 if 'op' in p:
                     op = p[p.index('op') + 1]
+                if 'mode' in p:
+                    mode = p[p.index('mode') + 1]
                 continue
             run, tgt, bit, word, clk, res, oc = p[:7]
             reuse = len(p) > 7 and p[7] == 'r=1'
@@ -87,7 +89,9 @@ def main():
     nul = [r for r in runs if r[0] == 'none']
     nul_bad = [r for r in nul if r[5] != 'unchanged']
     n = len(runs)
-    print('fault campaign: %s, %d runs (one bit flip each, random target / bit / clock)' % (op, n))
+    print('fault campaign: %s, %d runs (one bit flip each, random target / bit / clock), %s' %
+          (op, n, {'fresh': 'every run a cold chip', 'chain': 'chip state carried from run to run'}
+           .get(mode, 'mode ' + mode)))
     print('=' * 78)
     for c in classes:
         print('  %-10s %6d  %5.1f %%' % (c, tot[c], 100.0 * tot[c] / n))

@@ -241,11 +241,17 @@ sim-se-tvla: | $(BUILD)
 # or KeyGen (FOP=keygen); scripts/pqse_fault_report.py sorts the outcomes into
 # unchanged / detected / implicit rejection / SILENT (a wrong output with
 # result 0: what fault attacks exploit) / hang, per target.
-#   make sim-se-fault [FOP=decaps|keygen] [FN=200] [SEED=1] [LOWPOWER=1]
+#   make sim-se-fault [FOP=decaps|keygen] [FN=200] [SEED=1] [LOWPOWER=1] [FPAR=4]
+# Every run is its own simulation process (a cold chip: nothing a fault left in
+# a RAM or an unreset register carries into the next run), FPAR at a time.
+# FMODE=chain runs them back to back in one process instead, with the chip
+# state carried across the power cycles: that finds faults whose effect
+# survives a reset and the power-on wipe (compare the two).
 # Results in build/fault_<FOP>_s<SEED>/: fault_log.txt, fault_report.txt.
-# A run is one command (~200-300 k clocks): 200 runs take tens of minutes.
-FOP ?= decaps
-FN  ?= 200
+FOP   ?= decaps
+FN    ?= 200
+FMODE ?= fresh
+FPAR  ?= 4
 FTD := $(BUILD)/fault_$(FOP)_s$(SEED)$(if $(filter 1,$(LOWPOWER)),_lp)
 sim-se-fault: | $(BUILD)
 	rm -rf $(FTD) && mkdir -p $(FTD)
@@ -255,7 +261,16 @@ sim-se-fault: | $(BUILD)
 	    +define+PQSE_SIM_INIT +define+PQSE_FAULT_CAMPAIGN $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
 	    ../../hw/sim/tb_pqse_fault.sv $(addprefix ../../,$(SE_SRC)) > build.log 2>&1 \
 	    || { tail -30 build.log; exit 1; }
-	cd $(FTD) && ./vfault +n=$(FN) +seed=$(SEED) +op=$(FOP) | tee sim.log
+	if [ "$(FMODE)" = chain ]; then \
+	    cd $(FTD) && ./vfault +n=$(FN) +seed=$(SEED) +op=$(FOP) | tee sim.log; \
+	else \
+	    cd $(FTD) && ./vfault +ref +n=$(FN) +seed=$(SEED) +op=$(FOP) | grep -v '^- ' | tee sim.log && \
+	    test -s cref.txt && \
+	    seq 0 $$(($(FN) - 1)) | xargs -P $(FPAR) -I{} ./vfault +one={} +cref=$$(cat cref.txt) \
+	        +seed=$(SEED) +op=$(FOP) | grep -v '^- ' | tee -a sim.log && \
+	    { cat fault_head.txt; for i in $$(seq 0 $$(($(FN) - 1))); do cat run_$$i.txt 2>/dev/null; done; } \
+	        > fault_log.txt; \
+	fi
 	$(PYTHON) scripts/pqse_fault_report.py $(FTD)/fault_log.txt --vectors hw/sim/vectors \
 	    | tee $(FTD)/fault_report.txt
 

@@ -2,8 +2,10 @@
 // tb_pqse_fault.sv - random fault-injection campaign on the secure element
 // (make sim-se-fault): how many single-bit faults reach the outside unnoticed.
 //
-// Every run is a new chip (the persistent store cleared, then a power cycle),
-// so runs are independent and the three-strike kill never carries over:
+// Every run is a new chip: by default a fresh simulation process per run
+// (make sim-se-fault: nothing from an earlier run, not even RAM contents or
+// unreset registers, carries over), with the persistent store blank and a power
+// cycle; FMODE=chain runs them back to back in one process instead:
 //   +op=decaps (default)  import the NIST dk (de0), masked Decaps of the NIST
 //                         ciphertext; expected K = de0_k
 //   +op=keygen            masked KeyGen with the injected NIST seeds d, z;
@@ -187,22 +189,78 @@ module tb_pqse_fault;
     end
   endtask
 
+  // one run: fault t / bit b / word w at clock clk_at of the command; the
+  // outcome string, and the counters
+  task automatic one_run(input bit kg, input int cref, input int unsigned t, input int unsigned b,
+                         input int unsigned w, input int unsigned clk_at,
+                         output int res, output string oc);
+    prepare(kg);
+    wr(CTRL, kg ? (KEYGEN | 32'h100) : DECAPS);
+    repeat (clk_at) @(posedge clk);
+    @(negedge clk);
+    flip(t, b, w);
+    finish_to(2 * cref + 20000, res);
+    if (res < 0) oc = "hang";
+    else if (res != 0) oc = "-";
+    else if (kg) begin
+      int d = 0;
+      get(B_EKOWN, EK);
+      for (int j = 0; j < EK; j++) if (buffer[j] !== kg_ek[j]) d++;
+      oc = (d == 0) ? "ok" : "bad";
+    end else begin
+      int d = 0;
+      get(B_K, 32);
+      for (int j = 0; j < 32; j++) if (buffer[j] !== de_k[j]) d++;
+      if (d == 0) oc = "ok";
+      else begin
+        oc = "K=";
+        for (int j = 0; j < 32; j++) oc = {oc, $sformatf("%02x", buffer[j])};
+      end
+    end
+  endtask
+
+  // Modes:
+  //   +ref               reference run only: cref.txt (clocks) and the log header
+  //   +one=<i> +cref=<n> run i alone (a fresh process = a cold chip: nothing a
+  //                      fault left in RAMs or unreset registers carries over),
+  //                      its line in run_<i>.txt (make sim-se-fault, default)
+  //   (neither)          +n runs in one process, chip state carried from run to
+  //                      run across the power cycles (FMODE=chain: shows faults
+  //                      whose effect survives a reset and the power-on wipe)
   initial begin
-    int n, seed, fd, res, cref, nok, ndet, nbad, nhang;
+    int n, seed, fd, res, cref, one, nok, ndet, nbad, nhang;
     int unsigned t, b, w, clk_at;
     bit kg;
     string op, oc;
     if (!$value$plusargs("n=%d", n))    n = 200;
     if (!$value$plusargs("seed=%d", seed)) seed = 1;
     if (!$value$plusargs("op=%s", op))  op = "decaps";
+    if (!$value$plusargs("one=%d", one)) one = -1;
     kg = (op == "keygen");
     $readmemh("vectors/kg_d.hex", kg_d, 0, 31);     $readmemh("vectors/kg_z.hex", kg_z, 0, 31);
     $readmemh("vectors/kg_ek.hex", kg_ek, 0, EK-1);
     $readmemh("vectors/de0_dk.hex", de_dk, 0, DK-1); $readmemh("vectors/de0_c.hex", de_c, 0, CT-1);
     $readmemh("vectors/de0_k.hex", de_k, 0, 31);
-    void'($urandom(seed));
 
-    // reference run (no fault): the command's length
+    if (one >= 0) begin
+      // ---- one run in a fresh process ----
+      if (!$value$plusargs("cref=%d", cref)) begin $display("ERROR: +one needs +cref"); $finish; end
+      void'($urandom(seed * 100003 + one));
+      t = $urandom % NT; b = $urandom; w = $urandom; clk_at = $urandom % cref;
+      one_run(kg, cref, t, b, w, clk_at, res, oc);
+      fd = $fopen($sformatf("run_%0d.txt", one), "w");
+      $fdisplay(fd, "%0d %s %0d %0d %0d %0d %s r=%0d", one, tname[t], b % 1024, w % 1024, clk_at, res, oc,
+                dut.u_sys.u_core.u_prng.reuse);
+      $fclose(fd);
+      $display("run %0d: %s bit %0d at clock %0d -> result %0d, %s", one, tname[t], b % 1024, clk_at, res,
+               (oc.len() > 12) ? "K differs" : oc);
+      if (t == NT - 1 && oc != "ok")
+        $display("WARNING: run %0d flipped nothing (null control) and still gave %s, result %0d", one, oc, res);
+      $finish;
+    end
+
+    // ---- reference run (no fault): the command's length, the expected output ----
+    void'($urandom(seed));
     prepare(kg);
     wr(CTRL, kg ? (KEYGEN | 32'h100) : DECAPS);
     finish_to(5000000, res);
@@ -217,43 +275,27 @@ module tb_pqse_fault;
         $finish;
       end
     end
-    $display("fault campaign: %s, %0d runs, seed %0d, reference %0d clocks", op, n, seed, cref);
+    if ($test$plusargs("ref")) begin
+      fd = $fopen("cref.txt", "w"); $fdisplay(fd, "%0d", cref); $fclose(fd);
+      fd = $fopen("fault_head.txt", "w");
+      $fdisplay(fd, "# op %s runs %0d seed %0d clocks %0d mode fresh", op, n, seed, cref);
+      $fclose(fd);
+      $display("fault campaign: %s, reference %0d clocks (output checked)", op, cref);
+      $finish;
+    end
+    $display("fault campaign (chained: chip state carried across runs): %s, %0d runs, seed %0d, reference %0d clocks",
+             op, n, seed, cref);
 
     fd = $fopen("fault_log.txt", "w");
-    $fdisplay(fd, "# op %s runs %0d seed %0d clocks %0d", op, n, seed, cref);
+    $fdisplay(fd, "# op %s runs %0d seed %0d clocks %0d mode chain", op, n, seed, cref);
     nok = 0; ndet = 0; nbad = 0; nhang = 0;
     for (int i = 0; i < n; i++) begin
-      t = $urandom % NT;
-      b = $urandom;
-      w = $urandom;
-      clk_at = $urandom % cref;
-      prepare(kg);
-      wr(CTRL, kg ? (KEYGEN | 32'h100) : DECAPS);
-      repeat (clk_at) @(posedge clk);
-      @(negedge clk);
-      flip(t, b, w);
-      finish_to(2 * cref + 20000, res);
-      if (res < 0) begin
-        oc = "hang"; nhang++;
-      end else if (res != 0) begin
-        oc = "-"; ndet++;
-      end else if (kg) begin
-        int d = 0;
-        get(B_EKOWN, EK);
-        for (int j = 0; j < EK; j++) if (buffer[j] !== kg_ek[j]) d++;
-        oc = (d == 0) ? "ok" : "bad";
-        if (d == 0) nok++; else nbad++;
-      end else begin
-        int d = 0;
-        get(B_K, 32);
-        for (int j = 0; j < 32; j++) if (buffer[j] !== de_k[j]) d++;
-        if (d == 0) begin oc = "ok"; nok++; end
-        else begin
-          oc = "K=";
-          for (int j = 0; j < 32; j++) oc = {oc, $sformatf("%02x", buffer[j])};
-          nbad++;
-        end
-      end
+      t = $urandom % NT; b = $urandom; w = $urandom; clk_at = $urandom % cref;
+      one_run(kg, cref, t, b, w, clk_at, res, oc);
+      if (oc == "hang") nhang++;
+      else if (oc == "-") ndet++;
+      else if (oc == "ok") nok++;
+      else nbad++;
       $fdisplay(fd, "%0d %s %0d %0d %0d %0d %s r=%0d", i, tname[t], b % 1024, w % 1024, clk_at, res, oc,
                 dut.u_sys.u_core.u_prng.reuse);
       if (t == NT - 1 && oc != "ok")
@@ -265,7 +307,6 @@ module tb_pqse_fault;
     $fclose(fd);
     $display("fault campaign done: %0d unchanged, %0d detected (result != 0), %0d different output, %0d hangs",
              nok, ndet, nbad, nhang);
-    $display("scripts/pqse_fault_report.py fault_log.txt classifies the different outputs");
     $finish;
   end
 endmodule
