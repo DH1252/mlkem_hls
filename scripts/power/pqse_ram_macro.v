@@ -58,7 +58,12 @@ module pqse_ram_1r1w #(
                                .re(re), .raddr(raddr), .rdata(rdata));
     end
     else begin : g_unsupported
-      pqse_sram_shape_not_in_scripts_power_pqse_ram_macro_v u_m ();   // add the shape here and in pqse_sram_lib.py
+      // a shape not listed (also the default parameters, which Yosys elaborates
+      // once although no instance uses them): a black box without a Liberty
+      // cell, so OpenSTA stops at link_design if a real instance ever lands
+      // here - add the shape above and in pqse_sram_lib.py
+      pqse_sram_unsupported_shape u_m (.clk(clk));
+      assign rdata = {DW{1'b0}};
     end
   endgenerate
 endmodule
@@ -156,5 +161,11 @@ module pqse_sram_a6_d64 (
   input  wire          re,
   input  wire [5:0]  raddr,
   output wire [63:0] rdata
+);
+endmodule
+
+(* blackbox *)
+module pqse_sram_unsupported_shape (
+  input  wire clk
 );
 endmodule
