@@ -94,7 +94,9 @@ module pqse_io (
 
   localparam [12:0] Q13 = 13'd3329;
 
-  reg  [95:0] J;
+  // the sequencer's instruction register holds still until this unit is idle
+  // again (v5: no 96-bit copy)
+  wire [95:0] J      = ins;
   wire [3:0]  j_op   = J[91:88];
   wire [1:0]  j_dm   = J[87:86];
   wire [3:0]  j_d    = J[85:82];
@@ -309,7 +311,6 @@ module pqse_io (
     if (rst) begin
       busy_r <= 1'b0;
     end else if (start) begin
-      J      <= ins;
       busy_r <= 1'b1;
       L      <= 16'd0;
       lb     <= 5'd0;

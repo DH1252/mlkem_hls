@@ -187,9 +187,11 @@ module pqse_prng (
   input  wire         clk,
   input  wire         rst,
   input  wire         masked_en,   // 0: rnd is always 0 (masking off)
-  input  wire         reseed,      // load K and IV (4 clocks), then run the 1152 initialization rounds
-  input  wire [63:0]  seed,        // load: {K bits, IV bits}, 32 each per load clock (MSB first)
-  output wire         seed_shift,  // the core shifts the next 64 seed bits to "seed" (load clocks 1..3)
+  input  wire         reseed,      // load K and IV (4 clocks + TRNG waits), then the 1152 initialization rounds
+  output wire         seed_en,     // TRNG words wanted (loading)
+  input  wire         seed_valid,  // a TRNG word is on seed
+  input  wire [63:0]  seed,        // {32 K bits, 32 IV bits} per load clock 1..3 (MSB first)
+  output wire         seed_take,   // that word is used this clock
   output wire         busy,
   input  wire         take,        // the bits on rnd are used this clock
   input  wire         take_hi,     // ... and only bits 63:32 (allowed one clock after a take)
@@ -210,9 +212,10 @@ module pqse_prng (
   //   A: 48 zeros, then K[79] .. K[0]     (A = 13 zeros above K)
   //   B: 48 zeros, then IV[79] .. IV[0]   (B = 4 zeros above IV)
   //   C: 17 zeros, 1, 1, 1, then zeros    (C = 1, 1, 1 above 108 zeros)
-  // K and IV are TRNG bits (the core shifts its seed register by 64 after load
-  // clocks 1, 2, 3: K from seed[63:32], IV from seed[31:0], MSB first; in load
-  // clock 1 rounds 32..47 insert zeros). Then 1152 rounds as usual.
+  // K and IV are TRNG bits: load clocks 1, 2, 3 each take one 64-bit TRNG word
+  // (waiting for it), K from seed[63:32], IV from seed[31:0], MSB first (in load
+  // clock 1 rounds 32..47 insert zeros, so 16 bits of that word are unused).
+  // Then 1152 rounds as usual.
   reg  [287:0] s;
   reg  [5:0]   icnt;
   reg          init;
@@ -249,7 +252,8 @@ module pqse_prng (
   end
 
   assign busy       = init | ld | reseed | (masked_en && fr != 2'd2);
-  assign seed_shift = ld && (lc != 2'd0);
+  assign seed_en    = ld;
+  assign seed_take  = ld && (lc != 2'd0) && seed_valid;
   // W is cleared by a reseed and advances only with masking on and after the
   // initialization, so it is 0 whenever rnd must be 0
   assign rnd        = W;
@@ -270,12 +274,14 @@ module pqse_prng (
       W    <= 64'd0;
       fr   <= 2'd0;
     end else if (ld) begin
-      s  <= ns;
-      lc <= lc + 2'd1;
-      if (lc == 2'd3) begin
-        ld   <= 1'b0;
-        init <= 1'b1;
-        icnt <= 6'd0;
+      if (lc == 2'd0 || seed_valid) begin
+        s  <= ns;
+        lc <= lc + 2'd1;
+        if (lc == 2'd3) begin
+          ld   <= 1'b0;
+          init <= 1'b1;
+          icnt <= 6'd0;
+        end
       end
     end else if (init) begin
       s <= ns;

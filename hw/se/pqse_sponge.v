@@ -76,8 +76,9 @@ module pqse_sponge #(
 );
   `include "pqse_defs.vh"
 
-  // ---- latched job ----------------------------------------------------------------
-  reg [95:0] J;
+  // ---- the job: the sequencer's instruction register, which holds still until
+  // this unit is idle again (v5: no 96-bit copy) ----------------------------------------
+  wire [95:0] J = ins;
   wire [1:0] j_rate  = J[91:90];
   wire       j_shake = J[89];
   wire       j_msk   = J[88] & (MASKED != 0);
@@ -301,7 +302,6 @@ module pqse_sponge #(
         H_IDLE: if (!start) begin
           kp0 <= 8'd0; kp1 <= 8'd0; kx0 <= 16'd0; kx1 <= 16'd0;    // no key / keystream left
         end else begin
-          J    <= ins;
           pos  <= 5'd0;
           wk   <= 2'd0;
           part <= 1'b0;

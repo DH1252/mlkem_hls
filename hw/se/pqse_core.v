@@ -66,7 +66,7 @@ module pqse_core #(
 
   // =============================== sequencer ===========================================
   localparam [3:0] Q_IDLE = 4'd0, Q_FETCH = 4'd1, Q_DLY = 4'd2, Q_EXEC = 4'd3,
-                   Q_WAIT = 4'd4, Q_RSD = 4'd5, Q_RSW = 4'd6,
+                   Q_WAIT = 4'd4,                Q_RSW = 4'd6,   // (5: unused)
                    Q_PG = 4'd7,     // decide: does this instruction need a fresh permutation?
                    Q_PW = 4'd8,     // wait for the Fisher-Yates shuffle (pqse_perm.v)
                    Q_RXS = 4'd9;    // ST_RXACC: slide the replay window, one bit per clock
@@ -89,8 +89,6 @@ module pqse_core #(
   wire [6:0]  rx_dist;      // ... newer / older by (64: 64 or more)
   reg  [5:0]  rxc;          // Q_RXS: window shifts left
   reg  [3:0]  dly;
-  reg  [1:0]  rw;           // reseed: TRNG words collected
-  reg [191:0] rseed;
   reg         wfirst;       // first clock of Q_WAIT
   reg         fault;        // a fault was detected during this command
 
@@ -187,10 +185,11 @@ module pqse_core #(
   wire        t_valid, t_take_sp, t_take_io;
   wire [63:0] t_word;
   wire        t_en_sp, t_en_io;
-  wire        rs_take  = (q == Q_RSD) && t_valid && (rw != 2'd3);
-  wire        t_take   = rs_take | t_take_sp | t_take_io;
-  wire        t_en     = (q == Q_RSD) | t_en_sp | t_en_io;
-  wire        pr_reseed = (q == Q_RSD) && (rw == 2'd3);
+  // ST_RESEED: the PRNG loads its key and IV straight from 3 TRNG words
+  wire        pr_ten, pr_take;
+  wire        pr_reseed = exec && (cls == C_SET) && (ins_r[91:88] == ST_RESEED);
+  wire        t_take   = pr_take | t_take_sp | t_take_io;
+  wire        t_en     = pr_ten | t_en_sp | t_en_io;
   // dummy clocks before an engine start; not while pqse_perm draws an NTT layer
   // order in the background (it takes a word every 3 clocks, and a word is fully
   // fresh only 2 clocks after a take: no room for another taker; that
@@ -204,11 +203,8 @@ module pqse_core #(
 
   pqse_trng u_trng (.clk(clk), .rst(rst), .en(t_en), .take(t_take),
                     .word(t_word), .valid(t_valid), .fail(trng_fail), .ok(trng_ok));
-  // the PRNG loads its key and IV from the top 64 bits of rseed, 64 per load
-  // clock (pr_shift: the next 64 move up, zeros behind them)
-  wire        pr_shift;
   pqse_prng u_prng (.clk(clk), .rst(rst), .masked_en(MASKED != 0), .reseed(pr_reseed),
-                    .seed(rseed[191:128]), .seed_shift(pr_shift),
+                    .seed_en(pr_ten), .seed_valid(t_valid), .seed(t_word), .seed_take(pr_take),
                     .busy(pr_busy), .take(r_take), .take_hi(r_hi), .rnd(rnd));
   pqse_perm u_perm (.clk(clk), .rst(rst), .start(pg_start), .n64(pg_n64),
                     .next(pg_next), .busy(pg_busy), .ready(pg_ready),
@@ -237,7 +233,7 @@ module pqse_core #(
       cycles <= 32'd0; dly <= 4'd0; bad <= 1'b0; wrap <= 1'b0; inj <= 1'b0; kx <= 1'b0;
       zc <= 1'b0; role <= 1'b0; ctr_tx <= 64'd0;
       rx_any <= 1'b0; rx_max <= 64'd0; rx_bits <= 64'd0;
-      pc <= 10'd0; pcn <= 10'h3FF; rw <= 2'd0; wfirst <= 1'b0; fault <= 1'b0; ins_p <= 1'b0;
+      pc <= 10'd0; pcn <= 10'h3FF; wfirst <= 1'b0; fault <= 1'b0; ins_p <= 1'b0;
       ins_r <= 96'd0; fr <= 1'b0;
     end else begin
       done <= 1'b0;
@@ -275,8 +271,8 @@ module pqse_core #(
               result <= R_RNGFAIL;
               done   <= 1'b1;
               q      <= Q_IDLE;
-            end else begin
-              fr    <= 1'b0;
+            end else if (!any_busy) begin    // (after an abort: until the engine still
+              fr    <= 1'b0;                 //  running has finished; the engines read ins_r)
               ins_r <= rom_q;
               ins_p <= rom_p;
               q     <= Q_PG;
@@ -343,8 +339,7 @@ module pqse_core #(
                   default: ;
                 endcase
                 if (ins_r[91:88] == ST_RESEED) begin
-                  rw <= 2'd0;
-                  q  <= Q_RSD;
+                  q  <= Q_RSW;                // pr_reseed pulses in this clock
                 end else if (ins_r[91:88] == ST_RXACC && rx_any && rx_new && !rx_dist[6]) begin
                   q  <= Q_RXS;
                 end else begin
@@ -367,15 +362,7 @@ module pqse_core #(
               q   <= Q_FETCH;
             end
           end
-          Q_RSD: begin                    // collect 3 TRNG words, then reseed the PRNG
-            if (rw == 2'd3) begin
-              q <= Q_RSW;
-            end else if (t_valid) begin
-              rseed <= {rseed[127:0], t_word};
-              rw    <= rw + 2'd1;
-            end
-          end
-          Q_RSW: if (!pr_busy) begin
+          Q_RSW: if (!pr_busy) begin      // the PRNG takes 3 TRNG words and initializes
             pc  <= pc + 10'd1;
             pcn <= ~(pc + 10'd1);
             q   <= Q_FETCH;
@@ -393,7 +380,6 @@ module pqse_core #(
         endcase
       end
       if (io_bad | m_bad) bad <= 1'b1;
-      if (pr_shift) rseed <= {rseed[127:0], 64'd0};
     end
   end
 

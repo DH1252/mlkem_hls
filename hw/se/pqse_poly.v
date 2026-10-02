@@ -123,8 +123,9 @@ module pqse_poly (
   reg  [23:0] wq;                 // word w (captured)
   reg  [11:0] a0r, a1r, b0r, b1r, zr;
   reg  [11:0] fa, fb, fz;         // butterfly inputs this clock (0 when idle)
-  reg  [11:0] ad1, ad2, ad3, ad4; // NTT: a delayed to the product
-  reg  [11:0] s1, s2, s3, s4, s5; // INTT: (a+b)/2 delayed
+  // one delay line for both transforms: NTT a (to the product, tap dl4),
+  // INTT (a+b)/2 (tap dl5)
+  reg  [11:0] dl1, dl2, dl3, dl4, dl5;
   reg  [11:0] d1, z1;             // INTT: (b-a)/2 and zeta, one clock later
   reg  [11:0] o_add, o_sub;
   reg  [11:0] o0a, o0b, o1b;      // outputs held for the two-word write
@@ -143,7 +144,7 @@ module pqse_poly (
 
   wire        feed0 = is_ntt && tc[0]  && (tc >= 8'd3) && (tc <= 8'd129);
   wire        feed1 = is_ntt && !tc[0] && (tc >= 8'd4) && (tc <= 8'd130);
-  wire [11:0] bf_oa = intt ? s5 : o_add;
+  wire [11:0] bf_oa = intt ? dl5 : o_add;
   wire [11:0] bf_ob = intt ? mr : o_sub;
 
   // ---- PWM operand registers ------------------------------------------------------------
@@ -164,7 +165,7 @@ module pqse_poly (
   wire [11:0] gam   = kh1[0] ? negq(zq) : zq;                     // zq: zeta({1, kh1[6:1]}) (phase 1)
 
   // shared "+ product" adder: NTT a + z b, PWM c0 + m1, c1 + m3, + m4, + m5
-  wire [11:0] msel  = is_ntt ? ad4 : (ph == 3'd0) ? e1 : (ph == 3'd1) ? cq[11:0] :
+  wire [11:0] msel  = is_ntt ? dl4 : (ph == 3'd0) ? e1 : (ph == 3'd1) ? cq[11:0] :
                       (ph == 3'd3) ? cq[23:12] : o1;
   wire [11:0] madd  = addq(msel, mr);
   // ADD / SUB: c +/- a (a = rdata), MSPLIT: c - R, per coefficient
@@ -316,8 +317,7 @@ module pqse_poly (
   always @(posedge clk) begin
     if (start || !busy_r) begin
       wq  <= 24'd0;  a0r <= 12'd0; a1r <= 12'd0; b0r <= 12'd0; b1r <= 12'd0; zr <= 12'd0;
-      ad1 <= 12'd0;  ad2 <= 12'd0; ad3 <= 12'd0; ad4 <= 12'd0;
-      s1  <= 12'd0;  s2  <= 12'd0; s3  <= 12'd0; s4  <= 12'd0; s5 <= 12'd0;
+      dl1 <= 12'd0;  dl2 <= 12'd0; dl3 <= 12'd0; dl4 <= 12'd0; dl5 <= 12'd0;
       d1  <= 12'd0;  z1  <= 12'd0; o_add <= 12'd0; o_sub <= 12'd0;
       o0a <= 12'd0;  o0b <= 12'd0; o1b <= 12'd0;
       aq  <= 24'd0;  bq  <= 24'd0; cq  <= 24'd0; e1 <= 12'd0; o1 <= 12'd0; o2 <= 12'd0;
@@ -334,15 +334,14 @@ module pqse_poly (
         b0r <= rdata[11:0];  b1r <= rdata[23:12];
         zr  <= zq;                                       // zeta of g_st (read last clock)
       end
-      // NTT (CT): a delayed to the product z*b
-      ad1 <= fa; ad2 <= ad1; ad3 <= ad2; ad4 <= ad3;
+      // NTT (CT): a delayed to the product z*b (dl4); INTT (GS): (a+b)/2 and
+      // (b-a)/2, product z*(b-a)/2 one clock later, (a+b)/2 delayed to it (dl5)
+      dl1 <= intt ? halfq(addq(fa, fb)) : fa;
+      dl2 <= dl1; dl3 <= dl2; dl4 <= dl3; dl5 <= dl4;
       o_add <= madd;
-      o_sub <= subq(ad4, mr);
-      // INTT (GS): (a+b)/2 and (b-a)/2, product z*(b-a)/2 one clock later
-      s1 <= halfq(addq(fa, fb));
+      o_sub <= subq(dl4, mr);
       d1 <= halfq(subq(fb, fa));
       z1 <= fz;
-      s2 <= s1; s3 <= s2; s4 <= s3; s5 <= s4;
       // butterfly 0 output (fed at odd tc, out 5 clocks later at even tc)
       if (!tc[0] && tc >= 8'd8 && tc <= 8'd134) begin
         o0a <= bf_oa;
