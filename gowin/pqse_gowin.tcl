@@ -13,6 +13,9 @@
 #   MAP     GowinSynthesis LUT mapping (-map_option): 1 (default mapping) or 2
 #           (LUT5-oriented without more LUTs); 3 / 4 trade LUTs for timing
 #   STEP    all (default: synthesis + place & route, the real fit) or syn
+#   TOP     synthesize one hw/se module alone instead of the whole design
+#           (diagnosis: make se-gowin-bisect runs every module with STEP=syn
+#           and counts GowinSynthesis errors per module); build/gowin/bisect/<TOP>/
 #
 # The same build as "make se-gowin" (PQSE_LUTRAM_1R, the selected PUF), so the
 # two counts compare directly. gw_sh has no option for Verilog defines or top
@@ -38,9 +41,11 @@ set PUF    [env_or PUF bfly]
 set MASKED [env_or MASKED 1]
 set MAP    [env_or MAP 1]
 set STEP   [env_or STEP all]
+set TOP    [env_or TOP pqse_gowin_top]
 
 set root [file normalize [file join [file dirname [info script]] ..]]
 set out  [file join $root build gowin m${MASKED}_p${PUF}]
+if {$TOP ne "pqse_gowin_top"} { set out [file join $root build gowin bisect $TOP] }
 file mkdir $out
 
 # ---- wrapper: defines, sources, top with the MASKED parameter ----
@@ -76,15 +81,6 @@ puts $fh {    .clk(clk), .rst_n(rst_n), .spi_sck(spi_sck), .spi_cs_n(spi_cs_n),
 endmodule}
 close $fh
 
-# ---- project ----
-create_project -name pqse -dir $out -pn GW2AR-LV18QN88C8/I7 -device_version C -force
-add_file $src
-
-set_option -top_module            pqse_gowin_top
-set_option -verilog_std           v2001
-set_option -include_path          [file join $root hw se]
-set_option -output_base_name      pqse
-
 # tuning options: not every gw_sh version knows every option (or value), so an
 # unknown one is reported and skipped instead of stopping the build
 # (GowinSynthesis is the default synthesis tool: no -synthesis_tool needed)
@@ -93,6 +89,17 @@ proc try_option {args} {
     puts "pqse_gowin.tcl: skipped 'set_option $args' ($msg)"
   }
 }
+# ---- project ----
+create_project -name pqse -dir $out -pn GW2AR-LV18QN88C8/I7 -device_version C -force
+add_file $src
+
+set_option -top_module            $TOP
+# a single module as top (TOP=..., make se-gowin-bisect): its ports are not pins
+if {$TOP ne "pqse_gowin_top"} { try_option -disable_io_insertion 1 }
+set_option -verilog_std           v2001
+set_option -include_path          [file join $root hw se]
+set_option -output_base_name      pqse
+
 try_option -global_freq           50
 # every synthesis warning in the log (diagnosis)
 try_option -print_all_synthesis_warning 1
