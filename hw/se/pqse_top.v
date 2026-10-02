@@ -41,7 +41,7 @@ module pqse_sys #(
   output wire        trig
 );
   wire        core_rst, cmd_start, cmd_inj, kexp, hide_en, core_busy, core_done;
-  wire        key_valid, sk_valid, trng_ok, trng_fail, lc_test, core_trig;
+  wire        key_valid, sk_valid, trng_ok, trng_fail, lc_is_test, core_trig;
   wire [7:0]  cmd, core_result;
   wire [31:0] cycles, h_wdata, h_rdata;
   wire        h_we, h_re;
@@ -52,7 +52,7 @@ module pqse_sys #(
     .bus_we(bus_we), .bus_re(bus_re), .bus_addr(bus_addr), .bus_wdata(bus_wdata),
     .bus_rdata(bus_rdata), .irq(irq), .tamper(tamper),
     .core_rst(core_rst), .cmd_start(cmd_start), .cmd(cmd), .cmd_inj(cmd_inj), .kexp(kexp),
-    .hide_en(hide_en), .lc_test(lc_test),
+    .hide_en(hide_en), .lc_is_test(lc_is_test),
     .core_busy(core_busy), .core_done(core_done), .core_result(core_result),
     .key_valid(key_valid), .sk_valid(sk_valid), .trng_ok(trng_ok), .trng_fail(trng_fail),
     .cycles(cycles),
@@ -68,7 +68,7 @@ module pqse_sys #(
 
   // registered, so the pin does not carry a combinational path from the core
   reg trig_q;
-  always @(posedge clk) trig_q <= core_trig & lc_test;
+  always @(posedge clk) trig_q <= core_trig & lc_is_test;
   assign trig = trig_q;
 endmodule
 

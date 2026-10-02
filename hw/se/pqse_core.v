@@ -210,11 +210,11 @@ module pqse_core #(
   // High from M_OKINI to M_OKCHK: in DECAPS that is everything secret (decoding
   // of m', G, J, the masked re-encryption and the comparison), in OPEN / UNWRAP
   // the tag check. Only the TEST lifecycle lets it out of the chip (pqse_sys.v).
-  wire m_okini = exec && (cls == C_MASK) && (iop == M_OKINI);
-  wire m_okchk = exec && (cls == C_MASK) && (iop == M_OKCHK);
+  wire is_okini = exec && (cls == C_MASK) && (iop == M_OKINI);
+  wire is_okchk = exec && (cls == C_MASK) && (iop == M_OKCHK);
   always @(posedge clk) begin
-    if (rst || !run || m_okchk) trig <= 1'b0;
-    else if (m_okini)           trig <= 1'b1;
+    if (rst || !run || is_okchk) trig <= 1'b0;
+    else if (is_okini)           trig <= 1'b1;
   end
 
   // ---- fault sources ----

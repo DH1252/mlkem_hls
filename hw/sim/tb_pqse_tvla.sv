@@ -97,7 +97,7 @@ module tb_pqse_tvla;
       // masked gadgets
       dut.u_sys.u_core.u_masked.T, dut.u_sys.u_core.u_masked.acc0, dut.u_sys.u_core.u_masked.acc1,
       dut.u_sys.u_core.u_masked.L0, dut.u_sys.u_core.u_masked.L1,
-      dut.u_sys.u_core.u_masked.O0, dut.u_sys.u_core.u_masked.O1,
+      dut.u_sys.u_core.u_masked.Osh0, dut.u_sys.u_core.u_masked.Osh1,
       dut.u_sys.u_core.u_masked.D0, dut.u_sys.u_core.u_masked.D1,
       dut.u_sys.u_core.u_masked.wr0, dut.u_sys.u_core.u_masked.wr1,
       dut.u_sys.u_core.u_masked.o0, dut.u_sys.u_core.u_masked.o1,

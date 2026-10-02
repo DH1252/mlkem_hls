@@ -145,13 +145,13 @@ module pqse_mcomp (
   assign rnd_hi = (st == S_AD);
 
   // scale: (x * M + 2^15) >> 16, mod 2^K (K <= 24)
-  function [23:0] scale(input [11:0] x, input [28:0] m, input [4:0] k);
+  function [23:0] scale(input [11:0] x, input [28:0] sm, input [4:0] sk);
     reg [41:0] p;
     reg [25:0] s;
     begin
-      p = x * m + 42'd32768;
+      p = x * sm + 42'd32768;
       s = p[41:16];
-      scale = s[23:0] & ((24'd1 << k) - 24'd1);
+      scale = s[23:0] & ((24'd1 << sk) - 24'd1);
     end
   endfunction
 
@@ -167,9 +167,9 @@ module pqse_mcomp (
   wire [23:0] kmask = (24'd1 << K) - 24'd1;
 
   // adder bit i: carry shares C0, C1 are registers (0 for bit 0, set in S_RF)
-  wire a0 = A0[0], a1 = A1[0], b0 = B0[0], b1 = B1[0];
-  wire P0 = a0 ^ b0, P1 = a1 ^ b1;
-  wire Q0 = a0 ^ C0, Q1 = a1 ^ C1;
+  wire a0b = A0[0], a1b = A1[0], b0b = B0[0], b1b = B1[0];
+  wire P0 = a0b ^ b0b, P1 = a1b ^ b1b;
+  wire Q0 = a0b ^ C0, Q1 = a1b ^ C1;
   wire sum0 = P0 ^ C0, sum1 = P1 ^ C1;
   wire top  = (i >= 5'd14);                              // an output bit
   wire [4:0] j = i - 5'd14;                              // which output bit
@@ -299,8 +299,8 @@ module pqse_mcomp (
           p01 <= (P0 & Q1) ^ rb;
           p10 <= (P1 & Q0) ^ rb;
           p11 <= P1 & Q1;
-          ad0 <= a0;
-          ad1 <= a1;
+          ad0 <= a0b;
+          ad1 <= a1b;
           A0 <= A0 >> 1; A1 <= A1 >> 1;
           B0 <= B0 >> 1; B1 <= B1 >> 1;
           if (top && md == 2'd0) begin                    // d = 1: the m' bit, each share

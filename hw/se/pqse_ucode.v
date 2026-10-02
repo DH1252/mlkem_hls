@@ -107,9 +107,9 @@ module pqse_ucode (
                        input [8:0] ba, input [3:0] sl, input [3:0] e, input [3:0] e2);
     u_io = {C_IO, o, dm, d, cmp, mchk, ba, sl, e, e2, 59'd0};
   endfunction
-  function [95:0] u_mask(input [3:0] o, input [3:0] d, input [3:0] s0, input [3:0] s1, input ng,
+  function [95:0] u_mask(input [3:0] o, input [3:0] d, input [3:0] sh0, input [3:0] sh1, input ng,
                          input [8:0] ba, input [3:0] e, input [3:0] e2, input acc);
-    u_mask = {C_MASK, o, d, s0, s1, ng, ba, e, e2, acc, 57'd0};
+    u_mask = {C_MASK, o, d, sh0, sh1, ng, ba, e, e2, acc, 57'd0};
   endfunction
   function [95:0] u_puf(input [3:0] o, input [3:0] e, input [8:0] hb);
     u_puf = {C_PUF, o, e, hb, 75'd0};
