@@ -43,8 +43,11 @@ module pqse_ram_1r1w #(
 `ifdef YOSYS
       (* no_rw_check *) reg [DW-1:0] mem [0:(1<<AW)-1];
 `elsif PQSE_GOWIN_EDA
-      // GowinSynthesis: shadow SRAM (its own attribute; no read/write bypass by default)
-      reg [DW-1:0] mem [0:(1<<AW)-1] /* synthesis syn_ramstyle = "distributed_ram" */;
+      // GowinSynthesis: block RAM, not shadow SRAM. The read is registered here
+      // anyway, and the two 64 x 65 seed RAMs as shadow SRAM cost ~800 logic
+      // units (each RAM16 counts as 6) against 2 BSRAM each; one RAM per share
+      // either way, so the shares still never share a RAM.
+      reg [DW-1:0] mem [0:(1<<AW)-1] /* synthesis syn_ramstyle = "block_ram" */;
 `else
       (* ramstyle = "MLAB, no_rw_check" *) reg [DW-1:0] mem [0:(1<<AW)-1];
 `endif

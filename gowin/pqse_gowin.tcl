@@ -17,6 +17,9 @@
 #           no PLL needed; the design is a contactless-card core, 13.56 MHz on
 #           silicon). At 50 MHz the first fit missed timing (Fmax ~37 MHz: the
 #           instruction decode into the RAM read addresses, 18 logic levels)
+#   DEVICE  20k (default: Tang Nano 20K, GW2AR-LV18QN88C8/I7) or 9k (Tang Nano 9K,
+#           GW1NR-LV9QN88PC6/I5); both boards have a 27 MHz oscillator. 9k builds
+#           go to build/gowin/m<MASKED>_p<PUF>_9k/
 #   TOP     synthesize one hw/se module alone instead of the whole design
 #           (diagnosis: make se-gowin-bisect runs every module with STEP=syn
 #           and counts GowinSynthesis errors per module); build/gowin/bisect/<TOP>/
@@ -47,9 +50,15 @@ set MAP    [env_or MAP 1]
 set STEP   [env_or STEP all]
 set TOP    [env_or TOP pqse_gowin_top]
 set FREQ   [env_or FREQ 27]
+set DEVICE [env_or DEVICE 20k]
 
 set root [file normalize [file join [file dirname [info script]] ..]]
-set out  [file join $root build gowin m${MASKED}_p${PUF}]
+switch -- $DEVICE {
+  20k     { set PART GW2AR-LV18QN88C8/I7; set DSUF "" }
+  9k      { set PART GW1NR-LV9QN88PC6/I5; set DSUF "_9k" }
+  default { error "DEVICE must be 20k or 9k (got $DEVICE)" }
+}
+set out  [file join $root build gowin m${MASKED}_p${PUF}${DSUF}]
 if {$TOP ne "pqse_gowin_top"} { set out [file join $root build gowin bisect $TOP] }
 file mkdir $out
 
@@ -104,7 +113,7 @@ puts $fh "create_clock -name clk -period $per -waveform {0 $hp} \[get_ports {clk
 close $fh
 
 # ---- project ----
-create_project -name pqse -dir $out -pn GW2AR-LV18QN88C8/I7 -device_version C -force
+create_project -name pqse -dir $out -pn $PART -device_version C -force
 add_file $src
 if {$TOP eq "pqse_gowin_top"} { add_file $sdc }
 
@@ -123,7 +132,7 @@ try_option -opt_goal              area
 try_option -map_option            $MAP
 try_option -rw_check_on_ram       0
 try_option -replicate_resources   0
-# the Tang Nano 20K's dual-purpose pins are ordinary I/O
+# the board's dual-purpose pins are ordinary I/O
 try_option -use_mspi_as_gpio      1
 try_option -use_sspi_as_gpio      1
 
