@@ -64,7 +64,7 @@ BAMBU_SIM   := --generate-tb=../../hls/tb_accel.c --simulate --simulator=VERILAT
 VERILATOR_ROOT_DIR := $(shell $(VERILATOR) --getenv VERILATOR_ROOT 2>/dev/null)
 HLS_ENV := CPATH="$(VERILATOR_ROOT_DIR)/include/vltstd$${CPATH:+:$$CPATH}"
 
-.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
+.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-power-vcd se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
 
 all: test
 
@@ -333,6 +333,41 @@ se-power: | $(BUILD)
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
 	SKY130_LIB=$(SKY130_LIB) NETLIST=$(BUILD)/sepower/pqse_top_sky130.v ACT=$(ACT) VCD=$(VCD) SCOPE=$(SCOPE) \
 	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(BUILD)/sepower/power_m$(MASKED).txt
+
+# Switching activity for se-power from a gate-level simulation: the sky130
+# netlist (net names enumerated, so the VCD and the netlist OpenSTA reads use the
+# same plain names), behavioural cell models generated from the Liberty file
+# (scripts/pqse_lib2v.py: zero delay, every flip-flop starts at 0), Verilator,
+# and a pin-level testbench (hw/sim/tb_pqse_gate.sv) that starts command
+# GL_CMD over SPI and dumps GL_LEN clocks from GL_START clocks into it; then
+# OpenSTA with that VCD. Results in build/sepower/gl/ (power_gl_m<MASKED>.txt).
+#   make se-power-vcd SKY130_LIB=... [GL_CMD=1] [GL_START=20000] [GL_LEN=2000]
+# The netlist is large: the Verilator build takes minutes and several GB of
+# memory, the VCD ~100-200 MB per 1000 clocks.
+GL_CMD   ?= 1
+GL_START ?= 20000
+GL_LEN   ?= 2000
+GLD      := $(BUILD)/sepower/gl
+se-power-vcd: | $(BUILD)
+	@test -n "$(SKY130_LIB)" || { echo "set SKY130_LIB=<path to sky130_fd_sc_hd__tt_025C_1v80.lib>"; exit 1; }
+	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
+	    echo "or use OpenROAD, which contains it: make se-power-vcd STA=openroad"; exit 1; }
+	mkdir -p $(GLD)
+	yosys -q -l $(GLD)/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(SE_SRC); \
+	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
+	    delete t:\$$scopeinfo; \
+	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB); opt_clean; \
+	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
+	    rename -hide w:* i:* o:* %u %d; rename -hide c:*; rename -enumerate; \
+	    write_verilog -noattr -noexpr $(GLD)/pqse_top_gl.v"
+	$(PYTHON) scripts/pqse_lib2v.py $(SKY130_LIB) $(GLD)/pqse_top_gl.v $(GLD)/sky130_cells.v
+	cd $(GLD) && verilator --binary --timing --trace -j 2 -Wno-fatal -Wno-lint -Wno-style \
+	    --x-assign 0 --x-initial 0 --timescale 1ns/1ps --top-module tb_pqse_gate -Mdir obj -o ../vtb_gl \
+	    $(CURDIR)/hw/sim/tb_pqse_gate.sv sky130_cells.v pqse_top_gl.v > build.log 2>&1 \
+	    || { tail -30 build.log; exit 1; }
+	cd $(GLD) && ./vtb_gl +cmd=$(GL_CMD) +start=$(GL_START) +len=$(GL_LEN) +vcd=gate.vcd
+	SKY130_LIB=$(SKY130_LIB) NETLIST=$(GLD)/pqse_top_gl.v ACT=$(ACT) VCD=$(GLD)/gate.vcd SCOPE=TOP/tb_pqse_gate/dut \
+	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(GLD)/power_gl_m$(MASKED).txt
 
 # Exact robust-probing check (glitches + transitions, first order) of the
 # masked gadgets' gate-level equations: DOM AND, the B2A / adder carry, the
