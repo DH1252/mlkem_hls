@@ -298,7 +298,8 @@ def single(a):
     full = int(run.get('full', 0)) == 1
     cmd = int(run.get('cmd', 0))
     if nclk <= 0:
-        sys.exit('pqse_energy: no window_clocks in %s' % a.run)
+        sys.exit('pqse_energy: %s records no clocks: the gate-level simulation measured nothing '
+                 '(see its "ERROR:" line)' % a.run)
 
     # ---- the time span OpenSTA averaged over
     span = None
