@@ -1,9 +1,9 @@
 // -----------------------------------------------------------------------------
 // pqse_sample.v - unmasked samplers fed by the sponge's lane stream.
 //
-//   pqse_parse   SampleNTT (FIPS 203 Alg. 7): 3 bytes -> two 12-bit candidates
-//                per clock, values < q kept, one word {c[2w+1], c[2w]} written
-//                per accepted pair, until 256 coefficients
+//   pqse_parse   SampleNTT (FIPS 203 Alg. 7): byte-serial, 3 bytes -> two 12-bit
+//                candidates every 3 clocks, values < q kept, one word
+//                {c[2w+1], c[2w]} written per accepted pair, until 256 coefficients
 //   pqse_cbd     SamplePolyCBD_2 (Alg. 8): one byte per clock -> one word
 //                (low nibble -> even coefficient, high nibble -> odd), 16 lanes
 //
@@ -26,8 +26,15 @@ module pqse_parse (
   output wire [10:0] waddr,
   output wire [23:0] wdata
 );
-  reg [127:0] sbuf;    // stream bytes, oldest in [7:0]
-  reg   [4:0] bcnt;    // bytes held (0..16)
+  // byte-serial (v5, compact): one stream byte per clock from a one-lane
+  // buffer, three bytes -> two candidates. 1 byte / clock instead of 3, still
+  // faster than the sponge delivers a squeezed block (one permutation per
+  // 168 bytes); replaces a 128-bit stream buffer with 24-bit shifts and a
+  // 9-way lane insert
+  reg  [63:0] lane;    // the lane being consumed, next byte in [7:0]
+  reg   [3:0] lb;      // bytes left in lane (0..8)
+  reg  [15:0] win;     // up to two earlier bytes of the current triple: b0 = [7:0], b1 = [15:8]
+  reg   [1:0] wc;      // bytes in win (0..2)
   reg   [8:0] n;       // coefficients accepted
   reg  [11:0] pend;    // an accepted coefficient waiting for its partner
   reg         pv;
@@ -35,35 +42,20 @@ module pqse_parse (
   reg         fin;
   reg   [3:0] sl;
 
-  wire        can  = !fin && (bcnt >= 5'd3);
-  // the next 3 bytes b0 b1 b2 = sbuf[23:0]: d1 = {b1[3:0], b0}, d2 = {b2, b1[7:4]}
-  wire [11:0] d1   = sbuf[11:0];
-  wire [11:0] d2   = sbuf[23:12];
+  wire        cons = !fin && (lb != 4'd0);            // a byte is consumed this clock
+  wire  [7:0] nb   = lane[7:0];
+  // a lane is taken when the buffer is empty or its last byte goes this clock
+  assign in_ready  = !fin && ((lb == 4'd0) || (lb == 4'd1));
+  wire        take = in_valid && in_ready;
+
+  // the third byte of a triple completes it: b0 b1 = win, b2 = nb
+  wire        can  = cons && (wc == 2'd2);
+  wire [11:0] d1   = {win[11:8], win[7:0]};           // {b1[3:0], b0}
+  wire [11:0] d2   = {nb, win[15:12]};                // {b2, b1[7:4]}
   wire        a1   = can && (d1 < 12'd3329);
   wire  [8:0] n1   = n + {8'd0, a1};
   wire        a2   = can && (d2 < 12'd3329) && (n1 < 9'd256);
   wire  [8:0] nn   = n1 + {8'd0, a2};
-  wire  [4:0] bc_a = can ? (bcnt - 5'd3) : bcnt;
-  assign in_ready  = !fin && (bc_a <= 5'd8);
-  wire        take = in_valid && in_ready;
-  // the new lane placed after the bc_a bytes still held: a take needs
-  // bc_a <= 8, so 9 placements (an explicit mux instead of a 128-bit shift by
-  // {bc_a, 3'b000}, which GowinSynthesis fails on with SP00018 "error bus name set")
-  reg [127:0] ins;
-  always @* begin
-    case (bc_a[3:0])
-      4'd0:    ins = {64'd0, in_lane};
-      4'd1:    ins = {56'd0, in_lane,  8'd0};
-      4'd2:    ins = {48'd0, in_lane, 16'd0};
-      4'd3:    ins = {40'd0, in_lane, 24'd0};
-      4'd4:    ins = {32'd0, in_lane, 32'd0};
-      4'd5:    ins = {24'd0, in_lane, 40'd0};
-      4'd6:    ins = {16'd0, in_lane, 48'd0};
-      4'd7:    ins = { 8'd0, in_lane, 56'd0};
-      4'd8:    ins = {       in_lane, 64'd0};
-      default: ins = 128'd0;                     // never taken (bc_a > 8: no take)
-    endcase
-  end
 
   // accepted values in stream order: pend (if any), d1 (if a1), d2 (if a2)
   wire  [1:0] kk   = {1'b0, pv} + {1'b0, a1} + {1'b0, a2};
@@ -78,19 +70,28 @@ module pqse_parse (
 
   always @(posedge clk) begin
     if (rst || start) begin
-      bcnt <= 5'd0;
+      lb   <= 4'd0;
+      wc   <= 2'd0;
       n    <= 9'd0;
       pv   <= 1'b0;
       widx <= 7'd0;
       fin  <= 1'b0;
-      sbuf <= 128'd0;
+      lane <= 64'd0;
+      win  <= 16'd0;
       if (start) sl <= slot;
     end else begin
-      if (can || take)
-        sbuf <= (can ? (sbuf >> 24) : sbuf)
-              | (take ? ins : 128'd0);
-      bcnt <= bc_a + (take ? 5'd8 : 5'd0);
-      n    <= nn;
+      // lane buffer: load a new lane, or shift the consumed byte out
+      if (take)      begin lane <= in_lane;                lb <= 4'd8; end
+      else if (cons) begin lane <= {8'd0, lane[63:8]};     lb <= lb - 4'd1; end
+      // the triple window
+      if (cons) begin
+        case (wc)
+          2'd0:    begin win[7:0]  <= nb; wc <= 2'd1; end
+          2'd1:    begin win[15:8] <= nb; wc <= 2'd2; end
+          default: wc <= 2'd0;                        // triple complete (can)
+        endcase
+      end
+      n <= nn;
       if (nn == 9'd256) fin <= 1'b1;
       if (wr) widx <= widx + 7'd1;
       case (kk)

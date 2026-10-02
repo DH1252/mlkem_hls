@@ -255,11 +255,14 @@ se-area: | $(BUILD)
 #   GOWIN_MAXLUT=8  widest LUT abc9 may build: LUT5..LUT8 use the logic cells'
 #                   MUX2_LUT5..8 muxes, which cost no LUT4. 4: LUT4 only (the
 #                   same as synth_gowin -nowidelut); compare both.
+#   DEVICE=20k      the board the counts are compared with: 20k (Tang Nano 20K)
+#                   or 9k (Tang Nano 9K, GW1NR-9; use GOWIN_OPTS="-family gw1n")
 #   GOWIN_OPTS      extra synth_gowin options. Newer Yosys: "-family gw2a"
 #                   selects the GW2A family (the default is GW1N; the cell
 #                   counts are nearly the same).
 PUF ?= 1
 FLAT ?= 1
+DEVICE ?= 20k
 GOWIN_D ?= 20000
 GOWIN_MAXLUT ?= 8
 GOWIN_OPTS ?=
@@ -277,15 +280,16 @@ se-gowin: | $(BUILD)
 	    tee -q -o $(GW)_modules.txt stat; setattr -mod -unset keep_hierarchy; flatten; stat" 2>&1 \
 	    | { grep -v -E '^(Warning: found logic loop|    cell .*(u_c|g_cell)|      [AB]\[0\] --> Y)' || true; }
 	@test $(PUF) = 1 && echo "(the PUF cells are cross-coupled gates by design: their 'logic loop' warnings are hidden)" || true
-	$(PYTHON) scripts/pqse_fit.py $(GW).log --modules $(GW)_modules.txt
+	$(PYTHON) scripts/pqse_fit.py $(GW).log --modules $(GW)_modules.txt --device $(DEVICE)
 
 # The same fit with the vendor flow (Gowin EDA's gw_sh: GowinSynthesis with
 # -opt_goal area, then place & route, so the report is the real fit). Options as
-# for se-gowin; MAP=2 tries GowinSynthesis's LUT5-oriented mapping, STEP=syn
+# for se-gowin; FREQ=<MHz> sets the clock constraint (default 27, the board's
+# oscillator); MAP=2 tries GowinSynthesis's LUT5-oriented mapping, STEP=syn
 # stops after synthesis. Reports: build/gowin/m<MASKED>_p<PUF>/pqse/impl/pnr/pqse.rpt.txt
 GW_SH ?= gw_sh
 se-gowin-eda:
-	PUF=$(PUF) MASKED=$(MASKED) MAP=$(MAP) STEP=$(STEP) \
+	PUF=$(PUF) MASKED=$(MASKED) MAP=$(MAP) STEP=$(STEP) FREQ=$(FREQ) DEVICE=$(DEVICE) \
 	    $(GW_SH) gowin/pqse_gowin.tcl
 
 # Diagnosis: synthesize every secure-element module on its own with

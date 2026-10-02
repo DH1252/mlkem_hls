@@ -2,6 +2,7 @@
 """Summarize a Yosys synth_gowin run against the Tang Nano 20K FPGA (GW2AR-18).
 
     python3 scripts/pqse_fit.py build/segowin/m1_p1.log [--modules build/segowin/m1_p1_modules.txt]
+                                [--device 20k|9k]   (Tang Nano 20K, default, or 9K)
 
 Counts the mapped Gowin cells in the last "Printing statistics" block of the log
 (the flattened design):
@@ -23,7 +24,10 @@ nextpnr-himbaechel give the final numbers, usually within ~10-20%.
 import re
 import sys
 
-DEVICE = {"LUT4": 20736, "FF": 15552, "BSRAM": 46, "MULT": 48}
+DEVICES = {
+    "20k": ("Tang Nano 20K (GW2AR-18)", {"LUT4": 20736, "FF": 15552, "BSRAM": 46, "MULT": 48}),
+    "9k":  ("Tang Nano 9K (GW1NR-9)",   {"LUT4": 8640,  "FF": 6480,  "BSRAM": 26, "MULT": 20}),
+}
 BSRAM = {"SDPB", "SDPX9B", "DPB", "DPX9B", "SP", "SPX9", "pROM", "pROMX9"}
 SKIP = {"cells", "wires", "wire", "bits", "processes", "memories", "memory", "public",
         "ports", "port"}
@@ -80,10 +84,16 @@ def main():
         i = args.index("--modules")
         mod_file = args[i + 1]
         del args[i:i + 2]
+    dev = "20k"
+    if "--device" in args:
+        i = args.index("--device")
+        dev = args[i + 1].lower()
+        del args[i:i + 2]
+    name, DEVICE = DEVICES[dev]
     text = open(args[0], errors="replace").read()
     i = text.rfind("Printing statistics")
     u = usage(cells(text[i:] if i >= 0 else text))
-    print(f"Tang Nano 20K (GW2AR-18) fit estimate from {args[0]}:")
+    print(f"{name} fit estimate from {args[0]}:")
     worst = 0.0
     for what in ("LUT4", "FF", "BSRAM", "MULT"):
         used, cap = u[what], DEVICE[what]

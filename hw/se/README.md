@@ -79,6 +79,31 @@ Speed is no longer a priority (v4): the target is a contactless card, where the 
 
 What the protection costs in time: running NTT, PWM and INTT once per share; the masked compression (two clocks per adder bit, ~50 clocks per coefficient for d = 10); the second decoding of m′ (~10 k clocks); drawing a Fisher–Yates order before every shuffled instruction (128–256 clocks each, the next NTT layer's order is drawn while the current layer runs); the χ DOM AND (4 clocks per lane). A PUF read takes ~15 clocks (excite a row, let it settle, sample), so a reconstruction is ~15 k clocks, and the 3- or 5-read retry ~45 k / ~75 k.
 
+### Version 5: serial core for the Tang Nano 9K (in progress)
+
+Goal: the full feature set (masking, hiding, PUF, secure messaging, fault
+detection) on a Tang Nano 9K (GW1NR-9: 8,640 LUT4, 6,480 flip-flops, 26 BSRAM,
+20 multipliers), trading only clocks. The v4 Gowin fit on the 20K was 15,881
+logic units and 8,774 registers; the 9K needs ~7,300 / ~5,500 for placement to
+close. The engines are replaced one at a time behind the same instruction set,
+microcode, host interface and testbench, so `make sim-se` (NIST answers,
+masked Decaps, PUF, messaging, faults) checks every step; masked gadgets that
+change are re-checked with `make se-probe` and the TVLA flow.
+
+| Step | Unit | Change | Status |
+|---|---|---|---|
+| 1 | PUF read, SampleNTT, seed RAMs | idle-excited rows (column OR/AND instead of a 960-way mux); byte-serial `pqse_parse`; seed RAMs in BSRAM | done, untested |
+| 2 | Keccak | 16-bit words (one 256 x 16 BSRAM per share, 16-bit funnel shifter, 16-bit DOM chi), ~19.3 k clocks per permutation instead of 3.9 k; the sponge waits on the lane port (`rdy`) | done, untested |
+| 3 | Sponge, seed / buffer paths | 16-bit lane words end to end (removes the 64-bit lane registers kept for the v4 interface) | planned |
+| 4 | PUF extractor | key shares and decoder processed serially | planned |
+| 5 | `pqse_io` | 16-bit lane operations (compare, counters, unmask) | planned |
+| 6 | `pqse_core` | engine ports as a narrower, OR-combined bus | planned |
+| 7 | `pqse_masked`, `pqse_mcomp` | 16-bit registers in the SEL / tag / compression gadgets (probing re-check) | planned |
+| 8 | `pqse_prng`, `pqse_poly` | 16 random bits per clock; shared adders | planned |
+
+The Keccak permutation is the main cost in time: ~50 permutations per KEM
+operation make it ~1 M clocks (~40 ms at 27 MHz, ~75 ms at 13.56 MHz).
+
 ## 4. Security design (threat → countermeasure)
 
 | Threat | Countermeasure | Where |
@@ -140,7 +165,7 @@ What the protection costs in time: running NTT, PWM and INTT once per share; the
 ## 7. PUF fuzzy extractor (`pqse_puf.v`)
 
 - **Response source: an SRAM-type PUF.** An SRAM cell's power-up value is decided by the mismatch of its two cross-coupled inverters; that is the most studied PUF in smart cards. Four builds of the same 960-bit source (`pqse_puf_raw`):
-  - `PQSE_PUF_LATCH` (FPGA prototype, and the compact choice for an open-PDK chip): 960 cells, each the storage core of an SRAM cell, two cross-coupled NAND gates (`pqse_pufcell`), in 30 rows of 32. A read excites the cell's row (both nodes forced high, as an SRAM cell before power-up), releases it, lets it settle (8 clocks) and samples the cell through a synchronizer. Each read re-runs the "power-up", so the 3- and 5-read majority retries work. Cost: 2 gates per bit, ~0.01 mm² in SKY130 (an OpenRAM 1 KB macro is ~0.2 mm²), ~2 k LUTs on the FPGA.
+  - `PQSE_PUF_LATCH` (FPGA prototype, and the compact choice for an open-PDK chip): 960 cells, each the storage core of an SRAM cell, two cross-coupled NAND gates (`pqse_pufcell`), in 30 rows of 32. All rows are held excited (both nodes forced high, as an SRAM cell before power-up) except during a read, which releases the cell's row, lets it settle (8 clocks), samples the cell through a synchronizer and excites the row again. An excited cell has a fixed output, so the read is a per-column AND (OR for the butterfly cell) across the 30 rows and a 32-way column select instead of a 960-way multiplexer, and outside a read no cell holds a resolved response bit. Each read re-runs the "power-up", so the 3- and 5-read majority retries work. Cost: 2 gates per bit, ~0.01 mm² in SKY130 (an OpenRAM 1 KB macro is ~0.2 mm²), ~2 k LUTs on the FPGA.
   - `PQSE_PUF_BFLY` (FPGA prototype without spending LUTs on the PUF): the same 30 × 32 array, row excitation, settle time and synchronizer, but each cell is a **butterfly cell** (`pqse_bflycell`, Kumar et al., HOST 2008): two always-transparent latches built from the logic cells' flip-flops (Gowin `DLC` / `DLP`), each one's D fed by the other's Q, one with an asynchronous clear and one with an asynchronous preset driven by the row's excite. Excited, the pair is forced to 0/1, which a loop of two non-inverting stages cannot hold; released, it falls to 0/0 or 1/1 as the mismatch of the two paths decides, the same metastable resolution as an SRAM cell. Each cell takes the row's excite through its own flip-flop: wired straight to the shared row net, the 32 cells of a row are logically identical and GowinSynthesis merged them as equivalent registers (990 latches instead of 1,920). Cost: 2 latches + 1 flip-flop and no LUT per bit, so ~1,920 LUT4s move to ~2,880 of the GW2AR-18's 15,552 flip-flops (`make se-gowin PUF=bfly`, `make se-gowin-eda PUF=bfly`). Place both latches in one CLS (or two neighbouring ones if a CLS cannot mix a clear and a preset register) with matched D routes. Butterfly cells on FPGAs are known for strong routing bias (low inter-device distance in published Spartan-3E measurements), so measure uniformity and uniqueness with PUFRAW as for the NAND cell. On Intel parts (DE10-Nano), whose ALM registers have no latch mode, Quartus would build the latches from LUTs: keep `PQSE_PUF_LATCH` there.
   - `PQSE_PUF_SRAM` (a chip with a compact SRAM compiler): the power-up contents of a dedicated 32 × 32 SRAM that nothing writes (`pqse_puf_sram`, a black box mapped to the PDK's macro). One sample per power-up — natural for a card, which powers up at every tap — so repeated reads return the same bits and the retries add nothing; the code alone must cover the bit-error rate.
   - default: the simulation model (fixed device pattern, read noise, drift and a noisy mode).

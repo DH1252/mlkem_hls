@@ -4,8 +4,9 @@
 //   pqse_puf_raw  one response bit per request (bit idx of 960). Sources:
 //                   PQSE_PUF_LATCH  SRAM-cell PUF: 960 cells, each the storage core
 //                                   of an SRAM cell (two cross-coupled NAND gates,
-//                                   pqse_pufcell). Exciting a row of 32 cells forces
-//                                   both nodes of every cell high; on release the
+//                                   pqse_pufcell). Rows are held excited (both nodes
+//                                   of every cell high) except the one being read; on
+//                                   release the
 //                                   pair falls into 0/1 or 1/0 as the mismatch of
 //                                   its two gates decides - the power-up of an SRAM
 //                                   cell, repeatable at any time (so the majority
@@ -93,23 +94,32 @@ module pqse_puf_raw #(
   output reg        rbit
 );
 `ifdef PQSE_PUF_LATCH
-  // ---------------- SRAM-cell PUF: 30 rows x 32 cross-coupled NAND pairs ----------------
-  reg  [4:0]  rsel;             // the row being excited / read
-  reg  [9:0]  ix;
-  reg         exc;              // excite: both nodes of every cell in row rsel high
+  // ---------------- SRAM-cell PUF: 30 rows x 32 cells ----------------
+  // Every row is held excited except the one being read (v5): an excited cell
+  // has a fixed output (NAND pair: q = 1; butterfly: q = a = 0), so the read
+  // needs no 960-way multiplexer, only a per-column AND / OR across the 30
+  // rows and a 32-way column select (~1/3 of the LUTs). Also, outside a read
+  // no cell holds a resolved response bit.
+  // Read: the row stays excited 2 more clocks, is released (rel), resolves for
+  // SETTLE clocks while the synchronizer follows the cell, then is excited again.
+  reg  [4:0]  rsel;             // the row being read
+  reg  [4:0]  csel;             // the column being read
+  reg         rel;              // row rsel released (out of excitation)
   reg  [3:0]  cnt;
   reg  [1:0]  ph;
   reg         s1, s2;           // synchronizer (a cell may still be resolving)
   wire [959:0] qv;
+  wire [31:0]  colv;            // per column: the released row's cell (excited rows neutral)
   genvar g, gc;
   generate
     for (g = 0; g < 30; g = g + 1) begin : g_row
-      // e = 0: excited (both nodes 1); e = 1: the pair holds what it resolved to
-      wire e_row = !(exc && (rsel == g));
+      wire sel_row = rel && (rsel == g);
+      // e = 0: excited (both nodes 1); e = 1: the pair resolves and holds
+      wire e_row = sel_row;
 `ifdef PQSE_PUF_BFLY
       // active-high excite, one net per row: the inversion stays in the row
       // decode, so the cells themselves need no LUT
-      wire x_row = exc && (rsel == g);
+      wire x_row = !sel_row;
 `endif
       for (gc = 0; gc < 32; gc = gc + 1) begin : g_cell
 `ifdef PQSE_PUF_BFLY
@@ -119,33 +129,45 @@ module pqse_puf_raw #(
 `endif
       end
     end
+    for (gc = 0; gc < 32; gc = gc + 1) begin : g_col
+      wire [29:0] cb;
+      for (g = 0; g < 30; g = g + 1) begin : g_cb
+        assign cb[g] = qv[32*g + gc];
+      end
+`ifdef PQSE_PUF_BFLY
+      assign colv[gc] = |cb;            // excited butterfly cells output 0
+`else
+      assign colv[gc] = &cb;            // excited NAND pairs output 1
+`endif
+    end
   endgenerate
-  wire        cq   = qv[ix];       // the cell being read ("cell" is a Verilog-2001 keyword)
+  wire        cq   = colv[csel];   // the cell being read ("cell" is a Verilog-2001 keyword)
 
   always @(posedge clk) begin
     if (rst) begin
-      exc <= 1'b0; ph <= 2'd0; done <= 1'b0; s1 <= 1'b0; s2 <= 1'b0;
+      rel <= 1'b0; ph <= 2'd0; done <= 1'b0; s1 <= 1'b0; s2 <= 1'b0;
     end else begin
       done <= 1'b0;
       s1   <= (ph == 2'd2) ? cq : 1'b0;          // sampled only while a read is settling
       s2   <= s1;
       case (ph)
         2'd0: if (req) begin
-          ix   <= idx;
           rsel <= idx[9:5];
-          exc  <= 1'b1;
+          csel <= idx[4:0];
           cnt  <= 4'd0;
           ph   <= 2'd1;
         end
-        2'd1: begin                               // excite for 2 clocks, then release
+        2'd1: begin                               // 2 more clocks excited, then release
           cnt <= cnt + 4'd1;
-          if (cnt == 4'd1) begin exc <= 1'b0; cnt <= 4'd0; ph <= 2'd2; end
+          if (cnt == 4'd1) begin rel <= 1'b1; cnt <= 4'd0; ph <= 2'd2; end
         end
         2'd2: begin                               // the row resolves; s1 / s2 follow the cell
           cnt <= cnt + 4'd1;
           if (cnt == SETTLE[3:0]) ph <= 2'd3;
         end
-        default: begin rbit <= s2; done <= 1'b1; ph <= 2'd0; end
+        default: begin                            // sample, excite the row again
+          rbit <= s2; done <= 1'b1; rel <= 1'b0; ph <= 2'd0;
+        end
       endcase
     end
   end
