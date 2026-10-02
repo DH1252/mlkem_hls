@@ -25,9 +25,11 @@
 //                                   forces the pair to 0/1, which the loop cannot
 //                                   hold; on release it falls to 0/0 or 1/1 as the
 //                                   two paths' mismatch decides (Kumar et al.,
-//                                   "The Butterfly PUF", HOST 2008). 2 flip-flops
-//                                   and no LUT per bit: the array moves from
-//                                   ~1,920 LUTs to ~1,920 of the FPGA's flip-flops.
+//                                   "The Butterfly PUF", HOST 2008). 2 latches +
+//                                   1 excite flip-flop (so synthesis cannot merge
+//                                   identical cells) and no LUT per bit: the array
+//                                   moves from ~1,920 LUTs to ~2,880 of the FPGA's
+//                                   flip-flops.
 //                                   Gowin latch primitives (DLC / DLP); implies
 //                                   PQSE_PUF_LATCH (same row / read control).
 //                   PQSE_PUF_SRAM  a dedicated SRAM macro (32 x 32) that nothing
@@ -111,7 +113,7 @@ module pqse_puf_raw #(
 `endif
       for (gc = 0; gc < 32; gc = gc + 1) begin : g_cell
 `ifdef PQSE_PUF_BFLY
-        pqse_bflycell u_c (.x(x_row), .q(qv[32*g + gc]));
+        pqse_bflycell u_c (.clk(clk), .x(x_row), .q(qv[32*g + gc]));
 `else
         pqse_pufcell u_c (.e(e_row), .q(qv[32*g + gc]));
 `endif
@@ -251,26 +253,35 @@ endmodule
 // logic cell (CLS), or in two neighbouring ones if a CLS cannot mix a clear and
 // a preset register, with matched D routes; keep the x fan-out of a row on one
 // net. (Xilinx: LDCE / LDPE, as in the original butterfly PUF.)
+// Own excite register: with the row's excite net wired straight to the latches,
+// all 32 cells of a row are logically identical and GowinSynthesis merged them
+// as equivalent registers (one latch b kept per row, 990 latches instead of
+// 1,920). Each cell now takes the row excite through its own flip-flop, kept
+// with syn_preserve (and placed next to the pair, it gives every cell the same
+// short excite route): no two cells share a driver. Cost: 1 flip-flop per bit,
+// still no LUT; the excite reaches the pair one clock later (the read schedule
+// waits SETTLE clocks after release, far more than needed).
+// GowinSynthesis also gets syn_preserve on the module and the latches and
+// syn_dont_touch on the two nodes (its attribute against merging equivalent
+// registers).
 (* keep_hierarchy *)   // never flattened: synthesis must not restructure the pair
-// All cells of a row see the same excite and are logically identical, so a
-// synthesis tool may merge them as equivalent registers (GowinSynthesis kept
-// one latch b per row): every cell is a separate physical source and must stay.
-// GowinSynthesis: syn_preserve on the module and the latches, syn_dont_touch on
-// the two nodes (its attribute against merging equivalent registers).
 module pqse_bflycell (
+  input  wire clk,
   input  wire x,
   output wire q
 ) /* synthesis syn_preserve = 1 */;
+  (* keep = 1 *) reg  xq /* synthesis syn_preserve = 1 */;
+  always @(posedge clk) xq <= x;
   (* keep = 1 *) wire q_a /* synthesis syn_dont_touch = 1 */;
   (* keep = 1 *) wire q_b /* synthesis syn_dont_touch = 1 */;
 `ifdef PQSE_GOWIN_EDA
   // Gowin EDA (GowinSynthesis, UG288): the latch gate pin is G
-  DLC #(.INIT(1'b0)) u_a (.D(q_b), .G(1'b1), .CLEAR(x),  .Q(q_a)) /* synthesis syn_preserve = 1 */;
-  DLP #(.INIT(1'b1)) u_b (.D(q_a), .G(1'b1), .PRESET(x), .Q(q_b)) /* synthesis syn_preserve = 1 */;
+  DLC #(.INIT(1'b0)) u_a (.D(q_b), .G(1'b1), .CLEAR(xq),  .Q(q_a)) /* synthesis syn_preserve = 1 */;
+  DLP #(.INIT(1'b1)) u_b (.D(q_a), .G(1'b1), .PRESET(xq), .Q(q_b)) /* synthesis syn_preserve = 1 */;
 `else
   // Yosys / nextpnr cell library: the latch gate pin is CLK
-  (* keep = 1 *) DLC #(.INIT(1'b0)) u_a (.D(q_b), .CLK(1'b1), .CLEAR(x),  .Q(q_a));
-  (* keep = 1 *) DLP #(.INIT(1'b1)) u_b (.D(q_a), .CLK(1'b1), .PRESET(x), .Q(q_b));
+  (* keep = 1 *) DLC #(.INIT(1'b0)) u_a (.D(q_b), .CLK(1'b1), .CLEAR(xq),  .Q(q_a));
+  (* keep = 1 *) DLP #(.INIT(1'b1)) u_b (.D(q_a), .CLK(1'b1), .PRESET(xq), .Q(q_b));
 `endif
   assign q = q_a;
 endmodule
