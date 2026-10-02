@@ -255,8 +255,9 @@ module pqse_bflycell (
 );
   (* keep = 1 *) wire q_a;
   (* keep = 1 *) wire q_b;
-  (* keep = 1 *) DLC u_a (.D(q_b), .G(1'b1), .CLEAR(x),  .Q(q_a));
-  (* keep = 1 *) DLP u_b (.D(q_a), .G(1'b1), .PRESET(x), .Q(q_b));
+  // gate pin: CLK in the Yosys / nextpnr cell library (G in Gowin's UG288)
+  (* keep = 1 *) DLC              u_a (.D(q_b), .CLK(1'b1), .CLEAR(x),  .Q(q_a));
+  (* keep = 1 *) DLP #(.INIT(1'b1)) u_b (.D(q_a), .CLK(1'b1), .PRESET(x), .Q(q_b));
   assign q = q_a;
 endmodule
 `endif
