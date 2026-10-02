@@ -26,11 +26,11 @@
 //                                   forces the pair to 0/1, which the loop cannot
 //                                   hold; on release it falls to 0/0 or 1/1 as the
 //                                   two paths' mismatch decides (Kumar et al.,
-//                                   "The Butterfly PUF", HOST 2008). 2 latches +
-//                                   1 excite flip-flop (so synthesis cannot merge
-//                                   identical cells) and no LUT per bit: the array
-//                                   moves from ~1,920 LUTs to ~2,880 of the FPGA's
-//                                   flip-flops.
+//                                   "The Butterfly PUF", HOST 2008). 2 latches and
+//                                   no LUT per bit (the latch gates of a column on
+//                                   one net, so synthesis cannot merge identical
+//                                   cells): the array moves from ~1,920 LUTs to
+//                                   ~1,920 of the FPGA's flip-flops.
 //                                   Gowin latch primitives (DLC / DLP); implies
 //                                   PQSE_PUF_LATCH (same row / read control).
 //                   PQSE_PUF_SRAM  a dedicated SRAM macro (32 x 32) that nothing
@@ -111,6 +111,11 @@ module pqse_puf_raw #(
   reg         s1, s2;           // synchronizer (a cell may still be resolving)
   wire [959:0] qv;
   wire [31:0]  colv;            // per column: the released row's cell (excited rows neutral)
+`ifdef PQSE_PUF_BFLY
+  // butterfly: the latch gates of a column (only the column being read is open)
+  reg  [31:0]  g_col;
+  always @(posedge clk) g_col <= 32'd1 << csel;
+`endif
   genvar g, gc;
   generate
     for (g = 0; g < 30; g = g + 1) begin : g_row
@@ -124,7 +129,7 @@ module pqse_puf_raw #(
 `endif
       for (gc = 0; gc < 32; gc = gc + 1) begin : g_cell
 `ifdef PQSE_PUF_BFLY
-        pqse_bflycell u_c (.clk(clk), .x(x_row), .q(qv[32*g + gc]));
+        pqse_bflycell u_c (.x(x_row), .g(g_col[gc]), .q(qv[32*g + gc]));
 `else
         pqse_pufcell u_c (.e(e_row), .q(qv[32*g + gc]));
 `endif
@@ -267,7 +272,7 @@ module pqse_pufcell (
 endmodule
 
 `ifdef PQSE_PUF_BFLY
-// one butterfly PUF bit: two always-transparent latches (G = 1), each one's D
+// one butterfly PUF bit: two latches (open while the column gate g is 1), each one's D
 // fed by the other's Q, built from the logic cells' flip-flops in latch mode.
 // x = 1: latch a cleared, latch b preset (a = 0, b = 1: a state the loop of
 // two non-inverting stages cannot hold); x = 0: the pair falls to a = b = 0 or
@@ -276,35 +281,37 @@ endmodule
 // logic cell (CLS), or in two neighbouring ones if a CLS cannot mix a clear and
 // a preset register, with matched D routes; keep the x fan-out of a row on one
 // net. (Xilinx: LDCE / LDPE, as in the original butterfly PUF.)
-// Own excite register: with the row's excite net wired straight to the latches,
-// all 32 cells of a row are logically identical and GowinSynthesis merged them
-// as equivalent registers (one latch b kept per row, 990 latches instead of
-// 1,920). Each cell now takes the row excite through its own flip-flop, kept
-// with syn_preserve (and placed next to the pair, it gives every cell the same
-// short excite route): no two cells share a driver. Cost: 1 flip-flop per bit,
-// still no LUT; the excite reaches the pair one clock later (the read schedule
-// waits SETTLE clocks after release, far more than needed).
+// Unique inputs per cell: with only the row's excite net, all 32 cells of a
+// row are logically identical and GowinSynthesis merged them as equivalent
+// registers (990 latches instead of 1,920). v4 gave each cell its own excite
+// flip-flop (960 flip-flops); v5 instead drives the two latch gates of a cell
+// from its column's gate net g: a cell's inputs (row x, column g) are unique,
+// and it costs 32 gate nets instead of 960 flip-flops. Both latches still
+// leave excitation together on the row net x (the butterfly's symmetry); g is
+// set one read ahead (pqse_puf_raw), while the cell is still excited:
+//   row excited (x = 1)            a = 0, b = 1 whatever g: q = 0
+//   row released, g = 0 (closed)   both latches hold the excited state: q = 0
+//   row released, g = 1 (open)     the butterfly resolves: q = response
+// so the per-column OR still sees only the cell being read.
 // GowinSynthesis also gets syn_preserve on the module and the latches and
 // syn_dont_touch on the two nodes (its attribute against merging equivalent
 // registers).
 (* keep_hierarchy *)   // never flattened: synthesis must not restructure the pair
 module pqse_bflycell (
-  input  wire clk,
   input  wire x,
+  input  wire g,
   output wire q
 ) /* synthesis syn_preserve = 1 */;
-  (* keep = 1 *) reg  xq /* synthesis syn_preserve = 1 */;
-  always @(posedge clk) xq <= x;
   (* keep = 1 *) wire q_a /* synthesis syn_dont_touch = 1 */;
   (* keep = 1 *) wire q_b /* synthesis syn_dont_touch = 1 */;
 `ifdef PQSE_GOWIN_EDA
   // Gowin EDA (GowinSynthesis, UG288): the latch gate pin is G
-  DLC #(.INIT(1'b0)) u_a (.D(q_b), .G(1'b1), .CLEAR(xq),  .Q(q_a)) /* synthesis syn_preserve = 1 */;
-  DLP #(.INIT(1'b1)) u_b (.D(q_a), .G(1'b1), .PRESET(xq), .Q(q_b)) /* synthesis syn_preserve = 1 */;
+  DLC #(.INIT(1'b0)) u_a (.D(q_b), .G(g), .CLEAR(x),  .Q(q_a)) /* synthesis syn_preserve = 1 */;
+  DLP #(.INIT(1'b1)) u_b (.D(q_a), .G(g), .PRESET(x), .Q(q_b)) /* synthesis syn_preserve = 1 */;
 `else
   // Yosys / nextpnr cell library: the latch gate pin is CLK
-  (* keep = 1 *) DLC #(.INIT(1'b0)) u_a (.D(q_b), .CLK(1'b1), .CLEAR(xq),  .Q(q_a));
-  (* keep = 1 *) DLP #(.INIT(1'b1)) u_b (.D(q_a), .CLK(1'b1), .PRESET(xq), .Q(q_b));
+  (* keep = 1 *) DLC #(.INIT(1'b0)) u_a (.D(q_b), .CLK(g), .CLEAR(x),  .Q(q_a));
+  (* keep = 1 *) DLP #(.INIT(1'b1)) u_b (.D(q_a), .CLK(g), .PRESET(x), .Q(q_b));
 `endif
   assign q = q_a;
 endmodule
