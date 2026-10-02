@@ -322,6 +322,12 @@ se-gowin-bisect:
 # leftover integer loop variables), so sed drops that keyword.
 STA ?= sta
 ACT ?= 0.1
+# delay target for ABC (ps, the 50 MHz clock of pqse_power.tcl): with it ABC
+# buffers high-fan-out nets and sizes the gates; without it a RAM's address
+# decode (the RAMs become flip-flops here) drives thousands of inputs from one
+# gate, with transition times of microseconds, which wrecks the timing report
+# and inflates the internal power (it grows with the input slew)
+PERIOD_PS ?= 20000
 se-power: | $(BUILD)
 	@test -n "$(SKY130_LIB)" || { echo "set SKY130_LIB=<path to sky130_fd_sc_hd__tt_025C_1v80.lib>"; exit 1; }
 	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
@@ -330,7 +336,7 @@ se-power: | $(BUILD)
 	yosys -q -l $(BUILD)/sepower/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(SE_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
 	    delete t:\$$scopeinfo; \
-	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB); opt_clean; \
+	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB) -D $(PERIOD_PS); opt_clean; \
 	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
 	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(BUILD)/sepower/pqse_top_sky130.v
@@ -359,7 +365,7 @@ se-power-vcd: | $(BUILD)
 	yosys -q -l $(GLD)/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(SE_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
 	    delete t:\$$scopeinfo; \
-	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB); opt_clean; \
+	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB) -D $(PERIOD_PS); opt_clean; \
 	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
 	    rename -hide w:* i:* o:* %u %d; rename -hide c:*; rename -enumerate; \
 	    write_verilog -noattr -noexpr $(GLD)/pqse_top_gl.v"
