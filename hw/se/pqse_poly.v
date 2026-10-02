@@ -80,13 +80,16 @@ module pqse_poly (
 
   // ---- NTT addressing ------------------------------------------------------------
   // group g (0..63) -> shuffled g'; w = g' with a 0 inserted at bit p
+  // (per bit: below p the group's bit, at p a 0, above p the group's bit below;
+  // a 2:1 choice per bit instead of two barrel shifters)
   function [6:0] w_of(input [5:0] gs, input [2:0] pp);
-    reg [7:0] g8, lowm, w8;
+    reg [6:0] gl, gu;
+    integer   b;
     begin
-      g8   = {2'b00, gs};
-      lowm = (8'd1 << pp) - 8'd1;
-      w8   = ((g8 >> pp) << (pp + 3'd1)) | (g8 & lowm);
-      w_of = w8[6:0];
+      gl = {1'b0, gs};            // bit b of the group
+      gu = {gs, 1'b0};            // bit b - 1 of the group
+      for (b = 0; b < 7; b = b + 1)
+        w_of[b] = (b < pp) ? gl[b] : (b == pp) ? 1'b0 : gu[b];
     end
   endfunction
   function [6:0] zi_of(input [5:0] gs, input [2:0] pp, input inv);   // zeta index of group gs
@@ -111,11 +114,11 @@ module pqse_poly (
   wire [5:0] g_rd  = shuf ? pq_val[5:0] : tc[6:1];              // group being read (tc < 128)
   // the staged / written groups are the read group 2, 9 and 10 clocks ago:
   // a delay line instead of three more permutation lookups
-  reg  [5:0] gd1, gd2, gd3, gd4, gd5, gd6, gd7, gd8, gd9, gd10;
+  reg  [5:0] gd1, gd2, gd3, gd4, gd5, gd6, gd7, gd8, gd9;
+  reg  [6:0] wa1q;      // word w of the group written last clock (its w + 2^p is written now)
   wire [5:0] g_st  = gd2;                                       // group staged (tc even 2..128)
   // (its zeta is read one clock earlier, from gd1, which becomes gd2)
   wire [5:0] g_w1  = gd9;                                       // group whose word w is written
-  wire [5:0] g_w2  = gd10;                                      // group whose word w+2^p is written
   wire [6:0] wr_w  = w_of(g_rd, p);
   wire [6:0] wr_w2 = wr_w | (7'd1 << p);
 
@@ -165,13 +168,22 @@ module pqse_poly (
   wire [11:0] gam   = kh1[0] ? negq(zq) : zq;                     // zq: zeta({1, kh1[6:1]}) (phase 1)
 
   // shared "+ product" adder: NTT a + z b, PWM c0 + m1, c1 + m3, + m4, + m5
-  wire [11:0] msel  = is_ntt ? dl4 : (ph == 3'd0) ? e1 : (ph == 3'd1) ? cq[11:0] :
+  wire [11:0] msel  = (ph == 3'd0) ? e1 : (ph == 3'd1) ? cq[11:0] :
                       (ph == 3'd3) ? cq[23:12] : o1;
   wire [11:0] madd  = addq(msel, mr);
-  // ADD / SUB: c +/- a (a = rdata), MSPLIT: c - R, per coefficient
+  // two add-or-subtract units, shared:
+  //   NTT        u0 = a + zb, u1 = a - zb               (a = dl4, zb = mr)
+  //   INTT       u0 = a + b,  u1 = b - a                (halved into dl1 / d1)
+  //   ADD / SUB  c +/- a per coefficient (a = rdata), MSPLIT c - R
   wire        as_sb = (op == P_SUB) || (op == P_MSPLIT);
   wire [23:0] as_y  = (op == P_MSPLIT) ? {R1, R0} : rdata;
-  wire [23:0] asr   = {asq(cq[23:12], as_y[23:12], as_sb), asq(cq[11:0], as_y[11:0], as_sb)};
+  wire [11:0] u0x   = !is_ntt ? cq[11:0]    : intt ? fa : dl4;
+  wire [11:0] u0y   = !is_ntt ? as_y[11:0]  : intt ? fb : mr;
+  wire [11:0] u1x   = !is_ntt ? cq[23:12]   : intt ? fb : dl4;
+  wire [11:0] u1y   = !is_ntt ? as_y[23:12] : intt ? fa : mr;
+  wire [11:0] u0    = asq(u0x, u0y, !is_ntt && as_sb);
+  wire [11:0] u1    = asq(u1x, u1y, is_ntt || as_sb);
+  wire [23:0] asr   = {u1, u0};
 
   wire [2:0] ph_last = (op == P_PWM) ? 3'd5 : (op == P_MSPLIT) ? 3'd3 :
                        ((op == P_ADD) || (op == P_SUB)) ? 3'd1 : 3'd0;
@@ -213,7 +225,7 @@ module pqse_poly (
           end
           if (!tc[0] && tc >= 8'd10 && tc <= 8'd136) begin
             we    = 1'b1;
-            waddr = {cs, w_of(g_w2, p) | (7'd1 << p)};
+            waddr = {cs, wa1q | (7'd1 << p)};
             wdata = {o1b, o0b};
           end
         end
@@ -325,7 +337,8 @@ module pqse_poly (
     end else begin
     if (busy_r && is_ntt && !hold) begin
       gd1 <= g_rd; gd2 <= gd1; gd3 <= gd2; gd4 <= gd3; gd5 <= gd4;
-      gd6 <= gd5;  gd7 <= gd6; gd8 <= gd7; gd9 <= gd8; gd10 <= gd9;
+      gd6 <= gd5;  gd7 <= gd6; gd8 <= gd7; gd9 <= gd8;
+      wa1q <= w_of(g_w1, p);
     end
     if (busy_r && is_ntt) begin
       if (tc[0] && tc <= 8'd127) wq <= rdata;
@@ -336,11 +349,11 @@ module pqse_poly (
       end
       // NTT (CT): a delayed to the product z*b (dl4); INTT (GS): (a+b)/2 and
       // (b-a)/2, product z*(b-a)/2 one clock later, (a+b)/2 delayed to it (dl5)
-      dl1 <= intt ? halfq(addq(fa, fb)) : fa;
+      dl1 <= intt ? halfq(u0) : fa;
       dl2 <= dl1; dl3 <= dl2; dl4 <= dl3; dl5 <= dl4;
-      o_add <= madd;
-      o_sub <= subq(dl4, mr);
-      d1 <= halfq(subq(fb, fa));
+      o_add <= u0;
+      o_sub <= u1;
+      d1 <= halfq(u1);
       z1 <= fz;
       // butterfly 0 output (fed at odd tc, out 5 clocks later at even tc)
       if (!tc[0] && tc >= 8'd8 && tc <= 8'd134) begin

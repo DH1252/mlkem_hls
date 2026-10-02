@@ -421,7 +421,9 @@ module pqse_puf #(
   reg  [9:0]   b;            // response bit (raw mode)
   reg  [2:0]   rv, ones;     // majority voting
   reg  [15:0]  hl;           // helper word in / out, raw word
-  reg  [31:0]  wm;           // w XOR C(R) for the block (reconstruct)
+  reg  [31:0]  wm;           // helper bits w of the block (reconstruct)
+  reg          wb;           // reconstruct: w[xr] ^ C(R)[xr], registered before the
+                             // response bit meets it (r ^ w alone would be C(k) ^ e)
   reg  [31:0]  y;            // y = r XOR w XOR C(R)
   reg  [5:0]   R;            // block mask
   reg  [4:0]   xm;           // reconstruct: read order of the block, bit x ^ xm (random per block)
@@ -448,12 +450,6 @@ module pqse_puf #(
   // RM(1,5) codeword bit x of message m (m[0]: all-ones row, m[5:1]: x's bits)
   function cw(input [5:0] m, input [4:0] xx);
     cw = m[0] ^ (^(m[5:1] & xx));
-  endfunction
-  function [31:0] cwv(input [5:0] m);
-    integer i;
-    begin
-      for (i = 0; i < 32; i = i + 1) cwv[i] = cw(m, i[4:0]);
-    end
   endfunction
 
   // enrollment: majority of 5 reads; reconstruction: majority of nrd (1, 3, 5)
@@ -509,7 +505,7 @@ module pqse_puf #(
         U_IDLE: if (!start) begin
           // idle: no key material left in the extractor's registers
           K0 <= 16'd0; K1 <= 16'd0; kb0 <= 6'd0; kb1 <= 6'd0;
-          y <= 32'd0; wm <= 32'd0; hp <= 1'b0;
+          y <= 32'd0; wm <= 32'd0; hp <= 1'b0; wb <= 1'b0;
           R <= 6'd0; xm <= 5'd0; bm <= 6'd0;
         end else begin
           mode <= (ins[91:88] == PF_ENROLL) ? 2'd0 : (ins[91:88] == PF_RAW) ? 2'd2 : 2'd1;
@@ -554,11 +550,14 @@ module pqse_puf #(
         U_MSK: begin                                      // ... arrives (brdata)
           R  <= rnd[5:0];
           xm <= rnd[10:6];
-          wm <= {brdata, hl} ^ cwv(rnd[5:0]);
+          wm <= {brdata, hl};
           x  <= 5'd0;
           st <= U_REQ;
         end
-        U_REQ: st <= U_WAIT;
+        U_REQ: begin
+          wb <= wm[xr] ^ cw(R, xr);                       // masked helper bit of this read
+          st <= U_WAIT;
+        end
         U_WAIT: if (raw_done) begin
           case (mode)
             2'd0: begin                                   // enroll: 5 reads per bit
@@ -575,7 +574,7 @@ module pqse_puf #(
                 ones <= ones_n; rv <= rv + 3'd1; st <= U_REQ;
               end else begin
                 ones <= 3'd0; rv <= 3'd0;
-                y[xr] <= rmaj ^ wm[xr];                   // bit xr of y = r' ^ w ^ C(R)
+                y[xr] <= rmaj ^ wb;                       // bit xr of y = r' ^ (w ^ C(R))
                 x <= x + 5'd1;
                 if (x == 5'd31) begin
                   u <= 5'd0; bi <= 5'd0; acc <= 6'd0; best <= 6'd63; st <= U_DEC;
