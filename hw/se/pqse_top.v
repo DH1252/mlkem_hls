@@ -89,9 +89,16 @@ module pqse_top #(
   input  wire tamper,
   output wire trig
 );
-  // synchronous reset from the pin
+  // reset from the pin: asserted asynchronously (from the first instant rst_n is
+  // low, whatever the flip-flops powered up with), released synchronously. A
+  // purely synchronous reset left the logic running unreset for two clocks at
+  // power-up: with random (in simulation all-zero) registers the security-state
+  // shadows disagreed, the host saw tampering and the persistent store burned
+  // KILLED before the reset took hold.
   reg [1:0] rs;
-  always @(posedge clk) rs <= {rs[0], ~rst_n};
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) rs <= 2'b11;
+    else        rs <= {rs[0], 1'b0};
   wire rst = rs[1];
 
   wire        bus_we, bus_re;
