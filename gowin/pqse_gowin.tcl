@@ -7,7 +7,7 @@
 #                                                     variables)
 #
 #   PUF     bfly (default here; make se-gowin-eda passes its own PUF, default 1):
-#           butterfly-cell PUF (2 flip-flops per bit, no LUTs)
+#           butterfly-cell PUF (2 latches + 1 flip-flop per bit, no LUTs)
 #           1: cross-coupled NAND PUF (2 LUTs per bit); 0: simulation PUF model
 #   MASKED  1 (default) or 0 (the unprotected reference build)
 #   MAP     GowinSynthesis LUT mapping (-map_option): 1 (default mapping) or 2

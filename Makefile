@@ -240,8 +240,8 @@ se-area: | $(BUILD)
 # Fit on the Tang Nano 20K (Gowin GW2AR-18): Yosys synth_gowin, then the LUT /
 # flip-flop / BSRAM / multiplier counts against the device. PUF=1 (default)
 # includes the SRAM-cell latch PUF array (960 cells, as in the FPGA build);
-# PUF=bfly builds the same array from butterfly cells (two latch-mode flip-flops
-# per bit, no LUTs: ~1,920 LUTs move to ~1,920 flip-flops); PUF=0 synthesizes the
+# PUF=bfly builds the same array from butterfly cells (two latches and an excite
+# flip-flop per bit, no LUTs: ~1,920 LUTs move to ~2,880 flip-flops); PUF=0 synthesizes the
 # simulation PUF model instead.
 # Area options (the defaults aim at the fewest cells):
 #   FLAT=1          flatten before synthesis, so constants, unused outputs and
