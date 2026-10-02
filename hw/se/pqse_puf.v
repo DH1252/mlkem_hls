@@ -252,16 +252,21 @@ endmodule
 // a preset register, with matched D routes; keep the x fan-out of a row on one
 // net. (Xilinx: LDCE / LDPE, as in the original butterfly PUF.)
 (* keep_hierarchy *)   // never flattened: synthesis must not restructure the pair
+// All cells of a row see the same excite and are logically identical, so a
+// synthesis tool may merge them as equivalent registers (GowinSynthesis kept
+// one latch b per row): every cell is a separate physical source and must stay.
+// GowinSynthesis: syn_preserve on the module and the latches, syn_dont_touch on
+// the two nodes (its attribute against merging equivalent registers).
 module pqse_bflycell (
   input  wire x,
   output wire q
-);
-  (* keep = 1 *) wire q_a /* synthesis syn_keep = 1 */;
-  (* keep = 1 *) wire q_b /* synthesis syn_keep = 1 */;
+) /* synthesis syn_preserve = 1 */;
+  (* keep = 1 *) wire q_a /* synthesis syn_dont_touch = 1 */;
+  (* keep = 1 *) wire q_b /* synthesis syn_dont_touch = 1 */;
 `ifdef PQSE_GOWIN_EDA
   // Gowin EDA (GowinSynthesis, UG288): the latch gate pin is G
-  DLC #(.INIT(1'b0)) u_a (.D(q_b), .G(1'b1), .CLEAR(x),  .Q(q_a));
-  DLP #(.INIT(1'b1)) u_b (.D(q_a), .G(1'b1), .PRESET(x), .Q(q_b));
+  DLC #(.INIT(1'b0)) u_a (.D(q_b), .G(1'b1), .CLEAR(x),  .Q(q_a)) /* synthesis syn_preserve = 1 */;
+  DLP #(.INIT(1'b1)) u_b (.D(q_a), .G(1'b1), .PRESET(x), .Q(q_b)) /* synthesis syn_preserve = 1 */;
 `else
   // Yosys / nextpnr cell library: the latch gate pin is CLK
   (* keep = 1 *) DLC #(.INIT(1'b0)) u_a (.D(q_b), .CLK(1'b1), .CLEAR(x),  .Q(q_a));
