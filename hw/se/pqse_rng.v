@@ -248,7 +248,14 @@ module pqse_prng (
     end
   end
 
-`ifndef SYNTHESIS
+`ifdef PQSE_FAULT_CAMPAIGN
+  // fault campaign (tb_pqse_fault.sv): a reuse is an outcome of the injected
+  // fault (masks reused: the masking weakened), recorded, not a stop
+  reg reuse = 1'b0;
+  always @(posedge clk)
+    if (!rst && masked_en && !init && !reseed && take && fr != 2'd2 && !take_hi) reuse <= 1'b1;
+`elsif SYNTHESIS
+`else
   // a take of a word that is not fully fresh would reuse mask bits: stop the simulation
   always @(posedge clk) begin
     if (!rst && masked_en && !init && !reseed && take && fr != 2'd2 && !take_hi) begin

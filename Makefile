@@ -252,7 +252,7 @@ sim-se-fault: | $(BUILD)
 	cp -r hw/sim/vectors $(FTD)/
 	cd $(FTD) && $(VERILATOR) --binary --timing -j 2 -O3 -Wno-fatal -Wno-lint -Wno-style \
 	    --top-module tb_pqse_fault -Mdir obj -o ../vfault -I../../hw/se \
-	    +define+PQSE_SIM_INIT $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
+	    +define+PQSE_SIM_INIT +define+PQSE_FAULT_CAMPAIGN $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
 	    ../../hw/sim/tb_pqse_fault.sv $(addprefix ../../,$(SE_SRC)) > build.log 2>&1 \
 	    || { tail -30 build.log; exit 1; }
 	cd $(FTD) && ./vfault +n=$(FN) +seed=$(SEED) +op=$(FOP) | tee sim.log

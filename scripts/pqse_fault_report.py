@@ -16,6 +16,10 @@ Outcomes:
               Decaps a K that is neither K nor K' - the fault reached the
               outside unnoticed (the case fault attacks exploit)
   hang        no done within the time limit (the host can only reset)
+Also counted: runs in which the PRNG handed out a random word twice (r=1:
+masks reused, the masking weakened for that run - not visible in the output).
+Target "none" flips nothing (null control): it must always come out unchanged;
+otherwise the harness, not the design, is wrong and nothing else counts.
 """
 import argparse
 import hashlib
@@ -54,6 +58,7 @@ def main():
                     op = p[p.index('op') + 1]
                 continue
             run, tgt, bit, word, clk, res, oc = p[:7]
+            reuse = len(p) > 7 and p[7] == 'r=1'
             res = int(res)
             if oc == 'hang':
                 cls = 'hang'
@@ -65,39 +70,54 @@ def main():
                 cls = 'rejection'
             else:
                 cls = 'SILENT'
-            runs.append((tgt, int(bit), int(word), int(clk), res, cls))
+            runs.append((tgt, int(bit), int(word), int(clk), res, cls, reuse))
     if not runs:
         sys.exit('pqse_fault_report: no runs in %s' % a.log)
 
     classes = ['unchanged', 'detected', 'rejection', 'SILENT', 'hang']
     tot = defaultdict(int)
     per = defaultdict(lambda: defaultdict(int))
-    for tgt, bit, word, clk, res, cls in runs:
+    nre = 0
+    for tgt, bit, word, clk, res, cls, reuse in runs:
         tot[cls] += 1
         per[tgt][cls] += 1
+        if reuse:
+            nre += 1
+            per[tgt]['reuse'] += 1
+    nul = [r for r in runs if r[0] == 'none']
+    nul_bad = [r for r in nul if r[5] != 'unchanged']
     n = len(runs)
     print('fault campaign: %s, %d runs (one bit flip each, random target / bit / clock)' % (op, n))
     print('=' * 78)
     for c in classes:
         print('  %-10s %6d  %5.1f %%' % (c, tot[c], 100.0 * tot[c] / n))
+    print('  %-10s %6d  (PRNG word handed out twice: masks reused)' % ('PRNG reuse', nre))
+    print('  null control ("none", no fault): %d runs, %d not unchanged' % (len(nul), len(nul_bad)))
+    if nul_bad:
+        print('\nHARNESS ERROR: runs without a fault gave a different result - the counts '
+              'above are not about the design')
     eff = n - tot['unchanged']
     if eff:
         safe = tot['detected'] + tot['rejection']
         print('\nof the %d runs where the fault had an effect: %.1f %% detected or rejected, '
               '%d silent, %d hangs' % (eff, 100.0 * safe / eff, tot['SILENT'], tot['hang']))
     print('\nper target:')
-    print('  %-16s %5s %10s %9s %10s %7s %5s' % ('target', 'runs', 'unchanged', 'detected',
-                                                 'rejection', 'SILENT', 'hang'))
+    print('  %-16s %5s %10s %9s %10s %7s %5s %6s' % ('target', 'runs', 'unchanged', 'detected',
+                                                     'rejection', 'SILENT', 'hang', 'reuse'))
     for tgt in sorted(per, key=lambda t: (-per[t]['SILENT'], -per[t]['hang'], t)):
         d = per[tgt]
-        print('  %-16s %5d %10d %9d %10d %7d %5d' % (tgt, sum(d.values()), d['unchanged'],
-              d['detected'], d['rejection'], d['SILENT'], d['hang']))
+        print('  %-16s %5d %10d %9d %10d %7d %5d %6d' % (tgt, sum(d[c] for c in classes), d['unchanged'],
+              d['detected'], d['rejection'], d['SILENT'], d['hang'], d['reuse']))
     sil = [r for r in runs if r[5] == 'SILENT']
     if sil:
         print('\nsilent runs (target bit word clock):')
-        for tgt, bit, word, clk, res, cls in sil[:40]:
+        for tgt, bit, word, clk, res, cls, reuse in sil[:40]:
             print('  %-16s %4d %4d %8d' % (tgt, bit, word, clk))
-    print('\nRESULT: %s' % ('no silent fault' if not sil else '%d silent fault(s)' % len(sil)))
+    if nul_bad:
+        print('\nRESULT: harness error (null control failed)')
+    else:
+        print('\nRESULT: %s, %d PRNG reuse(s)' % ('no silent fault' if not sil else
+                                                 '%d silent fault(s)' % len(sil), nre))
 
 
 if __name__ == '__main__':

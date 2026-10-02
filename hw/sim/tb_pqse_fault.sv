@@ -22,7 +22,11 @@
 // with outcome "ok" (the output is right), "bad" (KeyGen: a wrong ek), "K=<hex>"
 // (Decaps: a different K - scripts/pqse_fault_report.py tells the implicit
 // rejection K' = J(z || c), harmless, from any other K, a silent fault) or
-// "hang" (no done within 2 C + 20000 clocks). The script summarizes per target.
+// "hang" (no done within 2 C + 20000 clocks), and r=1 when the PRNG handed out a
+// random word twice in that run (masks reused: the masking weakened, invisible in
+// the output). Target "none" flips nothing: the null control - every "none" run
+// must come out unchanged, else the harness itself is wrong. The script
+// summarizes per target.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -77,7 +81,7 @@ module tb_pqse_fault;
   endtask
 
   // ---- fault targets ---------------------------------------------------------------------
-  localparam int NT = 37;
+  localparam int NT = 38;                 // the last one, "none", is the null control
   string tname[NT] = '{
     "core.pc", "core.pcn", "core.ins_r", "core.q",
     "keccak.ks", "keccak.rnd_i", "keccak.cx", "keccak.T0", "keccak.T1",
@@ -87,7 +91,7 @@ module tb_pqse_fault;
     "mcomp.X0w", "mcomp.A0", "mcomp.C0",
     "poly.wq", "poly.aq", "io.um0",
     "pmem0", "pmem1", "seed0", "seed1",
-    "host.lc", "host.fcnt", "nvm.fa"};
+    "host.lc", "host.fcnt", "nvm.fa", "none"};
 
 `define FLIP(sig) begin k = b % $bits(sig); sig[k] = ~sig[k]; end
 `define FLIP1(sig) begin sig = ~sig; end
@@ -136,15 +140,20 @@ module tb_pqse_fault;
     endcase
   endtask
 
-  // new chip + power cycle, then the command's inputs; the caller starts it
+  // new chip + power cycle, then the command's inputs; the caller starts it.
+  // The store is cleared while the reset is held (the host programs nothing in
+  // reset; cleared before it, the host could still write the last run's fault
+  // count back in the clocks before its reset takes hold)
   task automatic prepare(input bit kg);
     int res;
     logic [31:0] st;
+    reset = 1'b1;
+    repeat (4) @(negedge clk);
     dut.u_sys.u_host.u_nvm.fa = '0;            // persistent store blank (simulation only)
     dut.u_sys.u_host.u_nvm.fb = '0;
     dut.u_sys.u_host.u_nvm.pc = '0;
-    reset = 1'b1;
-    repeat (5) @(negedge clk);
+    dut.u_sys.u_core.u_prng.reuse = 1'b0;
+    repeat (4) @(negedge clk);
     reset = 1'b0;
     repeat (4) @(negedge clk);
     wait_idle();
@@ -199,6 +208,15 @@ module tb_pqse_fault;
     finish_to(5000000, res);
     begin logic [31:0] cy; rd(CYCLES, cy); cref = cy; end
     if (res != 0) begin $display("ERROR: the reference %s failed (%0d)", op, res); $finish; end
+    begin
+      int d = 0;
+      if (kg) begin get(B_EKOWN, EK); for (int j = 0; j < EK; j++) if (buffer[j] !== kg_ek[j]) d++; end
+      else    begin get(B_K, 32);     for (int j = 0; j < 32; j++) if (buffer[j] !== de_k[j]) d++; end
+      if (d != 0) begin
+        $display("ERROR: the reference %s (no fault) gives a wrong output (%0d bytes differ)", op, d);
+        $finish;
+      end
+    end
     $display("fault campaign: %s, %0d runs, seed %0d, reference %0d clocks", op, n, seed, cref);
 
     fd = $fopen("fault_log.txt", "w");
@@ -236,7 +254,10 @@ module tb_pqse_fault;
           nbad++;
         end
       end
-      $fdisplay(fd, "%0d %s %0d %0d %0d %0d %s", i, tname[t], b % 1024, w % 1024, clk_at, res, oc);
+      $fdisplay(fd, "%0d %s %0d %0d %0d %0d %s r=%0d", i, tname[t], b % 1024, w % 1024, clk_at, res, oc,
+                dut.u_sys.u_core.u_prng.reuse);
+      if (t == NT - 1 && oc != "ok")
+        $display("WARNING: run %0d flipped nothing (null control) and still gave %s, result %0d", i, oc, res);
       if ((i + 1) % 10 == 0)
         $display("  %0d / %0d runs: %0d unchanged, %0d detected, %0d different output, %0d hangs",
                  i + 1, n, nok, ndet, nbad, nhang);
