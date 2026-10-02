@@ -314,11 +314,14 @@ se-gowin-bisect:
 # sky130_fd_sc_hd, OpenSTA (sta) reports power (vectorless with ACT toggles
 # per clock, or from a gate-level VCD=<file> SCOPE=<instance>) and the slowest
 # path against the 50 MHz clock. See scripts/pqse_power.tcl for what the
-# numbers mean (the RAMs become flip-flops here).
+# numbers mean (the RAMs become flip-flops here). STA=openroad runs the same
+# script in OpenROAD (which contains OpenSTA).
 STA ?= sta
 ACT ?= 0.1
 se-power: | $(BUILD)
 	@test -n "$(SKY130_LIB)" || { echo "set SKY130_LIB=<path to sky130_fd_sc_hd__tt_025C_1v80.lib>"; exit 1; }
+	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
+	    echo "or use OpenROAD, which contains it: make se-power STA=openroad"; exit 1; }
 	mkdir -p $(BUILD)/sepower
 	yosys -q -l $(BUILD)/sepower/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(SE_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
