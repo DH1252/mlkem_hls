@@ -20,6 +20,8 @@
 #                  transitions) of the masked gadgets (also run by sim-se)
 #   make se-area   Yosys gate count of the secure element (MASKED=0/1)
 #   make se-power SKY130_LIB=...  SKY130 power + timing (Yosys + OpenSTA)
+#   make se-power-vcd SKY130_LIB=... RAM_MACRO=1  energy per command from a
+#                  gate-level simulation (Verilator SAIF + OpenSTA)
 #   make se-gowin [PUF=0|bfly] [MASKED=0] [FLAT=0]  fit on the Tang Nano 20K (GW2AR-18)
 #   make se-gowin-eda [PUF=0|bfly] [MASKED=0]  the same with GowinSynthesis + Gowin P&R (gw_sh)
 #   make se-gowin-bisect           GowinSynthesis errors per module (diagnosis)
@@ -179,7 +181,9 @@ sim-v3: | $(BUILD)
 	@grep -q "TEST PASSED" $(BUILD)/v3sim/sim.log
 
 # ---- the post-quantum secure element (hw/se) ---------------------------------------------
-# TRACE=1 prints every microcode instruction. Also runs the Python check of the
+# TRACE=1 prints every microcode instruction. LOWPOWER=1 simulates the ASIC
+# low-power variant (PQSE_LOWPOWER: operand isolation of the shared buses), as
+# the sky130 power flows build it. Also runs the Python check of the
 # masked-gadget and fuzzy-extractor math and the robust-probing check first,
 # and after the simulation the independent KMAC check of the sealed messages
 # and the PUF / TRNG statistics.
@@ -191,7 +195,7 @@ sim-se: | $(BUILD)
 	cp -r hw/sim/vectors $(BUILD)/sesim/
 	cd $(BUILD)/sesim && $(VERILATOR) --binary --timing -j 2 -Wno-fatal -Wno-lint -Wno-style \
 	    --top-module tb_pqse -Mdir obj -o ../vtb -I../../hw/se \
-	    +define+PQSE_SIM_INIT $(if $(TRACE),+define+PQSE_TRACE) \
+	    +define+PQSE_SIM_INIT $(if $(TRACE),+define+PQSE_TRACE) $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
 	    ../../hw/sim/tb_pqse.sv $(addprefix ../../,$(SE_SRC)) > build.log 2>&1 \
 	    || { tail -30 build.log; exit 1; }
 	cd $(BUILD)/sesim && ./vtb | tee sim.log
@@ -314,12 +318,12 @@ se-gowin-bisect:
 # sky130_fd_sc_hd, OpenSTA (sta) reports power (vectorless with ACT toggles
 # per clock, or from a gate-level VCD=<file> SCOPE=<instance>) and the slowest
 # path against the 50 MHz clock. See scripts/pqse_power.tcl for what the
-# numbers mean (the RAMs become flip-flops here). STA=openroad runs the same
-# script in OpenROAD (which contains OpenSTA). The netlist must be plain
-# structural Verilog for OpenSTA: newer Yosys keeps $scopeinfo cells (with
-# #(...) parameters) after flattening, so they are deleted before writing, and
-# OpenSTA's reader does not take "signed" declarations (Yosys writes them for
-# leftover integer loop variables), so sed drops that keyword.
+# numbers mean. STA=openroad runs the same script in OpenROAD (which contains
+# OpenSTA). The netlist must be plain structural Verilog for OpenSTA: newer
+# Yosys keeps $scopeinfo cells (with #(...) parameters) after flattening, so
+# they are deleted before writing, and OpenSTA's reader does not take "signed"
+# declarations (Yosys writes them for leftover integer loop variables), so sed
+# drops that keyword.
 STA ?= sta
 ACT ?= 0.1
 # delay target for ABC (ps, the 50 MHz clock of pqse_power.tcl): with it ABC
@@ -333,60 +337,102 @@ PERIOD_PS ?= 20000
 # writes their Liberty stub: pins, 2 ns clock to data, no power). The report
 # then covers the logic only - built from flip-flops, the RAMs dominate the
 # power (every bit clocked every cycle) and their decode trees the timing.
+# se-power-vcd adds the macros' energy from their access counts.
 RAM_MACRO ?= 0
+# CLOCKGATE=1 (default): Yosys clockgate turns every group of at least CG_MIN
+# flip-flops with a common enable into plain flip-flops behind one integrated
+# clock gate (sky130_fd_sc_hd__dlclkp_1, enable latched while the clock is
+# low): a register that holds its value is then not clocked at all - the
+# clock-pin power of an idle flip-flop is most of its power. CLOCKGATE=0 keeps
+# enable flip-flops (a mux feedback, clocked every cycle), as before.
+# LOWPOWER=0 builds without PQSE_LOWPOWER (operand isolation of the shared
+# buses), which the power flows enable by default.
+CLOCKGATE ?= 1
+CG_MIN    ?= 4
 PW_SRC    := $(if $(filter 1,$(RAM_MACRO)),$(filter-out hw/se/pqse_mem.v,$(SE_SRC)) scripts/power/pqse_ram_macro.v,$(SE_SRC))
 PW_RAMLIB := $(if $(filter 1,$(RAM_MACRO)),$(BUILD)/sepower/pqse_sram.lib,)
+PW_DEFS   := $(if $(filter 0,$(LOWPOWER)),,-DPQSE_LOWPOWER)
+PW_CG     := $(if $(filter 1,$(CLOCKGATE)),clockgate -pos sky130_fd_sc_hd__dlclkp_1 GATE:CLK:GCLK -min_net_size $(CG_MIN);,)
+PW_TAG    := _m$(MASKED)$(if $(PW_RAMLIB),_rammacro)$(if $(PW_CG),_cg)$(if $(PW_DEFS),_lp)
+# the mapping, shared by se-power and se-power-vcd (clockgate before dfflibmap:
+# it works on the generic enable flip-flops)
+PW_MAP     = read_verilog $(PW_DEFS) -Ihw/se $(PW_SRC); \
+	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
+	    delete t:\$$scopeinfo; $(PW_CG) \
+	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB) -D $(PERIOD_PS); opt_clean; \
+	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO;
 se-power: | $(BUILD)
 	@test -n "$(SKY130_LIB)" || { echo "set SKY130_LIB=<path to sky130_fd_sc_hd__tt_025C_1v80.lib>"; exit 1; }
 	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
 	    echo "or use OpenROAD, which contains it: make se-power STA=openroad"; exit 1; }
 	mkdir -p $(BUILD)/sepower
 	$(if $(PW_RAMLIB),$(PYTHON) scripts/power/pqse_sram_lib.py $(PW_RAMLIB))
-	yosys -q -l $(BUILD)/sepower/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(PW_SRC); \
-	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
-	    delete t:\$$scopeinfo; \
-	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB) -D $(PERIOD_PS); opt_clean; \
-	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
+	yosys -q -l $(BUILD)/sepower/yosys$(PW_TAG).log -p "$(PW_MAP) \
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
 	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(BUILD)/sepower/pqse_top_sky130.v
 	SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(BUILD)/sepower/pqse_top_sky130.v ACT=$(ACT) VCD=$(VCD) SCOPE=$(SCOPE) \
-	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(BUILD)/sepower/power_m$(MASKED)$(if $(PW_RAMLIB),_rammacro).txt
+	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(BUILD)/sepower/power$(PW_TAG).txt
 
-# Switching activity for se-power from a gate-level simulation: the sky130
-# netlist (net names enumerated, so the VCD and the netlist OpenSTA reads use the
-# same plain names), behavioural cell models generated from the Liberty file
-# (scripts/pqse_lib2v.py: zero delay, every flip-flop starts at 0), Verilator,
-# and a pin-level testbench (hw/sim/tb_pqse_gate.sv) that starts command
-# GL_CMD over SPI and dumps GL_LEN clocks from GL_START clocks into it; then
-# OpenSTA with that VCD. Results in build/sepower/gl/ (power_gl_m<MASKED>.txt).
-#   make se-power-vcd SKY130_LIB=... [GL_CMD=1] [GL_START=20000] [GL_LEN=2000]
-# The netlist is large: the Verilator build takes minutes and several GB of
-# memory, the VCD ~100-200 MB per 1000 clocks.
-GL_CMD   ?= 1
-GL_START ?= 20000
-GL_LEN   ?= 2000
-GLD      := $(BUILD)/sepower/gl
+# Energy per command from a gate-level simulation: the sky130 netlist (names
+# enumerated, so the dump and the netlist OpenSTA reads use the same plain
+# names), behavioural cell models generated from the Liberty file
+# (scripts/pqse_lib2v.py: zero delay, every flip-flop starts at 0; the clock
+# gates as latch + AND), with RAM_MACRO=1 SRAM macro models that count their
+# reads and writes, Verilator, and a pin-level testbench (hw/sim/tb_pqse_gate.sv)
+# that starts command GL_CMD over SPI and records every cell pin's toggles:
+#   GL_LEN=0 (default)  the whole command, start to done (irq)
+#   GL_LEN=<n>          n clocks from GL_START clocks into it; pass
+#                       GL_CLOCKS=<clocks of the command> (make sim-se prints
+#                       them) to extrapolate the energy per command
+# GL_FMT=saif (default) needs Verilator 5.036 or newer (--trace-saif): toggle
+# counts per pin, megabytes for a whole command. GL_FMT=vcd works with older
+# ones, but a VCD grows ~100 MB per 1000 clocks: use a window then.
+# OpenSTA reads the dump (power over the window), scripts/power/pqse_energy.py
+# turns it into energy (+ the SRAM macros' energy from the access counts:
+# SRAM_EPB_RD / SRAM_EPB_WR pJ per bit, SRAM_E0 pJ per access - assumptions,
+# replace them with the SRAM compiler's datasheet) and into power at the
+# smart-card clock CARD_MHZ.
+#   make se-power-vcd SKY130_LIB=... RAM_MACRO=1 [GL_CMD=1] [GL_FMT=saif]
+# Results in build/sepower/gl/: power_gl<tag>.txt, energy<tag>.txt. The
+# Verilator build of the netlist takes minutes and several GB of memory; a
+# whole KeyGen (~0.9 M clocks in v5) runs for tens of minutes.
+GL_CMD    ?= 1
+GL_START  ?= 0
+GL_LEN    ?= 0
+GL_FMT    ?= saif
+GL_MAX    ?= 20000000
+GL_CLOCKS ?=
+GL_SCOPE  ?= TOP/tb_pqse_gate/dut
+CARD_MHZ  ?= 3.39
+SRAM_EPB_RD ?= 0.5
+SRAM_EPB_WR ?= 0.8
+SRAM_E0     ?= 2.0
+GLD       := $(BUILD)/sepower/gl
+GL_DUMP   := gate.$(if $(filter vcd,$(GL_FMT)),vcd,saif)
+GL_TRACE  := $(if $(filter vcd,$(GL_FMT)),--trace,--trace-saif)
 se-power-vcd: | $(BUILD)
 	@test -n "$(SKY130_LIB)" || { echo "set SKY130_LIB=<path to sky130_fd_sc_hd__tt_025C_1v80.lib>"; exit 1; }
 	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
 	    echo "or use OpenROAD, which contains it: make se-power-vcd STA=openroad"; exit 1; }
 	mkdir -p $(GLD)
-	yosys -q -l $(GLD)/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(SE_SRC); \
-	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
-	    delete t:\$$scopeinfo; \
-	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB) -D $(PERIOD_PS); opt_clean; \
-	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
+	$(if $(PW_RAMLIB),$(PYTHON) scripts/power/pqse_sram_lib.py $(PW_RAMLIB) --models $(GLD)/sram_models.sv)
+	yosys -q -l $(GLD)/yosys$(PW_TAG).log -p "$(PW_MAP) \
 	    rename -hide w:* i:* o:* %u %d; rename -hide c:*; rename -enumerate; \
 	    write_verilog -noattr -noexpr $(GLD)/pqse_top_gl.v"
 	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(GLD)/pqse_top_gl.v
 	$(PYTHON) scripts/pqse_lib2v.py $(SKY130_LIB) $(GLD)/pqse_top_gl.v $(GLD)/sky130_cells.v
-	cd $(GLD) && verilator --binary --timing --trace -j 2 -Wno-fatal -Wno-lint -Wno-style \
+	rm -f $(GLD)/gate.vcd $(GLD)/gate.saif $(GLD)/gl_run.txt $(GLD)/sram_access.txt
+	cd $(GLD) && $(VERILATOR) --binary --timing $(GL_TRACE) -j 2 -Wno-fatal -Wno-lint -Wno-style \
 	    --x-assign 0 --x-initial 0 --timescale 1ns/1ps --top-module tb_pqse_gate -Mdir obj -o ../vtb_gl \
-	    $(CURDIR)/hw/sim/tb_pqse_gate.sv sky130_cells.v pqse_top_gl.v > build.log 2>&1 \
+	    $(CURDIR)/hw/sim/tb_pqse_gate.sv sky130_cells.v $(if $(PW_RAMLIB),sram_models.sv) pqse_top_gl.v > build.log 2>&1 \
 	    || { tail -30 build.log; exit 1; }
-	cd $(GLD) && ./vtb_gl +cmd=$(GL_CMD) +start=$(GL_START) +len=$(GL_LEN) +vcd=gate.vcd
-	SKY130_LIB=$(SKY130_LIB) NETLIST=$(GLD)/pqse_top_gl.v ACT=$(ACT) VCD=$(GLD)/gate.vcd SCOPE=TOP/tb_pqse_gate/dut \
-	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(GLD)/power_gl_m$(MASKED).txt
+	cd $(GLD) && ./vtb_gl +cmd=$(GL_CMD) +start=$(GL_START) +len=$(GL_LEN) +max=$(GL_MAX) +vcd=$(GL_DUMP)
+	SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(GLD)/pqse_top_gl.v VCD=$(GLD)/$(GL_DUMP) SCOPE=$(GL_SCOPE) \
+	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(GLD)/power_gl$(PW_TAG).txt
+	$(PYTHON) scripts/power/pqse_energy.py $(GLD)/power_gl$(PW_TAG).txt --run $(GLD)/gl_run.txt \
+	    --dump $(GLD)/$(GL_DUMP) $(if $(PW_RAMLIB),--sram $(GLD)/sram_access.txt) \
+	    $(if $(GL_CLOCKS),--command-clocks $(GL_CLOCKS)) --card-mhz $(CARD_MHZ) \
+	    --epb-rd $(SRAM_EPB_RD) --epb-wr $(SRAM_EPB_WR) --e0 $(SRAM_E0) | tee $(GLD)/energy$(PW_TAG).txt
 
 # Exact robust-probing check (glitches + transitions, first order) of the
 # masked gadgets' gate-level equations: DOM AND, the B2A / adder carry, the

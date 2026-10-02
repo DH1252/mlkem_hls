@@ -192,11 +192,18 @@ module pqse_keccak #(
   reg  [4:0]  wbl;
   reg  [1:0]  wbk;
   reg  [15:0] apv0, apv1;          // absorb: the word to XOR in
+  reg         rh;                  // chi: the PRNG word's low half is used, the high half is next
 
   wire        use1 = M1 && mj;
-  wire [15:0] rr   = use1 ? rnd[15:0] : 16'd0;
+  // Low power: one PRNG word (32 fresh bits per advance) serves two DOM ANDs,
+  // the first with bits 15:0, the second with bits 31:16, and is taken after
+  // the second, so the PRNG runs half as often. Every AND still gets 16 bits
+  // nothing else used: no other user takes the word in between (a masked
+  // permutation is the only user while it runs), and a permutation has an even
+  // number of ANDs (24 x 5 x 4 x 5), so no half-used word is left behind.
+  wire [15:0] rr   = use1 ? (rh ? rnd[31:16] : rnd[15:0]) : 16'd0;
   wire        dom_now = (ks == K_CHI) && (cs == 2'd3);
-  assign rnd_take = dom_now && use1;
+  assign rnd_take = dom_now && use1 && rh;
   assign rdy  = (ks == K_IDLE) && !wbv && !(clr && !clean);
   assign busy = go | (ks != K_IDLE) | wbv | (clr && !clean);
   assign rd_v0 = q0;
@@ -302,20 +309,26 @@ module pqse_keccak #(
   // ---- control and registers --------------------------------------------------------------
   always @(posedge clk) begin
     if (rst) begin
-      ks <= K_IDLE; mj <= 1'b0; clean <= 1'b0; wbv <= 1'b0; dv <= 1'b0; iss <= 1'b0;
+      ks <= K_IDLE; mj <= 1'b0; clean <= 1'b0; wbv <= 1'b0; dv <= 1'b0; iss <= 1'b0; rh <= 1'b0;
       apv0 <= 16'd0; apv1 <= 16'd0;
       T0 <= 16'd0; T1 <= 16'd0; P0 <= 16'd0; P1 <= 16'd0; cb0 <= 1'b0; cb1 <= 1'b0;
       X0r <= 16'd0; X1r <= 16'd0; Y0r <= 16'd0; Y1r <= 16'd0;
       d00 <= 16'd0; d01 <= 16'd0; d10 <= 16'd0; d11 <= 16'd0;
     end else begin
-      // chi: Y and the products load every clock (their value in their clock, else 0)
-      Y0r <= 16'd0; Y1r <= 16'd0;
-      d00 <= 16'd0; d01 <= 16'd0; d10 <= 16'd0; d11 <= 16'd0;
-      if (dom_now) begin
-        d00 <= X0r & Y0r;
-        d01 <= (X0r & Y1r) ^ rr;
-        d10 <= (X1r & Y0r) ^ rr;
-        d11 <= X1r & Y1r;
+      // chi: Y and the products load every clock while a permutation runs
+      // (their value in their clock, else 0), up to the last write-back clock;
+      // then they are 0 and hold, so an idle Keccak's clock can be gated
+      // (low power: they are 96 flip-flops) without a hold path in use
+      if ((ks != K_IDLE) || wbv) begin
+        Y0r <= 16'd0; Y1r <= 16'd0;
+        d00 <= 16'd0; d01 <= 16'd0; d10 <= 16'd0; d11 <= 16'd0;
+        if (dom_now) begin
+          if (use1) rh <= ~rh;
+          d00 <= X0r & Y0r;
+          d01 <= (X0r & Y1r) ^ rr;
+          d10 <= (X1r & Y0r) ^ rr;
+          d11 <= X1r & Y1r;
+        end
       end
       wbv <= 1'b0;
 

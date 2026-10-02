@@ -108,6 +108,47 @@ change are re-checked with `make se-probe` and the TVLA flow.
 The Keccak permutation is the main cost in time: ~50 permutations per KEM
 operation make it ~1 M clocks (~40 ms at 27 MHz, ~75 ms at 13.56 MHz).
 
+### Power and energy (ASIC, SkyWater 130 nm)
+
+For a card the figure of merit is the energy per command (the field supplies
+a few milliwatts, the reader waits), not the power per clock: v5 draws less
+per clock than v4 (vectorless, logic only, `RAM_MACRO=1`, ACT 0.1, 50 MHz:
+11.1 mW against 21.0 mW) but runs ~4x the clocks, so per KeyGen it spent more
+(~200 uJ against ~97 uJ by that estimate). The RTL therefore avoids switching
+that does no work:
+
+| Technique | Where |
+|---|---|
+| Idle registers cleared once on going idle (not rewritten every idle clock), so they hold and can be clock-gated | `pqse_poly`, `pqse_mcomp`, `pqse_puf`, `pqse_sponge`, `pqse_masked` (gadget registers) |
+| χ DOM registers load only while a permutation runs | `pqse_keccak` |
+| One PRNG word (32 bits) serves two DOM ANDs: the PRNG advances half as often in the masked permutation | `pqse_keccak` |
+| RAM read enables: every RAM reads only when its engine needs the word (the shuffle-table lookup copy only during shuffled POLY / MASK instructions) | all RAMs, `pqse_perm` (`look`) |
+| Operand isolation (`PQSE_LOWPOWER`, ASIC builds): the PRNG word, the instruction word and the shared RAM read buses reach an engine only while it is busy | `pqse_core`, `pqse_perm` |
+| Clock gating: Yosys `clockgate` puts every group of >= 4 enable flip-flops behind one integrated clock gate (sky130 `dlclkp`) | `make se-power*`, `CLOCKGATE=1` (default) |
+
+**Measuring it.** `make se-power SKY130_LIB=<.lib> RAM_MACRO=1` is the quick
+vectorless estimate (every net toggles ACT times per clock: a guess). The
+accurate number is `make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1`: the
+mapped, clock-gated netlist runs a whole command (default KeyGen, `GL_CMD=2`
+Encaps) in Verilator with cell models generated from the Liberty file; every
+cell pin's toggles go into a SAIF file (Verilator 5.036 or newer;
+`GL_FMT=vcd GL_LEN=<clocks> GL_START=<clock> GL_CLOCKS=<command clocks>` for
+older ones: a window, extrapolated), OpenSTA turns them into power, and
+`scripts/power/pqse_energy.py` into energy per command at 50 MHz and at the
+card clock (`CARD_MHZ`, default 3.39). The SRAM macros have no power in their
+Liberty stub: their models count reads and writes, and the energy per access
+is an assumption (`SRAM_E0`=2 pJ + `SRAM_EPB_RD`=0.5 / `SRAM_EPB_WR`=0.8 pJ
+per bit) until an SRAM compiler's datasheet replaces it (`--sram-table`).
+Results: `build/sepower/gl/energy_m1_rammacro_cg_lp.txt` and the OpenSTA
+report next to it (with the 25 highest-power instances). `LOWPOWER=0` and
+`CLOCKGATE=0` give the same flow without operand isolation or clock gating,
+for the comparison.
+
+What it does not include: the clock tree (the clock net is a bare net with
+its pin loads; a clock tree's buffers add to the "Clock" group), wires
+(no placement: pin capacitances only), the analog blocks (PUF cells, TRNG
+oscillators) and the I/O pads; corner tt, 25 C, 1.8 V.
+
 ## 4. Security design (threat → countermeasure)
 
 | Threat | Countermeasure | Where |
@@ -288,7 +329,9 @@ After reset the device is busy for ~3 k clocks (power-on wipe); wait for STATUS[
 | `../../scripts/pqse_model.py` | gadget, fuzzy-extractor, retry and shuffle math |
 | `../../scripts/pqse_sm_check.py` | independent KMAC check of the sealed messages |
 | `../../scripts/pqse_puf_stats.py` | PUF / TRNG statistics, failure rates from a measured bit-error rate |
-| `../../scripts/pqse_power.tcl` | OpenSTA power / timing script (`make se-power`) |
+| `../../scripts/pqse_power.tcl` | OpenSTA power / timing script (`make se-power`, `make se-power-vcd`) |
+| `../../scripts/pqse_lib2v.py`, `../sim/tb_pqse_gate.sv` | cell models from the Liberty file (incl. clock gates) and the pin-level testbench of the gate-level power run |
+| `../../scripts/power/` | SRAM macro wrapper, Liberty stubs and counting models (`RAM_MACRO=1`), energy per command (`pqse_energy.py`) |
 | `../../scripts/pqse_fit.py` | Tang Nano 20K fit report from Yosys `synth_gowin` (`make se-gowin`), with the largest modules |
 | `../../quartus/jtag/de10_nano_pqse.v`, `pqse_test.tcl`, `pqse_tvla_capture.tcl` | DE10-Nano top (KEY1 = tamper, GPIO_0[0] = trigger), System Console demo + raw dumps, TVLA capture runs |
 
@@ -302,6 +345,7 @@ make sim-se-tvla MASKED=1 N=200  # TVLA of the masked Decaps on a power model (e
 make sim-se-tvla MASKED=0 N=200  # positive control (expect: leaks)
 make se-area                     # Yosys gate count; SKY130_LIB=<.lib> for SkyWater 130 nm
 make se-power SKY130_LIB=<.lib>  # SKY130 power (vectorless, ACT=0.1) and the slowest path
+make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1   # energy per KeyGen from a gate-level run (GL_CMD=2: Encaps)
 make se-gowin                    # fit on the Tang Nano 20K (GW2AR-18), largest modules; PUF=0: without the PUF cells, PUF=bfly: butterfly cells
 make se-gowin-eda                # the same with Gowin EDA (gw_sh: GowinSynthesis, area goal, + place & route): the real fit
 cd quartus/jtag && quartus_sh -t build.tcl se    # DE10-Nano, then source pqse_test.tcl
@@ -317,7 +361,7 @@ cd quartus/jtag && quartus_sh -t build.tcl se    # DE10-Nano, then source pqse_t
 
 1. `make sim-se` — Python model and probing checks, then the RTL testbench: `TEST PASSED`, `SM CHECK PASSED`, `PROBING CHECK PASSED`, `MODEL CHECKS PASSED`.
 2. `make sim-se-tvla MASKED=1 N=200`, then with `SEED=2` and `pqse_tvla.py confirm`; `MASKED=0` must show leaks.
-3. `make se-gowin` (must say "fits"), `make se-area` and `make se-power SKY130_LIB=...` (MASKED=1 and 0) for the cost table of the proposal.
+3. `make se-gowin` (must say "fits"), `make se-area` and `make se-power SKY130_LIB=...` (MASKED=1 and 0) for the cost table of the proposal; `make se-power-vcd SKY130_LIB=... RAM_MACRO=1` for the energy per command.
 4. On the DE10-Nano: `build.tcl se`, `pqse_test.tcl` (all PASS), PUFRAW / TRNGRAW dumps through `pqse_puf_stats.py` on several boards, then a board TVLA with `pqse_tvla_capture.tcl`.
 5. Optional, for a tape-out: a netlist-level probing check of the synthesized gadgets (PROLEAD).
 

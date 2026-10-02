@@ -210,9 +210,12 @@ module pqse_core #(
   pqse_prng u_prng (.clk(clk), .rst(rst), .masked_en(MASKED != 0), .reseed(pr_reseed),
                     .seed_en(pr_ten), .seed_valid(t_valid), .seed(t_word), .seed_take(pr_take),
                     .busy(pr_busy), .take(r_take), .take_hi(r_hi), .rnd(rnd));
+  // the lookup RAM reads only while a shuffled poly / masked instruction can
+  // use it (from its start clock on: the read is registered)
+  wire       pg_look = hide_en && run && ((cls == C_POLY) || (cls == C_MASK));
   pqse_perm u_perm (.clk(clk), .rst(rst), .start(pg_start), .n64(pg_n64),
                     .next(pg_next), .busy(pg_busy), .ready(pg_ready),
-                    .rnd(rnd), .rnd_take(pg_rt), .idx(pq_idx), .val(pq_val));
+                    .rnd(rnd), .rnd_take(pg_rt), .idx(pq_idx), .look(pg_look), .val(pq_val));
 
   // ---- measurement trigger (board-level TVLA, scripts/pqse_tvla.py board) ----
   // High from M_OKINI to M_OKCHK: in DECAPS that is everything secret (decoding
@@ -499,6 +502,30 @@ module pqse_core #(
   assign perr = perr_p | perr_s;
 
   // =============================== engines ============================================
+  // ---- operand isolation (low power; ASIC builds define PQSE_LOWPOWER) ----
+  // Each engine sees the shared RAM read buses, the PRNG word and the TRNG word
+  // only while it is busy (0 otherwise), so an idle engine's arithmetic (the
+  // mod-q multipliers on rnd, the adders on the read buses) does not toggle with
+  // another engine's traffic. A busy engine sees the buses unchanged. On the
+  // FPGA the AND gates would cost ~400 LUTs, so it is off there (the enables
+  // are constant 1 and synthesis removes the gates).
+`ifdef PQSE_LOWPOWER
+  wire iso_sp = sp_busy, iso_p = p_busy, iso_io = io_busy, iso_m = m_busy, iso_pf = pf_busy;
+`else
+  wire iso_sp = 1'b1, iso_p = 1'b1, iso_io = 1'b1, iso_m = 1'b1, iso_pf = 1'b1;
+`endif
+  wire [63:0] rnd_sp = rnd & {64{iso_sp}}, rnd_p = rnd & {64{iso_p}}, rnd_io = rnd & {64{iso_io}},
+              rnd_m  = rnd & {64{iso_m}},  rnd_pf = rnd & {64{iso_pf}};
+  wire [63:0] tw_sp  = t_word & {64{iso_sp}}, tw_io = t_word & {64{iso_io}};
+  wire [23:0] pm_rd_p  = pm_rd & {24{iso_p}}, pm_rd_io = pm_rd & {24{iso_io}},
+              pm_rd_m  = pm_rd & {24{iso_m}};
+  wire [15:0] cb_rd_sp = cb_rd & {16{iso_sp}}, cb_rd_io = cb_rd & {16{iso_io}},
+              cb_rd_m  = cb_rd & {16{iso_m}},  cb_rd_pf = cb_rd & {16{iso_pf}};
+  wire [15:0] sr0_sp = sr_rd0 & {16{iso_sp}}, sr1_sp = sr_rd1 & {16{iso_sp}},
+              sr0_io = sr_rd0 & {16{iso_io}}, sr1_io = sr_rd1 & {16{iso_io}},
+              sr0_m  = sr_rd0 & {16{iso_m}},  sr1_m  = sr_rd1 & {16{iso_m}},
+              sr0_pf = sr_rd0 & {16{iso_pf}}, sr1_pf = sr_rd1 & {16{iso_pf}};
+
   // ---- sponge + unmasked samplers ----
   wire        sp_sre, sp_swe, sp_bre, sp_bwe;
   wire [7:0]  sp_sra, sp_swa;
@@ -515,14 +542,14 @@ module pqse_core #(
 
   pqse_sponge #(.MASKED(MASKED)) u_sponge (
     .clk(clk), .rst(rst), .start(sp_start), .ins(ins_r), .busy(sp_busy),
-    .sr_re(sp_sre), .sr_addr(sp_sra), .sr_d0(sr_rd0), .sr_d1(sr_rd1),
+    .sr_re(sp_sre), .sr_addr(sp_sra), .sr_d0(sr0_sp), .sr_d1(sr1_sp),
     .sw_we(sp_swe), .sw_addr(sp_swa), .sw_d0(sp_swd0), .sw_d1(sp_swd1),
-    .br_re(sp_bre), .br_addr(sp_bra), .br_d(cb_rd),
+    .br_re(sp_bre), .br_addr(sp_bra), .br_d(cb_rd_sp),
     .bw_we(sp_bwe), .bw_addr(sp_bwa), .bw_d(sp_bwd),
-    .trng_en(t_en_sp), .trng_valid(t_valid), .trng_word(t_word), .trng_take(t_take_sp),
+    .trng_en(t_en_sp), .trng_valid(t_valid), .trng_word(tw_sp), .trng_take(t_take_sp),
     .so_valid(so_valid), .so_v0(so_v0), .so_v1(so_v1), .so_ready(so_ready),
     .samp_done(pa_done), .sink_done(sink_done),
-    .rnd(rnd), .rnd_take(sp_rt)
+    .rnd(rnd_sp), .rnd_take(sp_rt)
   );
 
   pqse_parse u_parse (
@@ -538,8 +565,8 @@ module pqse_core #(
     .clk(clk), .rst(rst), .start(p_start), .op_in(ins_r[91:88]), .acc_in(ins_r[87]),
     .c_in(ins_r[86:83]), .a_in(ins_r[82:79]), .b_in(ins_r[78:75]),
     .shuf_in(ins_r[74] & hide_en), .busy(p_busy),
-    .re(p_re), .raddr(p_ra), .rdata(pm_rd), .we(p_we), .waddr(p_wa), .wdata(p_wd),
-    .rnd(rnd), .rnd_take(p_rt), .pq_idx(p_pq), .pq_val(pq_val),
+    .re(p_re), .raddr(p_ra), .rdata(pm_rd_p), .we(p_we), .waddr(p_wa), .wdata(p_wd),
+    .rnd(rnd_p), .rnd_take(p_rt), .pq_idx(p_pq), .pq_val(pq_val),
     .pq_next(pg_next), .pq_ready(pg_ready));
 
   // ---- I/O unit ----
@@ -551,12 +578,12 @@ module pqse_core #(
   wire [7:0]  io_sra, io_swa;
   pqse_io u_io (
     .clk(clk), .rst(rst), .start(io_start), .ins(ins_r), .busy(io_busy), .bad_set(io_bad),
-    .re(io_re), .raddr(io_ra), .rdata(pm_rd), .we(io_we), .waddr(io_wa), .wdata(io_wd),
-    .bre(io_bre), .braddr(io_bra), .brdata(cb_rd), .bwe(io_bwe), .bwaddr(io_bwa), .bwdata(io_bwd),
-    .sre(io_sre), .sraddr(io_sra), .srd0(sr_rd0), .srd1(sr_rd1),
+    .re(io_re), .raddr(io_ra), .rdata(pm_rd_io), .we(io_we), .waddr(io_wa), .wdata(io_wd),
+    .bre(io_bre), .braddr(io_bra), .brdata(cb_rd_io), .bwe(io_bwe), .bwaddr(io_bwa), .bwdata(io_bwd),
+    .sre(io_sre), .sraddr(io_sra), .srd0(sr0_io), .srd1(sr1_io),
     .swe(io_swe), .swaddr(io_swa), .swd0(io_swd0), .swd1(io_swd1),
-    .rnd(rnd), .rnd_take(io_rt),
-    .t_en(t_en_io), .t_valid(t_valid), .t_word(t_word), .t_take(t_take_io),
+    .rnd(rnd_io), .rnd_take(io_rt),
+    .t_en(t_en_io), .t_valid(t_valid), .t_word(tw_io), .t_take(t_take_io),
     .ctr_tx(ctr_tx), .rx_any(rx_any), .rx_max(rx_max), .rx_bits(rx_bits), .ctr_rx(ctr_rx),
     .rx_new(rx_new), .rx_dist(rx_dist),
     .fault_set(io_fault));
@@ -572,11 +599,11 @@ module pqse_core #(
     .clk(clk), .rst(rst), .start(m_start), .ins(m_ins), .busy(m_busy), .bad_set(m_bad),
     .s_valid(so_valid && (sink == SNK_MB2A || sink == SNK_MCMP)), .s_v0(so_v0), .s_v1(so_v1),
     .s_ready(m_sready),
-    .re(m_re), .raddr(m_ra), .rdata(pm_rd), .we(m_we), .waddr(m_wa), .wdata(m_wd),
-    .bre(m_bre), .braddr(m_bra), .brdata(cb_rd), .bwe(m_bwe), .bwaddr(m_bwa), .bwdata(m_bwd),
-    .sre(m_sre), .sraddr(m_sra), .srd0(sr_rd0), .srd1(sr_rd1),
+    .re(m_re), .raddr(m_ra), .rdata(pm_rd_m), .we(m_we), .waddr(m_wa), .wdata(m_wd),
+    .bre(m_bre), .braddr(m_bra), .brdata(cb_rd_m), .bwe(m_bwe), .bwaddr(m_bwa), .bwdata(m_bwd),
+    .sre(m_sre), .sraddr(m_sra), .srd0(sr0_m), .srd1(sr1_m),
     .swe(m_swe), .swaddr(m_swa), .swd0(m_swd0), .swd1(m_swd1),
-    .rnd(rnd), .rnd_take(m_rt), .rnd_hi(m_hi), .shuf(hide_en), .pq_idx(m_pq), .pq_val(pq_val),
+    .rnd(rnd_m), .rnd_take(m_rt), .rnd_hi(m_hi), .shuf(hide_en), .pq_idx(m_pq), .pq_val(pq_val),
     .fault_set(m_fault));
 
   // ---- PUF ----
@@ -586,10 +613,10 @@ module pqse_core #(
   wire [7:0]  pf_sra, pf_swa;
   pqse_puf #(.WIN(PUF_WIN)) u_puf (
     .clk(clk), .rst(rst), .start(pf_start), .ins(ins_r), .busy(pf_busy),
-    .bre(pf_bre), .braddr(pf_bra), .brdata(cb_rd), .bwe(pf_bwe), .bwaddr(pf_bwa), .bwdata(pf_bwd),
-    .sre(pf_sre), .sraddr(pf_sra), .srd0(sr_rd0), .srd1(sr_rd1),
+    .bre(pf_bre), .braddr(pf_bra), .brdata(cb_rd_pf), .bwe(pf_bwe), .bwaddr(pf_bwa), .bwdata(pf_bwd),
+    .sre(pf_sre), .sraddr(pf_sra), .srd0(sr0_pf), .srd1(sr1_pf),
     .swe(pf_swe), .swaddr(pf_swa), .swd0(pf_swd0), .swd1(pf_swd1),
-    .rnd(rnd), .rnd_take(pf_rt));
+    .rnd(rnd_pf), .rnd_take(pf_rt));
 
   // =============================== port multiplexing ===================================
   // v5: the engines' ports are OR-combined instead of multiplexed on the
