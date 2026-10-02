@@ -281,11 +281,12 @@ se-gowin: | $(BUILD)
 
 # The same fit with the vendor flow (Gowin EDA's gw_sh: GowinSynthesis with
 # -opt_goal area, then place & route, so the report is the real fit). Options as
-# for se-gowin; MAP=2 tries GowinSynthesis's LUT5-oriented mapping, STEP=syn
+# for se-gowin; FREQ=<MHz> sets the clock constraint (default 27, the board's
+# oscillator); MAP=2 tries GowinSynthesis's LUT5-oriented mapping, STEP=syn
 # stops after synthesis. Reports: build/gowin/m<MASKED>_p<PUF>/pqse/impl/pnr/pqse.rpt.txt
 GW_SH ?= gw_sh
 se-gowin-eda:
-	PUF=$(PUF) MASKED=$(MASKED) MAP=$(MAP) STEP=$(STEP) \
+	PUF=$(PUF) MASKED=$(MASKED) MAP=$(MAP) STEP=$(STEP) FREQ=$(FREQ) \
 	    $(GW_SH) gowin/pqse_gowin.tcl
 
 # Diagnosis: synthesize every secure-element module on its own with

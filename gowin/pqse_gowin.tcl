@@ -13,6 +13,10 @@
 #   MAP     GowinSynthesis LUT mapping (-map_option): 1 (default mapping) or 2
 #           (LUT5-oriented without more LUTs); 3 / 4 trade LUTs for timing
 #   STEP    all (default: synthesis + place & route, the real fit) or syn
+#   FREQ    clock constraint in MHz, 27 (default: the Tang Nano 20K's oscillator,
+#           no PLL needed; the design is a contactless-card core, 13.56 MHz on
+#           silicon). At 50 MHz the first fit missed timing (Fmax ~37 MHz: the
+#           instruction decode into the RAM read addresses, 18 logic levels)
 #   TOP     synthesize one hw/se module alone instead of the whole design
 #           (diagnosis: make se-gowin-bisect runs every module with STEP=syn
 #           and counts GowinSynthesis errors per module); build/gowin/bisect/<TOP>/
@@ -42,6 +46,7 @@ set MASKED [env_or MASKED 1]
 set MAP    [env_or MAP 1]
 set STEP   [env_or STEP all]
 set TOP    [env_or TOP pqse_gowin_top]
+set FREQ   [env_or FREQ 27]
 
 set root [file normalize [file join [file dirname [info script]] ..]]
 set out  [file join $root build gowin m${MASKED}_p${PUF}]
@@ -89,9 +94,19 @@ proc try_option {args} {
     puts "pqse_gowin.tcl: skipped 'set_option $args' ($msg)"
   }
 }
+# ---- clock constraint (an SDC file; without one the timing report only
+# uses -global_freq) ----
+set sdc [file join $out pqse.sdc]
+set fh  [open $sdc w]
+set per [format %.3f [expr {1000.0 / $FREQ}]]
+set hp  [format %.3f [expr {500.0 / $FREQ}]]
+puts $fh "create_clock -name clk -period $per -waveform {0 $hp} \[get_ports {clk}\]"
+close $fh
+
 # ---- project ----
 create_project -name pqse -dir $out -pn GW2AR-LV18QN88C8/I7 -device_version C -force
 add_file $src
+if {$TOP eq "pqse_gowin_top"} { add_file $sdc }
 
 set_option -top_module            $TOP
 # a single module as top (TOP=..., make se-gowin-bisect): its ports are not pins
@@ -100,10 +115,10 @@ set_option -verilog_std           v2001
 set_option -include_path          [file join $root hw se]
 set_option -output_base_name      pqse
 
-try_option -global_freq           50
+try_option -global_freq           $FREQ
 # every synthesis warning in the log (diagnosis)
 try_option -print_all_synthesis_warning 1
-# area first: the card design has no speed target beyond its 50 MHz clock
+# area first: the card design has no speed target beyond its clock
 try_option -opt_goal              area
 try_option -map_option            $MAP
 try_option -rw_check_on_ram       0
