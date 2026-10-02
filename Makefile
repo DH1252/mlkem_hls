@@ -64,7 +64,7 @@ BAMBU_SIM   := --generate-tb=../../hls/tb_accel.c --simulate --simulator=VERILAT
 VERILATOR_ROOT_DIR := $(shell $(VERILATOR) --getenv VERILATOR_ROOT 2>/dev/null)
 HLS_ENV := CPATH="$(VERILATOR_ROOT_DIR)/include/vltstd$${CPATH:+:$$CPATH}"
 
-.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
+.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-power-vcd se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
 
 all: test
 
@@ -255,11 +255,14 @@ se-area: | $(BUILD)
 #   GOWIN_MAXLUT=8  widest LUT abc9 may build: LUT5..LUT8 use the logic cells'
 #                   MUX2_LUT5..8 muxes, which cost no LUT4. 4: LUT4 only (the
 #                   same as synth_gowin -nowidelut); compare both.
+#   DEVICE=20k      the board the counts are compared with: 20k (Tang Nano 20K)
+#                   or 9k (Tang Nano 9K, GW1NR-9; use GOWIN_OPTS="-family gw1n")
 #   GOWIN_OPTS      extra synth_gowin options. Newer Yosys: "-family gw2a"
 #                   selects the GW2A family (the default is GW1N; the cell
 #                   counts are nearly the same).
 PUF ?= 1
 FLAT ?= 1
+DEVICE ?= 20k
 GOWIN_D ?= 20000
 GOWIN_MAXLUT ?= 8
 GOWIN_OPTS ?=
@@ -277,7 +280,7 @@ se-gowin: | $(BUILD)
 	    tee -q -o $(GW)_modules.txt stat; setattr -mod -unset keep_hierarchy; flatten; stat" 2>&1 \
 	    | { grep -v -E '^(Warning: found logic loop|    cell .*(u_c|g_cell)|      [AB]\[0\] --> Y)' || true; }
 	@test $(PUF) = 1 && echo "(the PUF cells are cross-coupled gates by design: their 'logic loop' warnings are hidden)" || true
-	$(PYTHON) scripts/pqse_fit.py $(GW).log --modules $(GW)_modules.txt
+	$(PYTHON) scripts/pqse_fit.py $(GW).log --modules $(GW)_modules.txt --device $(DEVICE)
 
 # The same fit with the vendor flow (Gowin EDA's gw_sh: GowinSynthesis with
 # -opt_goal area, then place & route, so the report is the real fit). Options as
@@ -286,8 +289,8 @@ se-gowin: | $(BUILD)
 # stops after synthesis. Reports: build/gowin/m<MASKED>_p<PUF>/pqse/impl/pnr/pqse.rpt.txt
 GW_SH ?= gw_sh
 se-gowin-eda:
-	PUF=$(PUF) MASKED=$(MASKED) MAP=$(MAP) STEP=$(STEP) FREQ=$(FREQ) \
-	    $(GW_SH) gowin/pqse_gowin.tcl
+	PUF=$(PUF) MASKED=$(MASKED) MAP=$(MAP) STEP=$(STEP) FREQ=$(FREQ) DEVICE=$(DEVICE) \
+	    PLACE=$(PLACE) ROUTE=$(ROUTE) $(GW_SH) gowin/pqse_gowin.tcl
 
 # Diagnosis: synthesize every secure-element module on its own with
 # GowinSynthesis (STEP=syn) and count its errors, to find the module behind a
@@ -311,19 +314,70 @@ se-gowin-bisect:
 # sky130_fd_sc_hd, OpenSTA (sta) reports power (vectorless with ACT toggles
 # per clock, or from a gate-level VCD=<file> SCOPE=<instance>) and the slowest
 # path against the 50 MHz clock. See scripts/pqse_power.tcl for what the
-# numbers mean (the RAMs become flip-flops here).
+# numbers mean (the RAMs become flip-flops here). STA=openroad runs the same
+# script in OpenROAD (which contains OpenSTA). The netlist must be plain
+# structural Verilog for OpenSTA: newer Yosys keeps $scopeinfo cells (with
+# #(...) parameters) after flattening, so they are deleted before writing, and
+# OpenSTA's reader does not take "signed" declarations (Yosys writes them for
+# leftover integer loop variables), so sed drops that keyword.
 STA ?= sta
 ACT ?= 0.1
+# delay target for ABC (ps, the 50 MHz clock of pqse_power.tcl): with it ABC
+# buffers high-fan-out nets and sizes the gates; without it a RAM's address
+# decode (the RAMs become flip-flops here) drives thousands of inputs from one
+# gate, with transition times of microseconds, which wrecks the timing report
+# and inflates the internal power (it grows with the input slew)
+PERIOD_PS ?= 20000
 se-power: | $(BUILD)
 	@test -n "$(SKY130_LIB)" || { echo "set SKY130_LIB=<path to sky130_fd_sc_hd__tt_025C_1v80.lib>"; exit 1; }
+	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
+	    echo "or use OpenROAD, which contains it: make se-power STA=openroad"; exit 1; }
 	mkdir -p $(BUILD)/sepower
 	yosys -q -l $(BUILD)/sepower/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(SE_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
-	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB); opt_clean; \
+	    delete t:\$$scopeinfo; \
+	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB) -D $(PERIOD_PS); opt_clean; \
 	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
+	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(BUILD)/sepower/pqse_top_sky130.v
 	SKY130_LIB=$(SKY130_LIB) NETLIST=$(BUILD)/sepower/pqse_top_sky130.v ACT=$(ACT) VCD=$(VCD) SCOPE=$(SCOPE) \
 	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(BUILD)/sepower/power_m$(MASKED).txt
+
+# Switching activity for se-power from a gate-level simulation: the sky130
+# netlist (net names enumerated, so the VCD and the netlist OpenSTA reads use the
+# same plain names), behavioural cell models generated from the Liberty file
+# (scripts/pqse_lib2v.py: zero delay, every flip-flop starts at 0), Verilator,
+# and a pin-level testbench (hw/sim/tb_pqse_gate.sv) that starts command
+# GL_CMD over SPI and dumps GL_LEN clocks from GL_START clocks into it; then
+# OpenSTA with that VCD. Results in build/sepower/gl/ (power_gl_m<MASKED>.txt).
+#   make se-power-vcd SKY130_LIB=... [GL_CMD=1] [GL_START=20000] [GL_LEN=2000]
+# The netlist is large: the Verilator build takes minutes and several GB of
+# memory, the VCD ~100-200 MB per 1000 clocks.
+GL_CMD   ?= 1
+GL_START ?= 20000
+GL_LEN   ?= 2000
+GLD      := $(BUILD)/sepower/gl
+se-power-vcd: | $(BUILD)
+	@test -n "$(SKY130_LIB)" || { echo "set SKY130_LIB=<path to sky130_fd_sc_hd__tt_025C_1v80.lib>"; exit 1; }
+	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
+	    echo "or use OpenROAD, which contains it: make se-power-vcd STA=openroad"; exit 1; }
+	mkdir -p $(GLD)
+	yosys -q -l $(GLD)/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(SE_SRC); \
+	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
+	    delete t:\$$scopeinfo; \
+	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB) -D $(PERIOD_PS); opt_clean; \
+	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
+	    rename -hide w:* i:* o:* %u %d; rename -hide c:*; rename -enumerate; \
+	    write_verilog -noattr -noexpr $(GLD)/pqse_top_gl.v"
+	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(GLD)/pqse_top_gl.v
+	$(PYTHON) scripts/pqse_lib2v.py $(SKY130_LIB) $(GLD)/pqse_top_gl.v $(GLD)/sky130_cells.v
+	cd $(GLD) && verilator --binary --timing --trace -j 2 -Wno-fatal -Wno-lint -Wno-style \
+	    --x-assign 0 --x-initial 0 --timescale 1ns/1ps --top-module tb_pqse_gate -Mdir obj -o ../vtb_gl \
+	    $(CURDIR)/hw/sim/tb_pqse_gate.sv sky130_cells.v pqse_top_gl.v > build.log 2>&1 \
+	    || { tail -30 build.log; exit 1; }
+	cd $(GLD) && ./vtb_gl +cmd=$(GL_CMD) +start=$(GL_START) +len=$(GL_LEN) +vcd=gate.vcd
+	SKY130_LIB=$(SKY130_LIB) NETLIST=$(GLD)/pqse_top_gl.v ACT=$(ACT) VCD=$(GLD)/gate.vcd SCOPE=TOP/tb_pqse_gate/dut \
+	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(GLD)/power_gl_m$(MASKED).txt
 
 # Exact robust-probing check (glitches + transitions, first order) of the
 # masked gadgets' gate-level equations: DOM AND, the B2A / adder carry, the
