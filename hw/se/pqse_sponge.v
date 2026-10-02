@@ -131,6 +131,10 @@ module pqse_sponge #(
   reg        part;
   reg  [7:0] lcnt;
   reg  [7:0] ocnt;
+  // word address of the seed / buffer data being absorbed (KMAC key, parts 1,
+  // 2) or the buffer words the keystream is XORed into: set at the start of
+  // each, counted up one word at a time (no lane + offset adders)
+  reg  [10:0] ra;
 
   function [15:0] w16(input [63:0] v, input [1:0] k);    // word k of a lane
     case (k)
@@ -147,7 +151,6 @@ module pqse_sponge #(
   wire [3:0] oent = (ocnt[3:2] == 2'd0) ? j_oe0 :
                     (ocnt[3:2] == 2'd1) ? j_oe1 : (j_oe0 + {2'b00, ocnt[3:2]});
   wire [1:0] csrc = part ? j_p2src : j_p1src;
-  wire [8:0] cadr = part ? j_p2a   : j_p1a;
   wire [7:0] cn   = part ? j_p2n   : j_p1n;
 
   assign busy = start | (hs != H_IDLE);
@@ -187,7 +190,6 @@ module pqse_sponge #(
   wire [15:0] kd0 = sr_d0;
   wire [15:0] kd1 = j_msk ? sr_d1 : 16'd0;
   wire        km_key = (km >= 5'd2) && (km <= 5'd17);         // block B words 2..17 carry a key word
-  wire [4:0]  kmi    = km - 5'd2;                              // ... key word kmi (lane kmi[3:2], word kmi[1:0])
 
   // ---- absorb data ----------------------------------------------------------------------
   wire [15:0] in0 = (csrc == SRC_SEED) ? sr_d0 :
@@ -233,7 +235,7 @@ module pqse_sponge #(
       // KMAC block B: key words 0..15 read, words 0..18 absorbed shifted by 5 bytes
       H_KR: if (km_key) begin
         sr_re = 1'b1;
-        sr_addr = {j_p1a[5:0] + {4'd0, kmi[3:2]}, kmi[1:0]};
+        sr_addr = ra[7:0];                              // key word kmi of entry p1a
       end
       H_KW: begin
         k_ax = 1'b1; k_idx = {2'b00, km[4:2]}; k_k = km[1:0];
@@ -248,8 +250,8 @@ module pqse_sponge #(
         end
       end
       H_ARD: if (pos != rl) begin
-        if (csrc == SRC_SEED) begin sr_re = 1'b1; sr_addr = {cadr[5:0] + lcnt[5:0], wk}; end
-        if (csrc == SRC_BUF)  begin br_re = 1'b1; br_addr = {cadr + {1'b0, lcnt}, wk}; end
+        if (csrc == SRC_SEED) begin sr_re = 1'b1; sr_addr = ra[7:0]; end
+        if (csrc == SRC_BUF)  begin br_re = 1'b1; br_addr = ra; end
       end
       H_AWR: if (in_ok) begin
         k_ax = 1'b1; k_v0 = in0; k_v1 = in1;
@@ -267,7 +269,7 @@ module pqse_sponge #(
         k_rd = 1'b1;                                    // word: k_r0 / k_r1 from H_SKX on
         if (j_sink == SNK_BXOR) begin
           br_re   = 1'b1;
-          br_addr = {B_SM_MSG + {1'b0, ocnt}, wk};
+          br_addr = ra;                                 // message word
         end else begin
           sr_re   = 1'b1;
           sr_addr = {oent, ocnt[1:0], wk};
@@ -277,7 +279,7 @@ module pqse_sponge #(
         // keystream XOR into the message words: the shares are combined here,
         // from kx0 / kx1; the result (ciphertext or plaintext) is the public output
         bw_we   = 1'b1;
-        bw_addr = {B_SM_MSG + {1'b0, ocnt}, wk};
+        bw_addr = ra;
         bw_d    = br_d ^ kx0 ^ kx1;
       end else begin
         sw_we   = 1'b1;
@@ -312,8 +314,8 @@ module pqse_sponge #(
         end
         H_CLR: if (!k_busy) begin       // the state RAMs are wiped (pqse_keccak.v)
           if (j_kmac)                   hs <= H_KA;
-          else if (j_p1src != SRC_NONE) hs <= H_ARD;
-          else if (j_p2src != SRC_NONE) begin part <= 1'b1; hs <= H_ARD; end
+          else if (j_p1src != SRC_NONE) begin ra <= {j_p1a, 2'b00}; hs <= H_ARD; end
+          else if (j_p2src != SRC_NONE) begin ra <= {j_p2a, 2'b00}; part <= 1'b1; hs <= H_ARD; end
           else                          hs <= H_FIN1;
         end
         H_KA: if (k_rdy) begin          // block A, words 0..7 (lanes 0, 1)
@@ -321,6 +323,7 @@ module pqse_sponge #(
             km   <= 5'd0;
             kp0  <= KM_PRE[39:32];      // block B: byte 4 of the prefix comes first
             kp1  <= 8'd0;
+            ra   <= {j_p1a, 2'b00};     // the key: words 0..15 of entry p1a
             hret <= H_KR;
             hs   <= H_PGO;              // permute block A
           end else begin
@@ -329,10 +332,11 @@ module pqse_sponge #(
         end
         H_KR: hs <= H_KW;               // key word read issued (km 2..17)
         H_KW: if (k_rdy) begin
-          if (km_key) begin kp0 <= kd0[15:8]; kp1 <= kd1[15:8]; end
+          if (km_key) begin kp0 <= kd0[15:8]; kp1 <= kd1[15:8]; ra <= ra + 11'd1; end
           if (km == 5'd18) begin        // block B complete: permute, then X (part 2)
             km   <= 5'd0;
             part <= 1'b1;
+            ra   <= {j_p2a, 2'b00};
             lcnt <= 8'd0;
             hret <= H_ARD;
             hs   <= H_PGO;
@@ -351,6 +355,7 @@ module pqse_sponge #(
         end
         H_AWR: if (in_ok && k_rdy) begin
           wk <= wk + 2'd1;
+          ra <= ra + 11'd1;
           if (wk != 2'd3) begin
             hs <= H_ARD;                // next word of the lane
           end else begin
@@ -359,6 +364,7 @@ module pqse_sponge #(
               lcnt <= 8'd0;
               if (!part && (j_p2src != SRC_NONE)) begin
                 part <= 1'b1;
+                ra   <= {j_p2a, 2'b00};
                 hs   <= H_ARD;
               end else begin
                 hs <= H_FIN1;
@@ -389,8 +395,11 @@ module pqse_sponge #(
           wk  <= 2'd0;
           hs  <= hret;
         end
-        H_SQ0: hs <= ((j_sink == SNK_SEED) || (j_sink == SNK_SXOR) || (j_sink == SNK_BXOR)) ?
-                     H_SRD : H_STRM;
+        H_SQ0: begin
+          ra <= {B_SM_MSG, 2'b00};      // keystream sink: the message words
+          hs <= ((j_sink == SNK_SEED) || (j_sink == SNK_SXOR) || (j_sink == SNK_BXOR)) ?
+                H_SRD : H_STRM;
+        end
         H_SRD: if (k_rdy) begin
           if (ocnt == j_onl) begin
             hs <= H_IDLE;
@@ -410,6 +419,7 @@ module pqse_sponge #(
         end
         H_SWR: begin
           wk <= wk + 2'd1;
+          ra <= ra + 11'd1;
           if (wk == 2'd3) begin
             pos  <= pos + 5'd1;
             ocnt <= ocnt + 8'd1;

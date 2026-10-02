@@ -209,21 +209,19 @@ module pqse_io (
   reg  [15:0] um0, um1;
 
   // ---- CTRC: 64-message replay window, word-serial -----------------------------------------
-  // per word k of the header counter c (lane 0): a = rx_max - c and n = c -
-  // rx_max, 16 bits at a time with their borrows. c is newer when a borrows
-  // out of word 3; a's (n's) low 6 bits and whether any higher bit is set
-  // give the age (the distance, saturated at 64).
+  // per word k of the header counter c (lane 0): a = rx_max - c, 16 bits at a
+  // time with the borrow. c is newer when a borrows out of word 3; then c is
+  // newer by n = 2^64 - a, which is below 64 exactly when a[63:6] is all ones
+  // and a[5:0] != 0 (n = -a[5:0] mod 64). Older: by a, below 64 when a[63:6] = 0.
   wire        ctrc    = (j_op == IO_CTRC);
-  reg         ab, nb;           // borrows
-  reg  [5:0]  alo, nlo;         // a[5:0], n[5:0]
-  reg         ahi, nhi;         // a[63:6] != 0, n[63:6] != 0
+  reg         ab;               // borrow
+  reg  [5:0]  alo;              // a[5:0]
+  reg         ahi, aone;        // a[63:6] != 0, a[63:6] all ones
   wire [15:0] mw      = w16(rx_max, wk);
   wire [16:0] ad      = {1'b0, mw} - {1'b0, brdata} - {16'd0, ab};
-  wire [16:0] nd      = {1'b0, brdata} - {1'b0, mw} - {16'd0, nb};
-  wire        ahi_n   = ahi | ((wk == 2'd0) ? (|ad[15:6]) : (|ad[15:0]));
-  wire        nhi_n   = nhi | ((wk == 2'd0) ? (|nd[15:6]) : (|nd[15:0]));
+  wire        ahi_n   = ahi  | ((wk == 2'd0) ? (|ad[15:6]) : (|ad[15:0]));
+  wire        aone_n  = aone & ((wk == 2'd0) ? (&ad[15:6]) : (&ad[15:0]));
   wire [5:0]  alo_n   = (wk == 2'd0) ? ad[5:0] : alo;
-  wire [5:0]  nlo_n   = (wk == 2'd0) ? nd[5:0] : nlo;
   wire        newer   = ad[16];                          // word 3: c > rx_max
   wire        fresh   = !rx_any || newer || (!ahi_n && !rx_bits[alo_n]);
 
@@ -347,9 +345,8 @@ module pqse_io (
       tq     <= 8'd0;
       sq     <= 6'd0;
       ab     <= 1'b0;
-      nb     <= 1'b0;
       ahi    <= 1'b0;
-      nhi    <= 1'b0;
+      aone   <= 1'b1;
     end else if (busy_r) begin
       if (seq) begin
         if (sq[0] && sq <= 6'd31) begin sa0 <= srd0; sa1 <= srd1; end          // e word
@@ -452,16 +449,18 @@ module pqse_io (
           sph <= 2'd1;
         end else begin
           ctr_rx <= {brdata, ctr_rx[63:16]};
-          ab  <= ad[16];  nb  <= nd[16];
-          alo <= alo_n;   nlo <= nlo_n;
-          ahi <= ahi_n;   nhi <= nhi_n;
+          ab   <= ad[16];
+          alo  <= alo_n;
+          ahi  <= ahi_n;
+          aone <= aone_n;
           sph <= 2'd0;
           wi  <= wi + 4'd1;
           la  <= la + 11'd1;
           if (wk == 2'd3) begin
             busy_r  <= 1'b0;
             rx_new  <= newer;
-            rx_dist <= newer ? (nhi_n ? 7'd64 : {1'b0, nlo_n}) : (ahi_n ? 7'd64 : {1'b0, alo_n});
+            rx_dist <= newer ? ((aone_n && alo_n != 6'd0) ? {1'b0, 6'd0 - alo_n} : 7'd64)
+                             : (ahi_n ? 7'd64 : {1'b0, alo_n});
           end
         end
       end else begin

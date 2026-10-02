@@ -4,8 +4,9 @@
 // One instruction at a time: fetch from pqse_ucode, with hiding on draw a fresh
 // Fisher-Yates permutation for a shuffled instruction (pqse_perm.v) and wait
 // 0..15 random dummy clocks, start one engine, wait until it is idle.
-// Only one engine is ever active, so every memory port is a plain mux on the
-// instruction class, idle engines do not toggle, and peak power stays low.
+// Only one engine is ever active, so the memory ports are the OR of the
+// engines' ports (each drives 0 while idle), idle engines do not toggle, and
+// peak power stays low.
 //
 // Memories
 //   polynomial RAM  two 1024 x 25 RAMs: even slots (share 0, public data) and
@@ -76,8 +77,8 @@ module pqse_core #(
   reg  [9:0]  pcn;          // always ~pc (fault detection)
   reg  [95:0] ins_r;
   reg         ins_p;        // parity of ins_r, from the ROM
-  wire [95:0] rom_q;
-  wire        rom_p = ^rom_q;
+  wire [96:0] rom_q;          // {parity, instruction}: the parity is a ROM column
+  wire        rom_p = rom_q[96];
   reg         bad, wrap, inj, kx;
   reg         zc;           // the command is ZEROIZE (runs even with a failed TRNG)
   reg         role;         // session key role: 0 initiator (Encaps), 1 responder (Decaps)
@@ -276,7 +277,7 @@ module pqse_core #(
               q      <= Q_IDLE;
             end else if (!any_busy) begin    // (after an abort: until the engine still
               fr    <= 1'b0;                 //  running has finished; the engines read ins_r)
-              ins_r <= rom_q;
+              ins_r <= rom_q[95:0];
               ins_p <= rom_p;
               q     <= Q_PG;
             end
@@ -591,56 +592,37 @@ module pqse_core #(
     .rnd(rnd), .rnd_take(pf_rt));
 
   // =============================== port multiplexing ===================================
+  // v5: the engines' ports are OR-combined instead of multiplexed on the
+  // instruction class. Every engine drives 0 on all its ports (enables,
+  // addresses, data) while it is idle, and only one engine runs at a time (a
+  // HASH with a stream sink runs the sponge with the sampler or the masked
+  // unit, which use different ports), so the OR passes the running engine's
+  // ports and idle engines still do not toggle the buses. The enables are
+  // also gated with run: an engine still finishing after an aborted command
+  // (the sequencer is idle again) cannot touch the RAMs.
   always @* begin
-    pm_re = 1'b0; pm_ra = 11'd0; pm_we = 1'b0; pm_wa = 11'd0; pm_wd = 24'd0;
-    cb_re = 1'b0; cb_ra = 11'd0; cb_we = 1'b0; cb_wa = 11'd0; cb_wd = 16'd0;
-    sr_re = 1'b0; sr_ra = 8'd0;  sr_we = 1'b0; sr_wa = 8'd0;  sr_wd0 = 16'd0; sr_wd1 = 16'd0;
+    pm_re  = run & (p_re | io_re | m_re);
+    pm_ra  = p_ra | io_ra | m_ra;
+    pm_we  = run & (pa_we | p_we | io_we | m_we);
+    pm_wa  = pa_wa | p_wa | io_wa | m_wa;
+    pm_wd  = pa_wd | p_wd | io_wd | m_wd;
+    cb_re  = run & (sp_bre | io_bre | m_bre | pf_bre);
+    cb_ra  = sp_bra | io_bra | m_bra | pf_bra;
+    cb_we  = run & (sp_bwe | io_bwe | m_bwe | pf_bwe);
+    cb_wa  = sp_bwa | io_bwa | m_bwa | pf_bwa;
+    cb_wd  = sp_bwd | io_bwd | m_bwd | pf_bwd;
+    sr_re  = run & (sp_sre | io_sre | m_sre | pf_sre);
+    sr_ra  = sp_sra | io_sra | m_sra | pf_sra;
+    sr_we  = run & (sp_swe | io_swe | m_swe | pf_swe);
+    sr_wa  = sp_swa | io_swa | m_swa | pf_swa;
+    sr_wd0 = sp_swd0 | io_swd0 | m_swd0 | pf_swd0;
+    sr_wd1 = sp_swd1 | io_swd1 | m_swd1 | pf_swd1;
     // Precharge of the two polynomial-RAM output registers between instructions
     // (no engine runs in these clocks): RAM 1 reads the all-zero slot S_Z, RAM 0
     // a public word (S_T word 0). An instruction then never starts with a word
     // of the other share of a coefficient still held behind the read mux.
     if (q == Q_FETCH)   begin pm_re = 1'b1; pm_ra = {S_Z, 7'd0}; end
     else if (q == Q_PG) begin pm_re = 1'b1; pm_ra = {S_T, 7'd0}; end
-    else if (run) begin
-      case (cls)
-        C_HASH: begin
-          sr_re = sp_sre; sr_ra = sp_sra;
-          sr_we = sp_swe; sr_wa = sp_swa; sr_wd0 = sp_swd0; sr_wd1 = sp_swd1;
-          if (sp_bre) begin cb_re = 1'b1; cb_ra = sp_bra; end
-          else if (m_bre) begin cb_re = 1'b1; cb_ra = m_bra; end      // tag bits (after absorbing)
-          if (sp_bwe) begin cb_we = 1'b1; cb_wa = sp_bwa; cb_wd = sp_bwd; end
-          case (sink)
-            SNK_SNTT: begin pm_we = pa_we;  pm_wa = pa_wa;  pm_wd = pa_wd;  end
-            SNK_MB2A: begin
-              pm_re = m_re; pm_ra = m_ra;
-              pm_we = m_we; pm_wa = m_wa; pm_wd = m_wd;
-            end
-            default: ;
-          endcase
-        end
-        C_POLY: begin
-          pm_re = p_re; pm_ra = p_ra; pm_we = p_we; pm_wa = p_wa; pm_wd = p_wd;
-        end
-        C_IO: begin
-          pm_re = io_re; pm_ra = io_ra; pm_we = io_we; pm_wa = io_wa; pm_wd = io_wd;
-          cb_re = io_bre; cb_ra = io_bra; cb_we = io_bwe; cb_wa = io_bwa; cb_wd = io_bwd;
-          sr_re = io_sre; sr_ra = io_sra; sr_we = io_swe; sr_wa = io_swa;
-          sr_wd0 = io_swd0; sr_wd1 = io_swd1;
-        end
-        C_MASK: begin
-          pm_re = m_re; pm_ra = m_ra; pm_we = m_we; pm_wa = m_wa; pm_wd = m_wd;
-          cb_re = m_bre; cb_ra = m_bra; cb_we = m_bwe; cb_wa = m_bwa; cb_wd = m_bwd;
-          sr_re = m_sre; sr_ra = m_sra; sr_we = m_swe; sr_wa = m_swa;
-          sr_wd0 = m_swd0; sr_wd1 = m_swd1;
-        end
-        C_PUF: begin
-          cb_re = pf_bre; cb_ra = pf_bra; cb_we = pf_bwe; cb_wa = pf_bwa; cb_wd = pf_bwd;
-          sr_re = pf_sre; sr_ra = pf_sra; sr_we = pf_swe; sr_wa = pf_swa;
-          sr_wd0 = pf_swd0; sr_wd1 = pf_swd1;
-        end
-        default: ;
-      endcase
-    end
   end
 
 `ifdef PQSE_TRACE
