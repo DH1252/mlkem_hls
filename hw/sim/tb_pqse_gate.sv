@@ -129,6 +129,15 @@ module tb_pqse_gate;
     // span is the window
     $display("gate-level: %0d clocks measured%s", nwin,
              (len == 0) ? " (the whole command)" : "");
+    if (len == 0 && nwin < 1000) begin
+      // done right away: the command was refused or failed - say why (the SPI
+      // read lands in the dump, but this run is void anyway), no gl_run.txt
+      spi_rd(STATUS, st);
+      $display("ERROR: the command ended after %0d clocks: result %0d, lifecycle %0d, faults %0d, tampered %0d",
+               nwin, st[15:8], st[7:6], st[18:17], st[5]);
+      $display("       (results: 1 bad input, 6 denied, 7 KILLED, 8 FAULT; lifecycle 0 TEST .. 3 KILLED)");
+      $finish;
+    end
     fd = $fopen("gl_run.txt", "w");
     $fdisplay(fd, "window_clocks %0d", nwin);
     $fdisplay(fd, "command_clocks %0d", (len == 0) ? nwin : 0);
