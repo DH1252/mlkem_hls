@@ -132,8 +132,10 @@ accurate number is `make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1`: the
 mapped, clock-gated netlist runs a whole command (default KeyGen, `GL_CMD=2`
 Encaps) in Verilator with cell models generated from the Liberty file; every
 cell pin's toggles go into a SAIF file (Verilator 5.036 or newer;
-`GL_FMT=vcd GL_LEN=<clocks> GL_START=<clock> GL_CLOCKS=<command clocks>` for
-older ones: a window, extrapolated), OpenSTA turns them into power, and
+`make se-power-sample GL_FMT=vcd GL_CLOCKS=<command clocks>` for older ones:
+8 windows of 2,000 clocks spread over the command, simulated in parallel,
+with the spread between them as the error bar), OpenSTA turns them into
+power, and
 `scripts/power/pqse_energy.py` into energy per command at 50 MHz and at the
 card clock (`CARD_MHZ`, default 3.39). The SRAM macros have no power in their
 Liberty stub: their models count reads and writes, and the energy per access
@@ -346,6 +348,7 @@ make sim-se-tvla MASKED=0 N=200  # positive control (expect: leaks)
 make se-area                     # Yosys gate count; SKY130_LIB=<.lib> for SkyWater 130 nm
 make se-power SKY130_LIB=<.lib>  # SKY130 power (vectorless, ACT=0.1) and the slowest path
 make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1   # energy per KeyGen from a gate-level run (GL_CMD=2: Encaps)
+make se-power-sample SKY130_LIB=<.lib> RAM_MACRO=1 GL_FMT=vcd GL_CLOCKS=<n>   # the same from 8 sampled 2000-clock windows (fast with VCD; GL_PAR, GL_THREADS for speed)
 make se-gowin                    # fit on the Tang Nano 20K (GW2AR-18), largest modules; PUF=0: without the PUF cells, PUF=bfly: butterfly cells
 make se-gowin-eda                # the same with Gowin EDA (gw_sh: GowinSynthesis, area goal, + place & route): the real fit
 cd quartus/jtag && quartus_sh -t build.tcl se    # DE10-Nano, then source pqse_test.tcl
