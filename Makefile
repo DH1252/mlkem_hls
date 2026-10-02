@@ -358,15 +358,16 @@ CG_MIN    ?= 4
 # form, and the first gate-level run showed 1,865 of 3,750 flip-flops clocked
 # every cycle, ~80 % of the logic energy. Every other flip-flop type is listed
 # as allowed, so dfflegalize leaves it alone. dfflegalize works bit by bit (one
-# en | rst gate per flip-flop); opt_merge then merges the identical gates, so
-# a register's bits share one enable net again and clockgate (which groups by
-# enable net, CG_MIN at least) sees the whole register.
+# en | rst gate per flip-flop); opt_merge then merges the identical gates and
+# opt_clean replaces the merged gates' output wires by the kept one in every
+# flip-flop (clockgate groups flip-flops by the enable wire itself, without
+# resolving aliases, and gates groups of CG_MIN or more).
 CG_SRST   ?= 1
 PW_CGLEG  := $(if $(and $(filter 1,$(CLOCKGATE)),$(filter 1,$(CG_SRST))),dfflegalize \
 	    -cell \$$_DFF_?_ 01 -cell \$$_DFFE_??_ 01 -cell \$$_DFF_???_ 01 -cell \$$_DFFE_????_ 01 \
 	    -cell \$$_ALDFF_??_ 01 -cell \$$_ALDFFE_???_ 01 -cell \$$_DFFSR_???_ 01 -cell \$$_DFFSRE_????_ 01 \
 	    -cell \$$_SDFF_???_ 01 -cell \$$_SDFFCE_????_ 01 -cell \$$_SR_??_ 01 \
-	    -cell \$$_DLATCH_?_ 01 -cell \$$_DLATCH_???_ 01 -cell \$$_DLATCHSR_???_ 01; opt_merge;,)
+	    -cell \$$_DLATCH_?_ 01 -cell \$$_DLATCH_???_ 01 -cell \$$_DLATCHSR_???_ 01; opt_merge; opt_clean;,)
 PW_SRC    := $(if $(filter 1,$(RAM_MACRO)),$(filter-out hw/se/pqse_mem.v,$(SE_SRC)) scripts/power/pqse_ram_macro.v,$(SE_SRC))
 PW_RAMLIB := $(if $(filter 1,$(RAM_MACRO)),$(BUILD)/sepower/pqse_sram.lib,)
 PW_DEFS   := $(if $(filter 0,$(LOWPOWER)),,-DPQSE_LOWPOWER)
@@ -405,6 +406,7 @@ se-power: | $(BUILD)
 	$(if $(PW_RAMLIB),$(PYTHON) scripts/power/pqse_sram_lib.py $(PW_RAMLIB))
 	yosys -q -l $(BUILD)/sepower/yosys$(PW_TAG).log -p "$(PW_MAP) \
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
+	@grep -h "Converted .* FFs" $(BUILD)/sepower/yosys$(PW_TAG).log | sed 's/^/clockgate: /' || true
 	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(BUILD)/sepower/pqse_top_sky130.v
 	SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(BUILD)/sepower/pqse_top_sky130.v ACT=$(ACT) VCD=$(VCD) SCOPE=$(SCOPE) \
 	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(BUILD)/sepower/power$(PW_TAG).txt
@@ -469,6 +471,7 @@ se-power-gl-build: | $(BUILD)
 	yosys -q -l $(GLD)/yosys$(PW_TAG).log -p "$(PW_MAP) \
 	    rename -hide w:* i:* o:* %u %d; rename -hide c:*; rename -enumerate; \
 	    write_verilog -noattr -noexpr $(GLD)/pqse_top_gl.v"
+	@grep -h "Converted .* FFs" $(GLD)/yosys$(PW_TAG).log | sed 's/^/clockgate: /' || true
 	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(GLD)/pqse_top_gl.v
 	$(PYTHON) scripts/pqse_lib2v.py $(SKY130_LIB) $(GLD)/pqse_top_gl.v $(GLD)/sky130_cells.v
 	cd $(GLD) && $(VERILATOR) --binary --timing $(GL_TRACE) $(GL_VFLAGS) -Wno-fatal -Wno-lint -Wno-style \
