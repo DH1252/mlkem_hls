@@ -68,7 +68,8 @@ module pqse_sponge #(
   input  wire        sink_done,   // the stream sink has finished writing
   // randomness for the masked chi
   input  wire [63:0] rnd,
-  output wire        rnd_take
+  output wire        rnd_take,
+  output wire        perr          // Keccak state parity error (a fault)
 );
   `include "pqse_defs.vh"
 
@@ -149,7 +150,7 @@ module pqse_sponge #(
     .clk(clk), .rst(rst), .msk(j_msk),
     .clr(k_clr), .ax_en(k_ax), .ax_idx(k_idx), .ax_v0(k_v0), .ax_v1(k_v1),
     .rd_en(k_rd), .rd_idx(pos), .rd_v0(k_r0), .rd_v1(k_r1),
-    .go(k_go), .busy(k_busy), .rnd(rnd), .rnd_take(rnd_take)
+    .go(k_go), .busy(k_busy), .rnd(rnd), .rnd_take(rnd_take), .perr(perr)
   );
 
   // ---- padding ------------------------------------------------------------------------

@@ -40,6 +40,10 @@
 //     keys wiped, the fault counted, and the command reports R_FAULT; the third
 //     fault moves the lifecycle to KILLED
 //   - tamper input or LIFECYCLE := KILLED: abort, KILLED, wipe (result R_KILLED)
+//   - the security state (lifecycle, fault counter, tampered flag) is held
+//     twice, the second copy complemented and written in the same statements;
+//     a mismatch (a bit flipped by a laser, a glitch or an upset) is handled
+//     like the tamper input, and also sets tampered and saturates the counter
 //
 // The lifecycle and fault counter are volatile here (reset = LC_RESET, 0); a
 // chip keeps them in one-time-programmable fuses / NVM.
@@ -91,6 +95,12 @@ module pqse_host #(
   reg        rd_buf, rd_ok;
   reg [31:0] csr_q;
   reg  [1:0] fcnt;           // faults detected (saturates at 3)
+  // fault protection of the security state: complemented shadow copies, written
+  // in the same statements; a mismatch (a flipped bit in either copy: laser,
+  // glitch, upset) is handled like the tamper input - KILLED and wiped
+  reg  [1:0] lcn, fcntn;
+  reg        tampn;
+  wire       sh_bad = (lc != ~lcn) | (fcnt != ~fcntn) | (tampered != ~tampn);
   reg        zpend;          // start an internal ZEROIZE once the core is idle
   reg        zrun;           // internal ZEROIZE running
   reg  [1:0] zkind;          // why: power-on, fault, tamper / kill
@@ -136,17 +146,17 @@ module pqse_host #(
 
   always @(posedge clk) begin
     if (rst) begin
-      lc        <= LC_RESET;
+      begin lc        <= LC_RESET; lcn <= ~(LC_RESET); end
       done_s    <= 1'b0;
       res       <= 8'd0;
-      tampered  <= 1'b0;
+      begin tampered  <= 1'b0; tampn <= ~(1'b0); end
       tsync     <= 3'd0;
       cmd_start <= 1'b0;
       core_rst  <= 1'b1;
       hide_en   <= 1'b1;
       cmd       <= 8'd0;
       cmd_inj   <= 1'b0;
-      fcnt      <= 2'd0;
+      begin fcnt      <= 2'd0; fcntn <= ~(2'd0); end
       zpend     <= 1'b1;            // power-on wipe
       zrun      <= 1'b0;
       zkind     <= Z_POR;
@@ -157,21 +167,27 @@ module pqse_host #(
       // ---- CSR writes (before the events below, which take precedence) ----
       if (bus_we && bus_addr == 12'h403 && bus_wdata[1]) done_s <= 1'b0;
       if (bus_we && bus_addr == 12'h405 && bus_wdata[1:0] > lc && bus_wdata[1:0] != LC_KILLED && idle)
-        lc <= bus_wdata[1:0];
+        begin lc <= bus_wdata[1:0]; lcn <= ~(bus_wdata[1:0]); end
       if (bus_we && bus_addr == 12'h406) hide_en <= bus_wdata[0];
       // ---- events ----
-      if ((tsync[2] && !tampered) || kill_wr) begin
-        // tamper / kill: abort whatever runs, KILLED, then wipe
-        if (tsync[2]) tampered <= 1'b1;
-        lc       <= LC_KILLED;
+      if ((tsync[2] && !tampered) || kill_wr || sh_bad) begin
+        // tamper / kill / corrupted security state: abort whatever runs, KILLED,
+        // then wipe (a corrupted state also counts as tampered, faults saturated:
+        // both copies are rewritten consistently, so this fires once)
+        if (sh_bad) begin
+          begin tampered <= 1'b1; tampn <= ~(1'b1); end
+          begin fcnt <= 2'd3; fcntn <= ~(2'd3); end
+        end
+        if (tsync[2]) begin tampered <= 1'b1; tampn <= ~(1'b1); end
+        begin lc       <= LC_KILLED; lcn <= ~(LC_KILLED); end
         zpend    <= 1'b1;
         zrun     <= 1'b0;
         zkind    <= Z_KILL;
         core_rst <= 1'b1;
       end else if (fault_done) begin
         // a fault was detected: reset the engines, count, wipe
-        fcnt     <= (fcnt == 2'd3) ? 2'd3 : fcnt + 2'd1;
-        if (fcnt >= 2'd2) lc <= LC_KILLED;
+        begin fcnt     <= (fcnt == 2'd3) ? 2'd3 : fcnt + 2'd1; fcntn <= ~((fcnt == 2'd3) ? 2'd3 : fcnt + 2'd1); end
+        if (fcnt >= 2'd2) begin lc <= LC_KILLED; lcn <= ~(LC_KILLED); end
         zpend    <= 1'b1;
         zkind    <= Z_FAULT;
         core_rst <= 1'b1;
@@ -179,7 +195,7 @@ module pqse_host #(
         // internal wipe finished
         zrun <= 1'b0;
         if (core_result == R_FAULT) begin       // the wipe itself failed: give up
-          lc     <= LC_KILLED;
+          begin lc     <= LC_KILLED; lcn <= ~(LC_KILLED); end
           res    <= R_FAULT;
           done_s <= 1'b1;
         end else if (zkind != Z_POR) begin

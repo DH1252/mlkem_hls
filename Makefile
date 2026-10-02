@@ -16,6 +16,8 @@
 #                  lifecycle, tamper, SPI
 #   make sim-se-tvla MASKED=1 N=200   leakage assessment (TVLA) of the
 #                  masked Decaps; MASKED=0 is the positive control
+#   make sim-se-fault [FOP=keygen] [FN=200]  fault-injection campaign (tamper
+#                  testing): random bit flips, unchanged / detected / silent
 #   make se-probe  exact first-order robust-probing check (glitches +
 #                  transitions) of the masked gadgets (also run by sim-se)
 #   make se-area   Yosys gate count of the secure element (MASKED=0/1)
@@ -68,7 +70,7 @@ BAMBU_SIM   := --generate-tb=../../hls/tb_accel.c --simulate --simulator=VERILAT
 VERILATOR_ROOT_DIR := $(shell $(VERILATOR) --getenv VERILATOR_ROOT 2>/dev/null)
 HLS_ENV := CPATH="$(VERILATOR_ROOT_DIR)/include/vltstd$${CPATH:+:$$CPATH}"
 
-.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-power-vcd se-power-gl-build se-power-sample se-power-vcd-report se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
+.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla sim-se-fault se-area se-power se-power-vcd se-power-gl-build se-power-sample se-power-vcd-report se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
 
 all: test
 
@@ -232,6 +234,30 @@ sim-se-tvla: | $(BUILD)
 	cd $(TVD) && ./vtvla | tee sim.log
 	$(PYTHON) scripts/pqse_tvla.py report $(TVD)/tvla_t.txt --traces $(N) \
 	    --png $(TVD)/tvla_t.png
+
+# Fault-injection campaign (tamper testing): FN runs (default 200), each from a
+# power cycle, one random bit flipped (control, datapath, masked gadgets, every
+# RAM, both shares) at a random clock of a NIST-vector masked Decaps (FOP=decaps)
+# or KeyGen (FOP=keygen); scripts/pqse_fault_report.py sorts the outcomes into
+# unchanged / detected / implicit rejection / SILENT (a wrong output with
+# result 0: what fault attacks exploit) / hang, per target.
+#   make sim-se-fault [FOP=decaps|keygen] [FN=200] [SEED=1] [LOWPOWER=1]
+# Results in build/fault_<FOP>_s<SEED>/: fault_log.txt, fault_report.txt.
+# A run is one command (~200-300 k clocks): 200 runs take tens of minutes.
+FOP ?= decaps
+FN  ?= 200
+FTD := $(BUILD)/fault_$(FOP)_s$(SEED)$(if $(filter 1,$(LOWPOWER)),_lp)
+sim-se-fault: | $(BUILD)
+	rm -rf $(FTD) && mkdir -p $(FTD)
+	cp -r hw/sim/vectors $(FTD)/
+	cd $(FTD) && $(VERILATOR) --binary --timing -j 2 -O3 -Wno-fatal -Wno-lint -Wno-style \
+	    --top-module tb_pqse_fault -Mdir obj -o ../vfault -I../../hw/se \
+	    +define+PQSE_SIM_INIT $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
+	    ../../hw/sim/tb_pqse_fault.sv $(addprefix ../../,$(SE_SRC)) > build.log 2>&1 \
+	    || { tail -30 build.log; exit 1; }
+	cd $(FTD) && ./vfault +n=$(FN) +seed=$(SEED) +op=$(FOP) | tee sim.log
+	$(PYTHON) scripts/pqse_fault_report.py $(FTD)/fault_log.txt --vectors hw/sim/vectors \
+	    | tee $(FTD)/fault_report.txt
 
 # Gate-level area estimate with Yosys (generic cells; with SKY130_LIB=<path to
 # sky130_fd_sc_hd__tt_025C_1v80.lib> it maps to the SkyWater 130 nm library).

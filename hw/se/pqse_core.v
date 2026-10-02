@@ -219,9 +219,10 @@ module pqse_core #(
 
   // ---- fault sources ----
   wire perr;                                   // RAM parity error (below)
+  wire perr_k;                                 // Keccak state parity error (pqse_sponge / pqse_keccak)
   wire f_ctl = run && ((pcn != ~pc) || ((q == Q_EXEC) && (^ins_r != ins_p)));
   wire f_eng = (q == Q_WAIT) && wfirst && is_eng && !one_clk && !any_busy;
-  wire f_any = f_ctl | f_eng | perr | m_fault | io_fault;
+  wire f_any = f_ctl | f_eng | perr | perr_k | m_fault | io_fault;
 
   always @(posedge clk) begin
     if (rst) begin
@@ -497,7 +498,7 @@ module pqse_core #(
     .trng_en(t_en_sp), .trng_valid(t_valid), .trng_word(tw_sp), .trng_take(t_take_sp),
     .so_valid(so_valid), .so_v0(so_v0), .so_v1(so_v1), .so_ready(so_ready),
     .samp_done(pa_done), .sink_done(sink_done),
-    .rnd(rnd_sp), .rnd_take(sp_rt)
+    .rnd(rnd_sp), .rnd_take(sp_rt), .perr(perr_k)
   );
 
   pqse_parse u_parse (
@@ -621,8 +622,8 @@ module pqse_core #(
 `ifdef PQSE_TRACE
   always @(posedge clk) begin
     if (exec) $display("[%0t] pc %0d class %0d ins %h", $time, pc, cls, ins_r);
-    if (f_any && run) $display("[%0t] FAULT detected: ctl %b engine %b parity %b okchk %b decoder %b",
-                               $time, f_ctl, f_eng, perr, m_fault, io_fault);
+    if (f_any && run) $display("[%0t] FAULT detected: ctl %b engine %b parity %b keccak %b okchk %b decoder %b",
+                               $time, f_ctl, f_eng, perr, perr_k, m_fault, io_fault);
     if (done) $display("[%0t] command done: result %0d, %0d cycles", $time, result, cycles);
   end
 `endif

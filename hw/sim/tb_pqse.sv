@@ -40,6 +40,11 @@
 //      then a RAM parity error -> R_FAULT, one fault counted
 //  15  SPI (second instance): ID and CONFIG; tamper -> zeroized, KILLED,
 //      commands refused
+//  16  tamper / fault injection (after another power cycle): a bit flipped in
+//      the Keccak state RAM during a permutation and one in a theta column-
+//      parity register both abort KeyGen with R_FAULT (Keccak parity); a bit
+//      flipped in the lifecycle register (laser / glitch on the security
+//      state) is caught by its complemented shadow: KILLED, tampered, wiped
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -623,6 +628,49 @@ module tb_pqse;
     report("after a power cycle: RAM parity error -> R_FAULT, keys wiped, 1 fault counted",
            bad + int'(res != R_FAULT) + int'(st[2] != 1'b0) + int'(st[18:17] != 2'd1) +
            int'(st[7:6] != 2'd0));
+
+    // 16 tamper / fault injection on the security state and the Keccak state ------------------
+    // power cycle: fault counter 0, lifecycle TEST
+    reset = 1'b1;
+    repeat (5) @(negedge clk);
+    reset = 1'b0;
+    repeat (4) @(negedge clk);
+    wait_idle();
+    // (a) Keccak state RAM: during the rho/pi pass of round 0 of the first
+    // permutation, flip one bit of lane A[23] (read at column 3 of that pass)
+    start(KEYGEN, 0);
+    wait (dut.u_sys.u_core.u_sponge.u_keccak.ks == 3'd3 && dut.u_sys.u_core.u_sponge.u_keccak.cx == 3'd0);
+    @(negedge clk);
+    dut.u_sys.u_core.u_sponge.u_keccak.u_s0.g_def.mem[23] =
+      dut.u_sys.u_core.u_sponge.u_keccak.u_s0.g_def.mem[23] ^ 65'd32;
+    finish(res, cyc);
+    rd(STATUS, st);
+    report("fault: a bit of the Keccak state RAM flipped mid-permutation -> parity, R_FAULT, keys wiped",
+           int'(res != R_FAULT) + int'(st[18:17] != 2'd1) + int'(st[2] != 1'b0) + int'(st[7:6] != 2'd0));
+    // (b) theta column parity register C[4] (share 0), flipped in round 3 while
+    // RP runs column 2: D of column 3 uses C[4] -> its parity bit disagrees
+    start(KEYGEN, 0);
+    wait (dut.u_sys.u_core.u_sponge.u_keccak.ks == 3'd3 && dut.u_sys.u_core.u_sponge.u_keccak.rnd_i == 5'd3 &&
+          dut.u_sys.u_core.u_sponge.u_keccak.cx == 3'd2);
+    @(negedge clk);
+    dut.u_sys.u_core.u_sponge.u_keccak.C0v[4*64 + 7] = ~dut.u_sys.u_core.u_sponge.u_keccak.C0v[4*64 + 7];
+    finish(res, cyc);
+    rd(STATUS, st);
+    report("fault: a theta column-parity register bit flipped -> parity, R_FAULT, 2 faults counted",
+           int'(res != R_FAULT) + int'(st[18:17] != 2'd2) + int'(st[2] != 1'b0));
+    // (c) lifecycle register: TEST (0) -> PERSO (1) by a flipped bit, the shadow
+    // disagrees -> handled like the tamper input
+    wait_idle();
+    @(negedge clk);
+    dut.u_sys.u_host.lc = dut.u_sys.u_host.lc ^ 2'b01;
+    repeat (4) @(negedge clk);
+    wait_idle();
+    rd(STATUS, st);
+    rd(LIFECYCLE, r);
+    run(DECAPS, 0, res, cyc);
+    report("tamper: a lifecycle bit flipped -> shadow mismatch: KILLED, tampered, keys wiped, commands refused",
+           int'(st[5] != 1'b1) + int'(st[2] != 1'b0) + int'(r != 3) + int'(res != R_KILLED) +
+           int'(st[18:17] != 2'd3));
 
     // 15 SPI + tamper (second instance) ----------------------------------------------------------
     // consecutive reads of different registers and a write/read of both CONFIG

@@ -45,6 +45,12 @@
 // of both RAMs is written 0 (64 clocks), then word 0 is read so the RAM output
 // registers hold 0 (no key or state material left anywhere).
 //
+// Fault detection: every RAM word carries an even-parity bit over its lane
+// (65-bit words), checked on every read once the RAMs have been wiped; the
+// column-parity registers C[x] carry one parity bit each, checked when RP uses
+// them. Per share, registered separately (the shares never meet in a check
+// gate). A mismatch raises perr: the command aborts with FAULT.
+//
 // msk = 0 (unmasked job): share 1 stays zero, its RAM is not clocked, r = 0.
 // MASKED = 0: the share-1 RAM and data path are not built.
 //
@@ -75,7 +81,8 @@ module pqse_keccak #(
   input  wire        go,
   output wire        busy,
   input  wire [63:0] rnd,
-  output wire        rnd_take
+  output wire        rnd_take,
+  output wire        perr        // parity error (RAM lane or column parity): a fault
 );
   localparam M1 = (MASKED != 0);
 
@@ -168,6 +175,11 @@ module pqse_keccak #(
   reg  [2:0]  wbx;                 // chi write-back: column of the lane
   reg         wby0;                // ... the lane is in plane 0
   reg         wbacc;               // ... goes into the parities (rounds 0..22)
+  reg  [4:0]  Cp0, Cp1;            // even parity of each C[x] lane, per share
+  reg         pchk;                // the RAMs were wiped: their parity bits are valid
+  reg         rv0, rv1;            // a lane was read last clock (share 0 / 1)
+  reg         pe0, pe1;            // RAM parity error, per share (registered)
+  reg         pc0, pc1;            // column-parity error, per share (registered)
   reg  [63:0] X0r, X1r, Y0r, Y1r;  // chi: DOM operands
   reg  [63:0] d00, d01, d10, d11;  // chi: DOM partial products
   reg         wbv;                 // chi: write-back pending (this clock)
@@ -189,18 +201,23 @@ module pqse_keccak #(
   reg  [5:0]  ra, wa;
   reg  [63:0] wd0, wd1;
   wire [63:0] q0, q1;
+  wire [64:0] q0p, q1p;            // lane + parity bit
+  wire        wp0 = ^wd0, wp1 = ^wd1;   // parity of the written lane
   // share 1 is clocked only when it can hold data: absorb / reads / wipe, or a masked
   // permutation (an unmasked one's last write-back lands in K_IDLE: not on share 1)
   wire        en1 = M1 && (mj || (ks == K_WIPE) || ((ks == K_IDLE) && !wbv));
 
-  pqse_ram_1r1w #(.AW(6), .DW(64), .RAMSTYLE(RAMSTYLE)) u_s0 (
-    .clk(clk), .we(we), .waddr(wa), .wdata(wd0), .re(re), .raddr(ra), .rdata(q0));
+  pqse_ram_1r1w #(.AW(6), .DW(65), .RAMSTYLE(RAMSTYLE)) u_s0 (
+    .clk(clk), .we(we), .waddr(wa), .wdata({wp0, wd0}), .re(re), .raddr(ra), .rdata(q0p));
+  assign q0 = q0p[63:0];
   generate
     if (M1) begin : g_s1
-      pqse_ram_1r1w #(.AW(6), .DW(64), .RAMSTYLE(RAMSTYLE)) u_s1 (
-        .clk(clk), .we(we & en1), .waddr(wa), .wdata(wd1), .re(re & en1), .raddr(ra), .rdata(q1));
+      pqse_ram_1r1w #(.AW(6), .DW(65), .RAMSTYLE(RAMSTYLE)) u_s1 (
+        .clk(clk), .we(we & en1), .waddr(wa), .wdata({wp1, wd1}), .re(re & en1), .raddr(ra), .rdata(q1p));
+      assign q1 = q1p[63:0];
     end else begin : g_n1
-      assign q1 = 64'd0;
+      assign q1p = 65'd0;
+      assign q1  = 64'd0;
     end
   endgenerate
 
@@ -223,6 +240,11 @@ module pqse_keccak #(
   wire [2:0]  cxp1 = m5({1'b0, cx} + 4'd1);           // RP: column x + 1
   wire [63:0] dd0  = C0v[{cxm1, 6'd0} +: 64] ^ rol(C0v[{cxp1, 6'd0} +: 64], 6'd1);  // RP: D of column cx, per share
   wire [63:0] dd1  = C1v[{cxm1, 6'd0} +: 64] ^ rol(C1v[{cxp1, 6'd0} +: 64], 6'd1);
+  // column-parity check of the two C lanes D uses (RP, the clock D is taken)
+  wire        cchk = (ks == K_RP) && iss && (cj == 3'd2);
+  wire        cbad0 = (^C0v[{cxm1, 6'd0} +: 64] ^ Cp0[cxm1]) | (^C0v[{cxp1, 6'd0} +: 64] ^ Cp0[cxp1]);
+  wire        cbad1 = (^C1v[{cxm1, 6'd0} +: 64] ^ Cp1[cxm1]) | (^C1v[{cxp1, 6'd0} +: 64] ^ Cp1[cxp1]);
+  assign perr = pe0 | pe1 | pc0 | pc1;    // each 0 unless a fault hit
 
   always @* begin
     re = 1'b0; ra = 6'd0; we = 1'b0; wa = 6'd0;
@@ -272,7 +294,16 @@ module pqse_keccak #(
       X0r <= 64'd0; X1r <= 64'd0; Y0r <= 64'd0; Y1r <= 64'd0;
       d00 <= 64'd0; d01 <= 64'd0; d10 <= 64'd0; d11 <= 64'd0;
       begin C0v <= 320'd0; C1v <= 320'd0; end
+      Cp0 <= 5'd0; Cp1 <= 5'd0; pchk <= 1'b0;
+      rv0 <= 1'b0; rv1 <= 1'b0; pe0 <= 1'b0; pe1 <= 1'b0; pc0 <= 1'b0; pc1 <= 1'b0;
     end else begin
+      // parity checks: a read lane (the clock after the read), the C lanes D uses
+      rv0 <= re && pchk;
+      rv1 <= re && en1 && pchk;
+      pe0 <= rv0 && (^q0p);
+      pe1 <= rv1 && (^q1p);
+      pc0 <= cchk && cbad0;
+      pc1 <= cchk && use1 && cbad1;
       // absorb: the lane is written the next clock (from apv, 0 outside an absorb).
       // Low power: apa / apv load only in an absorb clock and the clock after
       // it (back to 0), then hold 0 - their clock can be gated between absorbs
@@ -305,7 +336,11 @@ module pqse_keccak #(
       // after rnd_i has moved on)
       if (wbv && wbacc) begin
         C0v[{wbx, 6'd0} +: 64] <= wby0 ? wd0 : (C0v[{wbx, 6'd0} +: 64] ^ wd0);
-        if (use1) C1v[{wbx, 6'd0} +: 64] <= wby0 ? wd1 : (C1v[{wbx, 6'd0} +: 64] ^ wd1);
+        Cp0[wbx]               <= wby0 ? wp0 : (Cp0[wbx] ^ wp0);
+        if (use1) begin
+          C1v[{wbx, 6'd0} +: 64] <= wby0 ? wd1 : (C1v[{wbx, 6'd0} +: 64] ^ wd1);
+          Cp1[wbx]               <= wby0 ? wp1 : (Cp1[wbx] ^ wp1);
+        end
       end
 
       case (ks)
@@ -330,10 +365,11 @@ module pqse_keccak #(
           wcnt <= wcnt + 6'd1;
           T0 <= 64'd0; T1 <= 64'd0;
           if (wcnt == 6'd0)
-            begin C0v <= 320'd0; C1v <= 320'd0; end
+            begin C0v <= 320'd0; C1v <= 320'd0; Cp0 <= 5'd0; Cp1 <= 5'd0; end
           if (wcnt == 6'd63) begin
             ks    <= K_IDLE;
             clean <= 1'b1;
+            pchk  <= 1'b1;                               // every word now has a valid parity bit
           end
         end
 
@@ -353,7 +389,11 @@ module pqse_keccak #(
             T1 <= (dy == 3'd0) ? q1 : th1;
             if (dy == 3'd4) begin                        // C[x] = T ^ A[x + 20]
               C0v[{dx, 6'd0} +: 64] <= th0;
-              if (use1) C1v[{dx, 6'd0} +: 64] <= th1;
+              Cp0[dx]               <= ^th0;
+              if (use1) begin
+                C1v[{dx, 6'd0} +: 64] <= th1;
+                Cp1[dx]               <= ^th1;
+              end
             end
             if (dx == 3'd4 && dy == 3'd4) begin          // C[4] loaded this clock
               ks  <= K_RP;
@@ -425,7 +465,7 @@ module pqse_keccak #(
                   if (rnd_i == 5'd23) begin
                     ks <= K_IDLE;
                     // no state parity left behind (zeroization)
-                    begin C0v <= 320'd0; C1v <= 320'd0; end
+                    begin C0v <= 320'd0; C1v <= 320'd0; Cp0 <= 5'd0; Cp1 <= 5'd0; end
                   end else begin
                     // next round: C was accumulated by this round's write-backs
                     // (the last one lands next clock, in column 3, which D of
