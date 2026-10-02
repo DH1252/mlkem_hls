@@ -259,7 +259,9 @@ After reset the device is busy for ~3 k clocks (power-on wipe); wait for STATUS[
 | `../../scripts/pqse_model.py` | gadget, fuzzy-extractor, retry and shuffle math |
 | `../../scripts/pqse_sm_check.py` | independent KMAC check of the sealed messages |
 | `../../scripts/pqse_puf_stats.py` | PUF / TRNG statistics, failure rates from a measured bit-error rate |
-| `../../scripts/pqse_power.tcl` | OpenSTA power / timing script (`make se-power`) |
+| `../../scripts/pqse_power.tcl` | OpenSTA power / timing script (`make se-power`, `make se-power-vcd`) |
+| `../../scripts/pqse_lib2v.py`, `../sim/tb_pqse_gate.sv` | cell models from the Liberty file (incl. clock gates) and the pin-level testbench of the gate-level power run |
+| `../../scripts/power/` | SRAM macro wrapper, Liberty stubs and counting models (`RAM_MACRO=1`), energy per command (`pqse_energy.py`) |
 | `../../scripts/pqse_fit.py` | Tang Nano 20K fit report from Yosys `synth_gowin` (`make se-gowin`), with the largest modules |
 | `../../quartus/jtag/de10_nano_pqse.v`, `pqse_test.tcl`, `pqse_tvla_capture.tcl` | DE10-Nano top (KEY1 = tamper, GPIO_0[0] = trigger), System Console demo + raw dumps, TVLA capture runs |
 
@@ -272,7 +274,8 @@ make se-probe                    # the robust-probing check alone (--full: large
 make sim-se-tvla MASKED=1 N=200  # TVLA of the masked Decaps on a power model (expect: no leak)
 make sim-se-tvla MASKED=0 N=200  # positive control (expect: leaks)
 make se-area                     # Yosys gate count; SKY130_LIB=<.lib> for SkyWater 130 nm
-make se-power SKY130_LIB=<.lib>  # SKY130 power (vectorless, ACT=0.1) and the slowest path
+make se-power SKY130_LIB=<.lib>  # SKY130 power (vectorless, ACT=0.1) and the slowest path; RAM_MACRO=1: logic only
+make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1   # energy per KeyGen from a gate-level run (whole command, SAIF; GL_CMD=2: Encaps)
 make se-gowin                    # fit on the Tang Nano 20K (GW2AR-18), largest modules; PUF=0: without the PUF cells, PUF=bfly: butterfly cells
 make se-gowin-eda                # the same with Gowin EDA (gw_sh: GowinSynthesis, area goal, + place & route): the real fit
 cd quartus/jtag && quartus_sh -t build.tcl se    # DE10-Nano, then source pqse_test.tcl
@@ -288,7 +291,7 @@ cd quartus/jtag && quartus_sh -t build.tcl se    # DE10-Nano, then source pqse_t
 
 1. `make sim-se` — Python model and probing checks, then the RTL testbench: `TEST PASSED`, `SM CHECK PASSED`, `PROBING CHECK PASSED`, `MODEL CHECKS PASSED`.
 2. `make sim-se-tvla MASKED=1 N=200`, then with `SEED=2` and `pqse_tvla.py confirm`; `MASKED=0` must show leaks.
-3. `make se-gowin` (must say "fits"), `make se-area` and `make se-power SKY130_LIB=...` (MASKED=1 and 0) for the cost table of the proposal.
+3. `make se-gowin` (must say "fits"), `make se-area` and `make se-power SKY130_LIB=...` (MASKED=1 and 0) for the cost table of the proposal; `make se-power-vcd SKY130_LIB=... RAM_MACRO=1` for the energy per command (Verilator 5.036+ for SAIF; `pqse_energy.py` explains the SRAM energy assumptions).
 4. On the DE10-Nano: `build.tcl se`, `pqse_test.tcl` (all PASS), PUFRAW / TRNGRAW dumps through `pqse_puf_stats.py` on several boards, then a board TVLA with `pqse_tvla_capture.tcl`.
 5. Optional, for a tape-out: a netlist-level probing check of the synthesized gadgets (PROLEAD).
 
