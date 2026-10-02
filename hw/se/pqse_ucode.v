@@ -78,10 +78,9 @@ module pqse_ucode (
 );
   `include "pqse_defs.vh"
 
-  // the table below (combinational) followed by the output register: synthesis
-  // maps the pair to a ROM block (FPGA block RAM) instead of ~100 k gates of logic
-  reg [95:0] ins;
-  always @(posedge clk) if (en) q <= ins;
+  // the table below is a case statement inside the clocked block that loads q
+  // (the synchronous-ROM template of GowinSynthesis, Yosys and Quartus), so it
+  // maps to a ROM block (FPGA block RAM) instead of thousands of LUTs
 
   // ---- labels --------------------------------------------------------------------------
   localparam [9:0] X_BADIN = 10'd0, X_NOKEY = 10'd1, X_BADBLOB = 10'd2, X_DENIED = 10'd3,
@@ -281,504 +280,504 @@ module pqse_ucode (
                    Y0 = 4'd10, Y0B = 4'd11, Y1 = 4'd12, Y1B = 4'd13, Y2 = 4'd14, Y2B = 4'd15;
   localparam [8:0] RHO_OWN = B_EKOWN + 9'd144, RHO_PEER = B_XIN + 9'd144;
 
-  always @* begin
-    case (pc)
+  always @(posedge clk) begin
+    if (en) case (pc)
       // ---------------- failure exits ----------------
-      10'd0:   ins = u_end(R_BADIN);
-      10'd1:   ins = u_end(R_NOKEY);
-      10'd2:   ins = u_end(R_BADBLOB);
-      10'd3:   ins = u_end(R_DENIED);
-      10'd4:   ins = u_end(R_BADTAG);
-      10'd5:   ins = u_end(R_NOSK);
-      10'd6:   ins = u_end(R_REPLAY);
-      10'd7:   ins = u_end(R_PUF);
+      10'd0:   q <= u_end(R_BADIN);
+      10'd1:   q <= u_end(R_NOKEY);
+      10'd2:   q <= u_end(R_BADBLOB);
+      10'd3:   q <= u_end(R_DENIED);
+      10'd4:   q <= u_end(R_BADTAG);
+      10'd5:   q <= u_end(R_NOSK);
+      10'd6:   q <= u_end(R_REPLAY);
+      10'd7:   q <= u_end(R_PUF);
 
       // ---------------- KEYGEN / KGWRAP (16) ----------------
-      10'd16:  ins = u_set(ST_RESEED);
-      10'd17:  ins = u_br(BC_WRAP, L_PREC);                   // KGWRAP: KEK first (no key yet if it fails)
-      10'd18:  ins = u_br(BC_INJ, L_KGINJ);                   // L_KGSEED
-      10'd19:  ins = h_trng(E_D);
-      10'd20:  ins = h_trng(E_Z);
-      10'd21:  ins = u_br(BC_ALWAYS, L_KG);
-      10'd24:  ins = b2s(B_INJD, E_D);                        // TEST: injected d, z
-      10'd25:  ins = sremask(E_D);
-      10'd26:  ins = b2s(B_INJZ, E_Z);
-      10'd27:  ins = sremask(E_Z);
-      10'd28:  ins = u_br(BC_ALWAYS, L_KG);
+      10'd16:  q <= u_set(ST_RESEED);
+      10'd17:  q <= u_br(BC_WRAP, L_PREC);                   // KGWRAP: KEK first (no key yet if it fails)
+      10'd18:  q <= u_br(BC_INJ, L_KGINJ);                   // L_KGSEED
+      10'd19:  q <= h_trng(E_D);
+      10'd20:  q <= h_trng(E_Z);
+      10'd21:  q <= u_br(BC_ALWAYS, L_KG);
+      10'd24:  q <= b2s(B_INJD, E_D);                        // TEST: injected d, z
+      10'd25:  q <= sremask(E_D);
+      10'd26:  q <= b2s(B_INJZ, E_Z);
+      10'd27:  q <= sremask(E_Z);
+      10'd28:  q <= u_br(BC_ALWAYS, L_KG);
 
       // ---------------- UNWRAP (32) ----------------
-      10'd32:  ins = u_set(ST_RESEED);
-      10'd33:  ins = u_br(BC_ALWAYS, L_PREC);                 // PUF key -> KEK, back to L_UWK
-      10'd34:  ins = m_op(M_OKINI);                           // L_UWK
-      10'd35:  ins = h_tag(SNK_MCMP);                         // masked tag check
-      10'd36:  ins = m_op(M_OKCHK);                           // the two ok copies must agree
-      10'd37:  ins = m_op(M_OKOUT);
-      10'd38:  ins = u_br(BC_BAD, L_UWFAIL);
-      10'd39:  ins = b2s(B_BLOB_CT, E_D);
-      10'd40:  ins = b2s(B_BLOB_CT + 9'd4, E_Z);
-      10'd41:  ins = h_ks(E_D, E_Z);                          // d, z now masked plaintext
-      10'd42:  ins = szero(E_KEK);
-      10'd43:  ins = u_br(BC_ALWAYS, L_KG);
-      10'd44:  ins = szero(E_KEK);                            // L_UWFAIL
-      10'd45:  ins = u_br(BC_ALWAYS, X_BADBLOB);
+      10'd32:  q <= u_set(ST_RESEED);
+      10'd33:  q <= u_br(BC_ALWAYS, L_PREC);                 // PUF key -> KEK, back to L_UWK
+      10'd34:  q <= m_op(M_OKINI);                           // L_UWK
+      10'd35:  q <= h_tag(SNK_MCMP);                         // masked tag check
+      10'd36:  q <= m_op(M_OKCHK);                           // the two ok copies must agree
+      10'd37:  q <= m_op(M_OKOUT);
+      10'd38:  q <= u_br(BC_BAD, L_UWFAIL);
+      10'd39:  q <= b2s(B_BLOB_CT, E_D);
+      10'd40:  q <= b2s(B_BLOB_CT + 9'd4, E_Z);
+      10'd41:  q <= h_ks(E_D, E_Z);                          // d, z now masked plaintext
+      10'd42:  q <= szero(E_KEK);
+      10'd43:  q <= u_br(BC_ALWAYS, L_KG);
+      10'd44:  q <= szero(E_KEK);                            // L_UWFAIL
+      10'd45:  q <= u_br(BC_ALWAYS, X_BADBLOB);
 
       // ---------------- PUF key + check value -> KEK (48), KGWRAP and UNWRAP ----------------
-      10'd48:  ins = u_puf(PF_RECON, E_PUF, B_HELP);          // L_PREC: one read per bit
-      10'd49:  ins = h_kchk(E_PUF, E_TMP);
-      10'd50:  ins = scmpn(E_TMP, B_HELP_CHK, 4'd1);          // 64-bit check value
-      10'd51:  ins = u_br(BC_NBAD, L_PROK);
-      10'd52:  ins = u_set(ST_BADC);
-      10'd53:  ins = u_puf(PF_RECON3, E_PUF, B_HELP);         // retry: majority of 3 reads
-      10'd54:  ins = h_kchk(E_PUF, E_TMP);
-      10'd55:  ins = scmpn(E_TMP, B_HELP_CHK, 4'd1);
-      10'd56:  ins = u_br(BC_NBAD, L_PROK);
-      10'd57:  ins = u_set(ST_BADC);
-      10'd58:  ins = u_puf(PF_RECON5, E_PUF, B_HELP);         // retry: majority of 5 reads
-      10'd59:  ins = h_kchk(E_PUF, E_TMP);
-      10'd60:  ins = scmpn(E_TMP, B_HELP_CHK, 4'd1);
-      10'd61:  ins = u_br(BC_BAD, L_PFAIL);
-      10'd62:  ins = szero(E_TMP);                            // L_PROK
-      10'd63:  ins = h_kek(1'b0);
-      10'd64:  ins = szero(E_PUF);
-      10'd65:  ins = u_br(BC_WRAP, L_KGSEED);                 // KGWRAP: on to KeyGen
-      10'd66:  ins = u_br(BC_ALWAYS, L_UWK);                  // UNWRAP: on to the tag check
-      10'd68:  ins = szero(E_PUF);                            // L_PFAIL
-      10'd69:  ins = szero(E_TMP);
-      10'd70:  ins = u_br(BC_ALWAYS, X_PUF);
+      10'd48:  q <= u_puf(PF_RECON, E_PUF, B_HELP);          // L_PREC: one read per bit
+      10'd49:  q <= h_kchk(E_PUF, E_TMP);
+      10'd50:  q <= scmpn(E_TMP, B_HELP_CHK, 4'd1);          // 64-bit check value
+      10'd51:  q <= u_br(BC_NBAD, L_PROK);
+      10'd52:  q <= u_set(ST_BADC);
+      10'd53:  q <= u_puf(PF_RECON3, E_PUF, B_HELP);         // retry: majority of 3 reads
+      10'd54:  q <= h_kchk(E_PUF, E_TMP);
+      10'd55:  q <= scmpn(E_TMP, B_HELP_CHK, 4'd1);
+      10'd56:  q <= u_br(BC_NBAD, L_PROK);
+      10'd57:  q <= u_set(ST_BADC);
+      10'd58:  q <= u_puf(PF_RECON5, E_PUF, B_HELP);         // retry: majority of 5 reads
+      10'd59:  q <= h_kchk(E_PUF, E_TMP);
+      10'd60:  q <= scmpn(E_TMP, B_HELP_CHK, 4'd1);
+      10'd61:  q <= u_br(BC_BAD, L_PFAIL);
+      10'd62:  q <= szero(E_TMP);                            // L_PROK
+      10'd63:  q <= h_kek(1'b0);
+      10'd64:  q <= szero(E_PUF);
+      10'd65:  q <= u_br(BC_WRAP, L_KGSEED);                 // KGWRAP: on to KeyGen
+      10'd66:  q <= u_br(BC_ALWAYS, L_UWK);                  // UNWRAP: on to the tag check
+      10'd68:  q <= szero(E_PUF);                            // L_PFAIL
+      10'd69:  q <= szero(E_TMP);
+      10'd70:  q <= u_br(BC_ALWAYS, X_PUF);
 
       // ---------------- KeyGen core (80), masked ----------------
-      10'd80:  ins = u_hash(RATE_72, 1'b0, 1'b1, SRC_SEED, sa(E_D), 8'd4, SRC_NONE, 9'd0, 8'd0,
+      10'd80:  q <= u_hash(RATE_72, 1'b0, 1'b1, SRC_SEED, sa(E_D), 8'd4, SRC_NONE, 9'd0, 8'd0,
                             2'd1, 16'h0003, SNK_SEED, E_RHO, E_R, 8'd8, 4'd0, 4'd0, 1'b0); // (rho, sigma) = G(d || 3)
-      10'd81:  ins = s2b(E_RHO, RHO_OWN);                     // rho is public
-      10'd82:  ins = h_prf(E_R, 8'd0);                        // s_0 (shares)
-      10'd83:  ins = cbd(S0, S1, 1'b0);
-      10'd84:  ins = ntt(S0);
-      10'd85:  ins = ntt(S1);
-      10'd86:  ins = h_prf(E_R, 8'd1);                        // s_1
-      10'd87:  ins = cbd(S2, S3, 1'b0);
-      10'd88:  ins = ntt(S2);
-      10'd89:  ins = ntt(S3);
-      10'd90:  ins = h_prf(E_R, 8'd2);                        // s_2
-      10'd91:  ins = cbd(S4, S5, 1'b0);
-      10'd92:  ins = ntt(S4);
-      10'd93:  ins = ntt(S5);
-      10'd94:  ins = h_prf(E_R, 8'd3);                        // e_0
-      10'd95:  ins = cbd(Y0, Y0B, 1'b0);
-      10'd96:  ins = ntt(Y0);
-      10'd97:  ins = ntt(Y0B);
-      10'd98:  ins = h_prf(E_R, 8'd4);                        // e_1
-      10'd99:  ins = cbd(Y1, Y1B, 1'b0);
-      10'd100: ins = ntt(Y1);
-      10'd101: ins = ntt(Y1B);
-      10'd102: ins = h_prf(E_R, 8'd5);                        // e_2
-      10'd103: ins = cbd(Y2, Y2B, 1'b0);
-      10'd104: ins = ntt(Y2);
-      10'd105: ins = ntt(Y2B);
+      10'd81:  q <= s2b(E_RHO, RHO_OWN);                     // rho is public
+      10'd82:  q <= h_prf(E_R, 8'd0);                        // s_0 (shares)
+      10'd83:  q <= cbd(S0, S1, 1'b0);
+      10'd84:  q <= ntt(S0);
+      10'd85:  q <= ntt(S1);
+      10'd86:  q <= h_prf(E_R, 8'd1);                        // s_1
+      10'd87:  q <= cbd(S2, S3, 1'b0);
+      10'd88:  q <= ntt(S2);
+      10'd89:  q <= ntt(S3);
+      10'd90:  q <= h_prf(E_R, 8'd2);                        // s_2
+      10'd91:  q <= cbd(S4, S5, 1'b0);
+      10'd92:  q <= ntt(S4);
+      10'd93:  q <= ntt(S5);
+      10'd94:  q <= h_prf(E_R, 8'd3);                        // e_0
+      10'd95:  q <= cbd(Y0, Y0B, 1'b0);
+      10'd96:  q <= ntt(Y0);
+      10'd97:  q <= ntt(Y0B);
+      10'd98:  q <= h_prf(E_R, 8'd4);                        // e_1
+      10'd99:  q <= cbd(Y1, Y1B, 1'b0);
+      10'd100: q <= ntt(Y1);
+      10'd101: q <= ntt(Y1B);
+      10'd102: q <= h_prf(E_R, 8'd5);                        // e_2
+      10'd103: q <= cbd(Y2, Y2B, 1'b0);
+      10'd104: q <= ntt(Y2);
+      10'd105: q <= ntt(Y2B);
       // t^_i = e^_i + sum_j A^[i][j] o s^_j, per share; A^[i][j] = SampleNTT(rho || j || i)
-      10'd106: ins = h_xof(RHO_OWN, 8'd0, 8'd0, S_T);
-      10'd107: ins = pwm(1'b1, Y0,  S_T, S0);
-      10'd108: ins = pwm(1'b1, Y0B, S_T, S1);
-      10'd109: ins = h_xof(RHO_OWN, 8'd1, 8'd0, S_T);
-      10'd110: ins = pwm(1'b1, Y0,  S_T, S2);
-      10'd111: ins = pwm(1'b1, Y0B, S_T, S3);
-      10'd112: ins = h_xof(RHO_OWN, 8'd2, 8'd0, S_T);
-      10'd113: ins = pwm(1'b1, Y0,  S_T, S4);
-      10'd114: ins = pwm(1'b1, Y0B, S_T, S5);
-      10'd115: ins = padd(Y0, Y0B);                           // t^_0 is public: unmask
-      10'd116: ins = enc12(Y0, B_EKOWN);
-      10'd117: ins = h_xof(RHO_OWN, 8'd0, 8'd1, S_T);
-      10'd118: ins = pwm(1'b1, Y1,  S_T, S0);
-      10'd119: ins = pwm(1'b1, Y1B, S_T, S1);
-      10'd120: ins = h_xof(RHO_OWN, 8'd1, 8'd1, S_T);
-      10'd121: ins = pwm(1'b1, Y1,  S_T, S2);
-      10'd122: ins = pwm(1'b1, Y1B, S_T, S3);
-      10'd123: ins = h_xof(RHO_OWN, 8'd2, 8'd1, S_T);
-      10'd124: ins = pwm(1'b1, Y1,  S_T, S4);
-      10'd125: ins = pwm(1'b1, Y1B, S_T, S5);
-      10'd126: ins = padd(Y1, Y1B);
-      10'd127: ins = enc12(Y1, B_EKOWN + 9'd48);
-      10'd128: ins = h_xof(RHO_OWN, 8'd0, 8'd2, S_T);
-      10'd129: ins = pwm(1'b1, Y2,  S_T, S0);
-      10'd130: ins = pwm(1'b1, Y2B, S_T, S1);
-      10'd131: ins = h_xof(RHO_OWN, 8'd1, 8'd2, S_T);
-      10'd132: ins = pwm(1'b1, Y2,  S_T, S2);
-      10'd133: ins = pwm(1'b1, Y2B, S_T, S3);
-      10'd134: ins = h_xof(RHO_OWN, 8'd2, 8'd2, S_T);
-      10'd135: ins = pwm(1'b1, Y2,  S_T, S4);
-      10'd136: ins = pwm(1'b1, Y2B, S_T, S5);
-      10'd137: ins = padd(Y2, Y2B);
-      10'd138: ins = enc12(Y2, B_EKOWN + 9'd96);
-      10'd139: ins = h_hbuf(B_EKOWN, 8'd148, E_H);            // H(ek)
-      10'd140: ins = u_set(ST_KEYV);                          // s^ (S0..S5) and z stay masked
-      10'd141: ins = u_br(BC_WRAP, L_WRAP);
-      10'd142: ins = u_br(BC_ALWAYS, L_KGEND);
+      10'd106: q <= h_xof(RHO_OWN, 8'd0, 8'd0, S_T);
+      10'd107: q <= pwm(1'b1, Y0,  S_T, S0);
+      10'd108: q <= pwm(1'b1, Y0B, S_T, S1);
+      10'd109: q <= h_xof(RHO_OWN, 8'd1, 8'd0, S_T);
+      10'd110: q <= pwm(1'b1, Y0,  S_T, S2);
+      10'd111: q <= pwm(1'b1, Y0B, S_T, S3);
+      10'd112: q <= h_xof(RHO_OWN, 8'd2, 8'd0, S_T);
+      10'd113: q <= pwm(1'b1, Y0,  S_T, S4);
+      10'd114: q <= pwm(1'b1, Y0B, S_T, S5);
+      10'd115: q <= padd(Y0, Y0B);                           // t^_0 is public: unmask
+      10'd116: q <= enc12(Y0, B_EKOWN);
+      10'd117: q <= h_xof(RHO_OWN, 8'd0, 8'd1, S_T);
+      10'd118: q <= pwm(1'b1, Y1,  S_T, S0);
+      10'd119: q <= pwm(1'b1, Y1B, S_T, S1);
+      10'd120: q <= h_xof(RHO_OWN, 8'd1, 8'd1, S_T);
+      10'd121: q <= pwm(1'b1, Y1,  S_T, S2);
+      10'd122: q <= pwm(1'b1, Y1B, S_T, S3);
+      10'd123: q <= h_xof(RHO_OWN, 8'd2, 8'd1, S_T);
+      10'd124: q <= pwm(1'b1, Y1,  S_T, S4);
+      10'd125: q <= pwm(1'b1, Y1B, S_T, S5);
+      10'd126: q <= padd(Y1, Y1B);
+      10'd127: q <= enc12(Y1, B_EKOWN + 9'd48);
+      10'd128: q <= h_xof(RHO_OWN, 8'd0, 8'd2, S_T);
+      10'd129: q <= pwm(1'b1, Y2,  S_T, S0);
+      10'd130: q <= pwm(1'b1, Y2B, S_T, S1);
+      10'd131: q <= h_xof(RHO_OWN, 8'd1, 8'd2, S_T);
+      10'd132: q <= pwm(1'b1, Y2,  S_T, S2);
+      10'd133: q <= pwm(1'b1, Y2B, S_T, S3);
+      10'd134: q <= h_xof(RHO_OWN, 8'd2, 8'd2, S_T);
+      10'd135: q <= pwm(1'b1, Y2,  S_T, S4);
+      10'd136: q <= pwm(1'b1, Y2B, S_T, S5);
+      10'd137: q <= padd(Y2, Y2B);
+      10'd138: q <= enc12(Y2, B_EKOWN + 9'd96);
+      10'd139: q <= h_hbuf(B_EKOWN, 8'd148, E_H);            // H(ek)
+      10'd140: q <= u_set(ST_KEYV);                          // s^ (S0..S5) and z stay masked
+      10'd141: q <= u_br(BC_WRAP, L_WRAP);
+      10'd142: q <= u_br(BC_ALWAYS, L_KGEND);
 
       // ---------------- wrap (144), KGWRAP only: the KEK is already in E_KEK ----------------
-      10'd144: ins = h_trng(E_TMP);
-      10'd145: ins = s2bn(E_TMP, B_BLOB_NONCE, 4'd2);         // nonce (2 lanes)
-      10'd146: ins = s2s(E_D, E_W0);
-      10'd147: ins = s2s(E_Z, E_W1);
-      10'd148: ins = h_ks(E_W0, E_W1);
-      10'd149: ins = s2b(E_W0, B_BLOB_CT);                    // ciphertext is public
-      10'd150: ins = s2b(E_W1, B_BLOB_CT + 9'd4);
-      10'd151: ins = h_tag(SNK_SEED);
-      10'd152: ins = s2b(E_TAG, B_BLOB_TAG);
-      10'd153: ins = szero(E_W0);
-      10'd154: ins = szero(E_W1);
-      10'd155: ins = szero(E_KEK);
+      10'd144: q <= h_trng(E_TMP);
+      10'd145: q <= s2bn(E_TMP, B_BLOB_NONCE, 4'd2);         // nonce (2 lanes)
+      10'd146: q <= s2s(E_D, E_W0);
+      10'd147: q <= s2s(E_Z, E_W1);
+      10'd148: q <= h_ks(E_W0, E_W1);
+      10'd149: q <= s2b(E_W0, B_BLOB_CT);                    // ciphertext is public
+      10'd150: q <= s2b(E_W1, B_BLOB_CT + 9'd4);
+      10'd151: q <= h_tag(SNK_SEED);
+      10'd152: q <= s2b(E_TAG, B_BLOB_TAG);
+      10'd153: q <= szero(E_W0);
+      10'd154: q <= szero(E_W1);
+      10'd155: q <= szero(E_KEK);
 
       // ---------------- KeyGen end (156) ----------------
-      10'd156: ins = szero(E_D);
-      10'd157: ins = szero(E_R);
-      10'd158: ins = szero(E_RHO);
-      10'd159: ins = szero(E_TMP);
-      10'd160: ins = szero(E_CBD);                            // PRF scratch (and E_TAG)
-      10'd161: ins = szero(E_CBD + 4'd1);
-      10'd162: ins = szero(E_CBD + 4'd2);
-      10'd163: ins = szero(E_CBD + 4'd3);
-      10'd164: ins = pzero(S_T);
-      10'd165: ins = pzero(Y0);
-      10'd166: ins = pzero(Y0B);
-      10'd167: ins = pzero(Y1);
-      10'd168: ins = pzero(Y1B);
-      10'd169: ins = pzero(Y2);
-      10'd170: ins = pzero(Y2B);
-      10'd171: ins = u_end(R_OK);
+      10'd156: q <= szero(E_D);
+      10'd157: q <= szero(E_R);
+      10'd158: q <= szero(E_RHO);
+      10'd159: q <= szero(E_TMP);
+      10'd160: q <= szero(E_CBD);                            // PRF scratch (and E_TAG)
+      10'd161: q <= szero(E_CBD + 4'd1);
+      10'd162: q <= szero(E_CBD + 4'd2);
+      10'd163: q <= szero(E_CBD + 4'd3);
+      10'd164: q <= pzero(S_T);
+      10'd165: q <= pzero(Y0);
+      10'd166: q <= pzero(Y0B);
+      10'd167: q <= pzero(Y1);
+      10'd168: q <= pzero(Y1B);
+      10'd169: q <= pzero(Y2);
+      10'd170: q <= pzero(Y2B);
+      10'd171: q <= u_end(R_OK);
 
       // ---------------- ENCAPS (192), masked ----------------
-      10'd192: ins = u_set(ST_RESEED);
-      10'd193: ins = pzero(S_Z);                              // the all-zero slot (precharge reads)
-      10'd194: ins = dec(DM_CHK, 4'd12, 1'b1, B_XIN,          S_T);   // ek modulus check
-      10'd195: ins = dec(DM_CHK, 4'd12, 1'b1, B_XIN + 9'd48,  S_T);
-      10'd196: ins = dec(DM_CHK, 4'd12, 1'b1, B_XIN + 9'd96,  S_T);
-      10'd197: ins = u_br(BC_BAD, X_BADIN);
-      10'd198: ins = u_br(BC_INJ, 10'd201);
-      10'd199: ins = h_trng(E_M);
-      10'd200: ins = u_br(BC_ALWAYS, 10'd203);
-      10'd201: ins = b2s(B_INJM, E_M);                        // TEST: injected m
-      10'd202: ins = sremask(E_M);
-      10'd203: ins = h_hbuf(B_XIN, 8'd148, E_PH);             // H(ek)
-      10'd204: ins = h_g(E_M, E_PH, E_K1, E_R);               // (K, r) = G(m || H(ek))
-      10'd205: ins = h_prf(E_R, 8'd0);                        // y_0 (E_PH is scratch from here)
-      10'd206: ins = cbd(Y0, Y0B, 1'b0);
-      10'd207: ins = ntt(Y0);
-      10'd208: ins = ntt(Y0B);
-      10'd209: ins = h_prf(E_R, 8'd1);                        // y_1
-      10'd210: ins = cbd(Y1, Y1B, 1'b0);
-      10'd211: ins = ntt(Y1);
-      10'd212: ins = ntt(Y1B);
-      10'd213: ins = h_prf(E_R, 8'd2);                        // y_2
-      10'd214: ins = cbd(Y2, Y2B, 1'b0);
-      10'd215: ins = ntt(Y2);
-      10'd216: ins = ntt(Y2B);
+      10'd192: q <= u_set(ST_RESEED);
+      10'd193: q <= pzero(S_Z);                              // the all-zero slot (precharge reads)
+      10'd194: q <= dec(DM_CHK, 4'd12, 1'b1, B_XIN,          S_T);   // ek modulus check
+      10'd195: q <= dec(DM_CHK, 4'd12, 1'b1, B_XIN + 9'd48,  S_T);
+      10'd196: q <= dec(DM_CHK, 4'd12, 1'b1, B_XIN + 9'd96,  S_T);
+      10'd197: q <= u_br(BC_BAD, X_BADIN);
+      10'd198: q <= u_br(BC_INJ, 10'd201);
+      10'd199: q <= h_trng(E_M);
+      10'd200: q <= u_br(BC_ALWAYS, 10'd203);
+      10'd201: q <= b2s(B_INJM, E_M);                        // TEST: injected m
+      10'd202: q <= sremask(E_M);
+      10'd203: q <= h_hbuf(B_XIN, 8'd148, E_PH);             // H(ek)
+      10'd204: q <= h_g(E_M, E_PH, E_K1, E_R);               // (K, r) = G(m || H(ek))
+      10'd205: q <= h_prf(E_R, 8'd0);                        // y_0 (E_PH is scratch from here)
+      10'd206: q <= cbd(Y0, Y0B, 1'b0);
+      10'd207: q <= ntt(Y0);
+      10'd208: q <= ntt(Y0B);
+      10'd209: q <= h_prf(E_R, 8'd1);                        // y_1
+      10'd210: q <= cbd(Y1, Y1B, 1'b0);
+      10'd211: q <= ntt(Y1);
+      10'd212: q <= ntt(Y1B);
+      10'd213: q <= h_prf(E_R, 8'd2);                        // y_2
+      10'd214: q <= cbd(Y2, Y2B, 1'b0);
+      10'd215: q <= ntt(Y2);
+      10'd216: q <= ntt(Y2B);
       // u_i = INTT(sum_j A^[j][i] o y^_j) + e1_i, A^[j][i] = SampleNTT(rho || i || j)
-      10'd217: ins = h_xof(RHO_PEER, 8'd0, 8'd0, S_T);
-      10'd218: ins = pwm(1'b0, S_ACC0, S_T, Y0);
-      10'd219: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
-      10'd220: ins = h_xof(RHO_PEER, 8'd0, 8'd1, S_T);
-      10'd221: ins = pwm(1'b1, S_ACC0, S_T, Y1);
-      10'd222: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
-      10'd223: ins = h_xof(RHO_PEER, 8'd0, 8'd2, S_T);
-      10'd224: ins = pwm(1'b1, S_ACC0, S_T, Y2);
-      10'd225: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
-      10'd226: ins = intt(S_ACC0);
-      10'd227: ins = intt(S_ACC1);
-      10'd228: ins = h_prf(E_R, 8'd3);                        // + e1_0
-      10'd229: ins = cbd(S_ACC0, S_ACC1, 1'b1);
-      10'd230: ins = cmpro(4'd10, B_XOUT);                    // c1 part 0
-      10'd231: ins = h_xof(RHO_PEER, 8'd1, 8'd0, S_T);
-      10'd232: ins = pwm(1'b0, S_ACC0, S_T, Y0);
-      10'd233: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
-      10'd234: ins = h_xof(RHO_PEER, 8'd1, 8'd1, S_T);
-      10'd235: ins = pwm(1'b1, S_ACC0, S_T, Y1);
-      10'd236: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
-      10'd237: ins = h_xof(RHO_PEER, 8'd1, 8'd2, S_T);
-      10'd238: ins = pwm(1'b1, S_ACC0, S_T, Y2);
-      10'd239: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
-      10'd240: ins = intt(S_ACC0);
-      10'd241: ins = intt(S_ACC1);
-      10'd242: ins = h_prf(E_R, 8'd4);                        // + e1_1
-      10'd243: ins = cbd(S_ACC0, S_ACC1, 1'b1);
-      10'd244: ins = cmpro(4'd10, B_XOUT + 9'd40);
-      10'd245: ins = h_xof(RHO_PEER, 8'd2, 8'd0, S_T);
-      10'd246: ins = pwm(1'b0, S_ACC0, S_T, Y0);
-      10'd247: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
-      10'd248: ins = h_xof(RHO_PEER, 8'd2, 8'd1, S_T);
-      10'd249: ins = pwm(1'b1, S_ACC0, S_T, Y1);
-      10'd250: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
-      10'd251: ins = h_xof(RHO_PEER, 8'd2, 8'd2, S_T);
-      10'd252: ins = pwm(1'b1, S_ACC0, S_T, Y2);
-      10'd253: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
-      10'd254: ins = intt(S_ACC0);
-      10'd255: ins = intt(S_ACC1);
-      10'd256: ins = h_prf(E_R, 8'd5);                        // + e1_2
-      10'd257: ins = cbd(S_ACC0, S_ACC1, 1'b1);
-      10'd258: ins = cmpro(4'd10, B_XOUT + 9'd80);
+      10'd217: q <= h_xof(RHO_PEER, 8'd0, 8'd0, S_T);
+      10'd218: q <= pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd219: q <= pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd220: q <= h_xof(RHO_PEER, 8'd0, 8'd1, S_T);
+      10'd221: q <= pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd222: q <= pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd223: q <= h_xof(RHO_PEER, 8'd0, 8'd2, S_T);
+      10'd224: q <= pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd225: q <= pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd226: q <= intt(S_ACC0);
+      10'd227: q <= intt(S_ACC1);
+      10'd228: q <= h_prf(E_R, 8'd3);                        // + e1_0
+      10'd229: q <= cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd230: q <= cmpro(4'd10, B_XOUT);                    // c1 part 0
+      10'd231: q <= h_xof(RHO_PEER, 8'd1, 8'd0, S_T);
+      10'd232: q <= pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd233: q <= pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd234: q <= h_xof(RHO_PEER, 8'd1, 8'd1, S_T);
+      10'd235: q <= pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd236: q <= pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd237: q <= h_xof(RHO_PEER, 8'd1, 8'd2, S_T);
+      10'd238: q <= pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd239: q <= pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd240: q <= intt(S_ACC0);
+      10'd241: q <= intt(S_ACC1);
+      10'd242: q <= h_prf(E_R, 8'd4);                        // + e1_1
+      10'd243: q <= cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd244: q <= cmpro(4'd10, B_XOUT + 9'd40);
+      10'd245: q <= h_xof(RHO_PEER, 8'd2, 8'd0, S_T);
+      10'd246: q <= pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd247: q <= pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd248: q <= h_xof(RHO_PEER, 8'd2, 8'd1, S_T);
+      10'd249: q <= pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd250: q <= pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd251: q <= h_xof(RHO_PEER, 8'd2, 8'd2, S_T);
+      10'd252: q <= pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd253: q <= pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd254: q <= intt(S_ACC0);
+      10'd255: q <= intt(S_ACC1);
+      10'd256: q <= h_prf(E_R, 8'd5);                        // + e1_2
+      10'd257: q <= cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd258: q <= cmpro(4'd10, B_XOUT + 9'd80);
       // v = INTT(sum_j t^_j o y^_j) + e2 + Decompress_1(m)
-      10'd259: ins = dec(DM_WR, 4'd12, 1'b0, B_XIN,         S_T);
-      10'd260: ins = pwm(1'b0, S_ACC0, S_T, Y0);
-      10'd261: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
-      10'd262: ins = dec(DM_WR, 4'd12, 1'b0, B_XIN + 9'd48, S_T);
-      10'd263: ins = pwm(1'b1, S_ACC0, S_T, Y1);
-      10'd264: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
-      10'd265: ins = dec(DM_WR, 4'd12, 1'b0, B_XIN + 9'd96, S_T);
-      10'd266: ins = pwm(1'b1, S_ACC0, S_T, Y2);
-      10'd267: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
-      10'd268: ins = intt(S_ACC0);
-      10'd269: ins = intt(S_ACC1);
-      10'd270: ins = h_prf(E_R, 8'd6);                        // + e2
-      10'd271: ins = cbd(S_ACC0, S_ACC1, 1'b1);
-      10'd272: ins = mu(E_M);                                 // + mu (masked m)
-      10'd273: ins = cmpro(4'd4, B_XOUT + 9'd120);            // c2
-      10'd274: ins = s2s(E_K1, E_SK);                         // K -> session key (masked)
-      10'd275: ins = u_set(ST_SKV);                           // role: initiator
-      10'd276: ins = u_br(BC_KEXP, 10'd278);
-      10'd277: ins = u_br(BC_ALWAYS, 10'd279);
-      10'd278: ins = s2b(E_SK, B_K);                          // TEST / PERSO: K to the host
-      10'd279: ins = szero(E_M);
-      10'd280: ins = szero(E_R);
-      10'd281: ins = szero(E_K1);
-      10'd282: ins = szero(E_CBD);
-      10'd283: ins = szero(E_CBD + 4'd1);
-      10'd284: ins = szero(E_CBD + 4'd2);
-      10'd285: ins = szero(E_CBD + 4'd3);
-      10'd286: ins = pzero(S_ACC0);
-      10'd287: ins = pzero(S_ACC1);
-      10'd288: ins = pzero(Y0);
-      10'd289: ins = pzero(Y0B);
-      10'd290: ins = pzero(Y1);
-      10'd291: ins = pzero(Y1B);
-      10'd292: ins = pzero(Y2);
-      10'd293: ins = pzero(Y2B);
-      10'd294: ins = u_end(R_OK);
+      10'd259: q <= dec(DM_WR, 4'd12, 1'b0, B_XIN,         S_T);
+      10'd260: q <= pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd261: q <= pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd262: q <= dec(DM_WR, 4'd12, 1'b0, B_XIN + 9'd48, S_T);
+      10'd263: q <= pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd264: q <= pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd265: q <= dec(DM_WR, 4'd12, 1'b0, B_XIN + 9'd96, S_T);
+      10'd266: q <= pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd267: q <= pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd268: q <= intt(S_ACC0);
+      10'd269: q <= intt(S_ACC1);
+      10'd270: q <= h_prf(E_R, 8'd6);                        // + e2
+      10'd271: q <= cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd272: q <= mu(E_M);                                 // + mu (masked m)
+      10'd273: q <= cmpro(4'd4, B_XOUT + 9'd120);            // c2
+      10'd274: q <= s2s(E_K1, E_SK);                         // K -> session key (masked)
+      10'd275: q <= u_set(ST_SKV);                           // role: initiator
+      10'd276: q <= u_br(BC_KEXP, 10'd278);
+      10'd277: q <= u_br(BC_ALWAYS, 10'd279);
+      10'd278: q <= s2b(E_SK, B_K);                          // TEST / PERSO: K to the host
+      10'd279: q <= szero(E_M);
+      10'd280: q <= szero(E_R);
+      10'd281: q <= szero(E_K1);
+      10'd282: q <= szero(E_CBD);
+      10'd283: q <= szero(E_CBD + 4'd1);
+      10'd284: q <= szero(E_CBD + 4'd2);
+      10'd285: q <= szero(E_CBD + 4'd3);
+      10'd286: q <= pzero(S_ACC0);
+      10'd287: q <= pzero(S_ACC1);
+      10'd288: q <= pzero(Y0);
+      10'd289: q <= pzero(Y0B);
+      10'd290: q <= pzero(Y1);
+      10'd291: q <= pzero(Y1B);
+      10'd292: q <= pzero(Y2);
+      10'd293: q <= pzero(Y2B);
+      10'd294: q <= u_end(R_OK);
 
       // ---------------- DECAPS (320), masked ----------------
-      10'd320: ins = u_br(BC_NOKEY, X_NOKEY);
-      10'd321: ins = u_set(ST_RESEED);
-      10'd322: ins = pzero(S_Z);                              // (TVLA traces start here)
-      10'd323: ins = m_op(M_OKINI);
+      10'd320: q <= u_br(BC_NOKEY, X_NOKEY);
+      10'd321: q <= u_set(ST_RESEED);
+      10'd322: q <= pzero(S_Z);                              // (TVLA traces start here)
+      10'd323: q <= m_op(M_OKINI);
       // w = v' - INTT(s^T o NTT(u')), each share of s on its own
-      10'd324: ins = dec(DM_WR, 4'd10, 1'b0, B_XIN,         S_T);
-      10'd325: ins = ntt(S_T);
-      10'd326: ins = pwm(1'b0, S_ACC0, S0, S_T);
-      10'd327: ins = pwm(1'b0, S_ACC1, S1, S_T);
-      10'd328: ins = dec(DM_WR, 4'd10, 1'b0, B_XIN + 9'd40, S_T);
-      10'd329: ins = ntt(S_T);
-      10'd330: ins = pwm(1'b1, S_ACC0, S2, S_T);
-      10'd331: ins = pwm(1'b1, S_ACC1, S3, S_T);
-      10'd332: ins = dec(DM_WR, 4'd10, 1'b0, B_XIN + 9'd80, S_T);
-      10'd333: ins = ntt(S_T);
-      10'd334: ins = pwm(1'b1, S_ACC0, S4, S_T);
-      10'd335: ins = pwm(1'b1, S_ACC1, S5, S_T);
-      10'd336: ins = intt(S_ACC0);
-      10'd337: ins = intt(S_ACC1);
-      10'd338: ins = dec(DM_RSUB, 4'd4, 1'b0, B_XIN + 9'd120, S_ACC0);   // w0 = v' - acc0
+      10'd324: q <= dec(DM_WR, 4'd10, 1'b0, B_XIN,         S_T);
+      10'd325: q <= ntt(S_T);
+      10'd326: q <= pwm(1'b0, S_ACC0, S0, S_T);
+      10'd327: q <= pwm(1'b0, S_ACC1, S1, S_T);
+      10'd328: q <= dec(DM_WR, 4'd10, 1'b0, B_XIN + 9'd40, S_T);
+      10'd329: q <= ntt(S_T);
+      10'd330: q <= pwm(1'b1, S_ACC0, S2, S_T);
+      10'd331: q <= pwm(1'b1, S_ACC1, S3, S_T);
+      10'd332: q <= dec(DM_WR, 4'd10, 1'b0, B_XIN + 9'd80, S_T);
+      10'd333: q <= ntt(S_T);
+      10'd334: q <= pwm(1'b1, S_ACC0, S4, S_T);
+      10'd335: q <= pwm(1'b1, S_ACC1, S5, S_T);
+      10'd336: q <= intt(S_ACC0);
+      10'd337: q <= intt(S_ACC1);
+      10'd338: q <= dec(DM_RSUB, 4'd4, 1'b0, B_XIN + 9'd120, S_ACC0);   // w0 = v' - acc0
       // m' is decoded twice, each time with fresh masks and a fresh word order, and the
       // two results are compared share-wise (a fault in one decoding -> R_FAULT)
-      10'd339: ins = cmpr1(E_MP);                             // m'
-      10'd340: ins = cmpr1(E_CBD + 4'd1);                     // m' again (scratch entry)
-      10'd341: ins = seq(E_MP, E_CBD + 4'd1);
-      10'd342: ins = h_g(E_MP, E_H, E_K1, E_R);               // (K', r') = G(m' || h)
-      10'd343: ins = h_j(1'b0);                               // K-bar = J(z || c)
+      10'd339: q <= cmpr1(E_MP);                             // m'
+      10'd340: q <= cmpr1(E_CBD + 4'd1);                     // m' again (scratch entry)
+      10'd341: q <= seq(E_MP, E_CBD + 4'd1);
+      10'd342: q <= h_g(E_MP, E_H, E_K1, E_R);               // (K', r') = G(m' || h)
+      10'd343: q <= h_j(1'b0);                               // K-bar = J(z || c)
       // re-encryption with masked y, e1, e2
-      10'd344: ins = h_prf(E_R, 8'd0);
-      10'd345: ins = cbd(Y0, Y0B, 1'b0);
-      10'd346: ins = ntt(Y0);
-      10'd347: ins = ntt(Y0B);
-      10'd348: ins = h_prf(E_R, 8'd1);
-      10'd349: ins = cbd(Y1, Y1B, 1'b0);
-      10'd350: ins = ntt(Y1);
-      10'd351: ins = ntt(Y1B);
-      10'd352: ins = h_prf(E_R, 8'd2);
-      10'd353: ins = cbd(Y2, Y2B, 1'b0);
-      10'd354: ins = ntt(Y2);
-      10'd355: ins = ntt(Y2B);
+      10'd344: q <= h_prf(E_R, 8'd0);
+      10'd345: q <= cbd(Y0, Y0B, 1'b0);
+      10'd346: q <= ntt(Y0);
+      10'd347: q <= ntt(Y0B);
+      10'd348: q <= h_prf(E_R, 8'd1);
+      10'd349: q <= cbd(Y1, Y1B, 1'b0);
+      10'd350: q <= ntt(Y1);
+      10'd351: q <= ntt(Y1B);
+      10'd352: q <= h_prf(E_R, 8'd2);
+      10'd353: q <= cbd(Y2, Y2B, 1'b0);
+      10'd354: q <= ntt(Y2);
+      10'd355: q <= ntt(Y2B);
       // u_0
-      10'd356: ins = h_xof(RHO_OWN, 8'd0, 8'd0, S_T);
-      10'd357: ins = pwm(1'b0, S_ACC0, S_T, Y0);
-      10'd358: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
-      10'd359: ins = h_xof(RHO_OWN, 8'd0, 8'd1, S_T);
-      10'd360: ins = pwm(1'b1, S_ACC0, S_T, Y1);
-      10'd361: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
-      10'd362: ins = h_xof(RHO_OWN, 8'd0, 8'd2, S_T);
-      10'd363: ins = pwm(1'b1, S_ACC0, S_T, Y2);
-      10'd364: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
-      10'd365: ins = intt(S_ACC0);
-      10'd366: ins = intt(S_ACC1);
-      10'd367: ins = h_prf(E_R, 8'd3);                        // + e1_0
-      10'd368: ins = cbd(S_ACC0, S_ACC1, 1'b1);
-      10'd369: ins = cmprc(4'd10, B_XIN);
+      10'd356: q <= h_xof(RHO_OWN, 8'd0, 8'd0, S_T);
+      10'd357: q <= pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd358: q <= pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd359: q <= h_xof(RHO_OWN, 8'd0, 8'd1, S_T);
+      10'd360: q <= pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd361: q <= pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd362: q <= h_xof(RHO_OWN, 8'd0, 8'd2, S_T);
+      10'd363: q <= pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd364: q <= pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd365: q <= intt(S_ACC0);
+      10'd366: q <= intt(S_ACC1);
+      10'd367: q <= h_prf(E_R, 8'd3);                        // + e1_0
+      10'd368: q <= cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd369: q <= cmprc(4'd10, B_XIN);
       // u_1
-      10'd370: ins = h_xof(RHO_OWN, 8'd1, 8'd0, S_T);
-      10'd371: ins = pwm(1'b0, S_ACC0, S_T, Y0);
-      10'd372: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
-      10'd373: ins = h_xof(RHO_OWN, 8'd1, 8'd1, S_T);
-      10'd374: ins = pwm(1'b1, S_ACC0, S_T, Y1);
-      10'd375: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
-      10'd376: ins = h_xof(RHO_OWN, 8'd1, 8'd2, S_T);
-      10'd377: ins = pwm(1'b1, S_ACC0, S_T, Y2);
-      10'd378: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
-      10'd379: ins = intt(S_ACC0);
-      10'd380: ins = intt(S_ACC1);
-      10'd381: ins = h_prf(E_R, 8'd4);                        // + e1_1
-      10'd382: ins = cbd(S_ACC0, S_ACC1, 1'b1);
-      10'd383: ins = cmprc(4'd10, B_XIN + 9'd40);
+      10'd370: q <= h_xof(RHO_OWN, 8'd1, 8'd0, S_T);
+      10'd371: q <= pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd372: q <= pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd373: q <= h_xof(RHO_OWN, 8'd1, 8'd1, S_T);
+      10'd374: q <= pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd375: q <= pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd376: q <= h_xof(RHO_OWN, 8'd1, 8'd2, S_T);
+      10'd377: q <= pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd378: q <= pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd379: q <= intt(S_ACC0);
+      10'd380: q <= intt(S_ACC1);
+      10'd381: q <= h_prf(E_R, 8'd4);                        // + e1_1
+      10'd382: q <= cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd383: q <= cmprc(4'd10, B_XIN + 9'd40);
       // u_2
-      10'd384: ins = h_xof(RHO_OWN, 8'd2, 8'd0, S_T);
-      10'd385: ins = pwm(1'b0, S_ACC0, S_T, Y0);
-      10'd386: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
-      10'd387: ins = h_xof(RHO_OWN, 8'd2, 8'd1, S_T);
-      10'd388: ins = pwm(1'b1, S_ACC0, S_T, Y1);
-      10'd389: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
-      10'd390: ins = h_xof(RHO_OWN, 8'd2, 8'd2, S_T);
-      10'd391: ins = pwm(1'b1, S_ACC0, S_T, Y2);
-      10'd392: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
-      10'd393: ins = intt(S_ACC0);
-      10'd394: ins = intt(S_ACC1);
-      10'd395: ins = h_prf(E_R, 8'd5);                        // + e1_2
-      10'd396: ins = cbd(S_ACC0, S_ACC1, 1'b1);
-      10'd397: ins = cmprc(4'd10, B_XIN + 9'd80);
+      10'd384: q <= h_xof(RHO_OWN, 8'd2, 8'd0, S_T);
+      10'd385: q <= pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd386: q <= pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd387: q <= h_xof(RHO_OWN, 8'd2, 8'd1, S_T);
+      10'd388: q <= pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd389: q <= pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd390: q <= h_xof(RHO_OWN, 8'd2, 8'd2, S_T);
+      10'd391: q <= pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd392: q <= pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd393: q <= intt(S_ACC0);
+      10'd394: q <= intt(S_ACC1);
+      10'd395: q <= h_prf(E_R, 8'd5);                        // + e1_2
+      10'd396: q <= cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd397: q <= cmprc(4'd10, B_XIN + 9'd80);
       // v
-      10'd398: ins = dec(DM_WR, 4'd12, 1'b0, B_EKOWN,         S_T);
-      10'd399: ins = pwm(1'b0, S_ACC0, S_T, Y0);
-      10'd400: ins = pwm(1'b0, S_ACC1, S_T, Y0B);
-      10'd401: ins = dec(DM_WR, 4'd12, 1'b0, B_EKOWN + 9'd48, S_T);
-      10'd402: ins = pwm(1'b1, S_ACC0, S_T, Y1);
-      10'd403: ins = pwm(1'b1, S_ACC1, S_T, Y1B);
-      10'd404: ins = dec(DM_WR, 4'd12, 1'b0, B_EKOWN + 9'd96, S_T);
-      10'd405: ins = pwm(1'b1, S_ACC0, S_T, Y2);
-      10'd406: ins = pwm(1'b1, S_ACC1, S_T, Y2B);
-      10'd407: ins = intt(S_ACC0);
-      10'd408: ins = intt(S_ACC1);
-      10'd409: ins = h_prf(E_R, 8'd6);                        // + e2
-      10'd410: ins = cbd(S_ACC0, S_ACC1, 1'b1);
-      10'd411: ins = mu(E_MP);                                // + mu
-      10'd412: ins = cmprc(4'd4, B_XIN + 9'd120);
-      10'd413: ins = m_op(M_OKCHK);                           // the two ok copies must agree
-      10'd414: ins = u_mask(M_SEL, 4'd0, E_SK, 4'd0, 1'b0, B_K, E_K1, E_KB, 1'b1); // K, kept masked
-      10'd415: ins = u_set(ST_SKVR);                          // role: responder
-      10'd416: ins = u_br(BC_KEXP, 10'd418);
-      10'd417: ins = u_br(BC_ALWAYS, 10'd419);
-      10'd418: ins = s2b(E_SK, B_K);                          // TEST / PERSO: K to the host
-      10'd419: ins = szero(E_MP);
-      10'd420: ins = szero(E_K1);
-      10'd421: ins = szero(E_R);
-      10'd422: ins = szero(E_KB);
-      10'd423: ins = szero(E_CBD);
-      10'd424: ins = szero(E_CBD + 4'd1);
-      10'd425: ins = szero(E_CBD + 4'd2);
-      10'd426: ins = szero(E_CBD + 4'd3);
-      10'd427: ins = pzero(S_ACC0);
-      10'd428: ins = pzero(S_ACC1);
-      10'd429: ins = pzero(Y0);
-      10'd430: ins = pzero(Y0B);
-      10'd431: ins = pzero(Y1);
-      10'd432: ins = pzero(Y1B);
-      10'd433: ins = pzero(Y2);
-      10'd434: ins = pzero(Y2B);
-      10'd435: ins = u_end(R_OK);
+      10'd398: q <= dec(DM_WR, 4'd12, 1'b0, B_EKOWN,         S_T);
+      10'd399: q <= pwm(1'b0, S_ACC0, S_T, Y0);
+      10'd400: q <= pwm(1'b0, S_ACC1, S_T, Y0B);
+      10'd401: q <= dec(DM_WR, 4'd12, 1'b0, B_EKOWN + 9'd48, S_T);
+      10'd402: q <= pwm(1'b1, S_ACC0, S_T, Y1);
+      10'd403: q <= pwm(1'b1, S_ACC1, S_T, Y1B);
+      10'd404: q <= dec(DM_WR, 4'd12, 1'b0, B_EKOWN + 9'd96, S_T);
+      10'd405: q <= pwm(1'b1, S_ACC0, S_T, Y2);
+      10'd406: q <= pwm(1'b1, S_ACC1, S_T, Y2B);
+      10'd407: q <= intt(S_ACC0);
+      10'd408: q <= intt(S_ACC1);
+      10'd409: q <= h_prf(E_R, 8'd6);                        // + e2
+      10'd410: q <= cbd(S_ACC0, S_ACC1, 1'b1);
+      10'd411: q <= mu(E_MP);                                // + mu
+      10'd412: q <= cmprc(4'd4, B_XIN + 9'd120);
+      10'd413: q <= m_op(M_OKCHK);                           // the two ok copies must agree
+      10'd414: q <= u_mask(M_SEL, 4'd0, E_SK, 4'd0, 1'b0, B_K, E_K1, E_KB, 1'b1); // K, kept masked
+      10'd415: q <= u_set(ST_SKVR);                          // role: responder
+      10'd416: q <= u_br(BC_KEXP, 10'd418);
+      10'd417: q <= u_br(BC_ALWAYS, 10'd419);
+      10'd418: q <= s2b(E_SK, B_K);                          // TEST / PERSO: K to the host
+      10'd419: q <= szero(E_MP);
+      10'd420: q <= szero(E_K1);
+      10'd421: q <= szero(E_R);
+      10'd422: q <= szero(E_KB);
+      10'd423: q <= szero(E_CBD);
+      10'd424: q <= szero(E_CBD + 4'd1);
+      10'd425: q <= szero(E_CBD + 4'd2);
+      10'd426: q <= szero(E_CBD + 4'd3);
+      10'd427: q <= pzero(S_ACC0);
+      10'd428: q <= pzero(S_ACC1);
+      10'd429: q <= pzero(Y0);
+      10'd430: q <= pzero(Y0B);
+      10'd431: q <= pzero(Y1);
+      10'd432: q <= pzero(Y1B);
+      10'd433: q <= pzero(Y2);
+      10'd434: q <= pzero(Y2B);
+      10'd435: q <= u_end(R_OK);
 
       // ---------------- SEAL (448) ----------------
-      10'd448: ins = u_br(BC_NOSK, X_NOSK);
-      10'd449: ins = trunc(1'b0);                             // L in 1..128? M bytes from L on := 0
-      10'd450: ins = u_br(BC_BAD, X_BADIN);                   // (no counter used up)
-      10'd451: ins = u_set(ST_RESEED);
-      10'd452: ins = ctr(IO_CTRW);                            // header: counter, L, 0, 0
-      10'd453: ins = u_set(ST_TXINC);                         // counted before use: never reused
-      10'd454: ins = u_br(BC_ROLE, 10'd459);
-      10'd455: ins = h_kks(KC_E1);                            // initiator -> responder
-      10'd456: ins = trunc(1'b0);                             // C bytes from L on := 0
-      10'd457: ins = h_ktag(SNK_SEED, KC_T1);
-      10'd458: ins = u_br(BC_ALWAYS, 10'd462);
-      10'd459: ins = h_kks(KC_E2);                            // responder -> initiator
-      10'd460: ins = trunc(1'b0);
-      10'd461: ins = h_ktag(SNK_SEED, KC_T2);
-      10'd462: ins = s2b(E_TAG, B_SM_TAG);
-      10'd463: ins = szero(E_TAG);
-      10'd464: ins = u_end(R_OK);
+      10'd448: q <= u_br(BC_NOSK, X_NOSK);
+      10'd449: q <= trunc(1'b0);                             // L in 1..128? M bytes from L on := 0
+      10'd450: q <= u_br(BC_BAD, X_BADIN);                   // (no counter used up)
+      10'd451: q <= u_set(ST_RESEED);
+      10'd452: q <= ctr(IO_CTRW);                            // header: counter, L, 0, 0
+      10'd453: q <= u_set(ST_TXINC);                         // counted before use: never reused
+      10'd454: q <= u_br(BC_ROLE, 10'd459);
+      10'd455: q <= h_kks(KC_E1);                            // initiator -> responder
+      10'd456: q <= trunc(1'b0);                             // C bytes from L on := 0
+      10'd457: q <= h_ktag(SNK_SEED, KC_T1);
+      10'd458: q <= u_br(BC_ALWAYS, 10'd462);
+      10'd459: q <= h_kks(KC_E2);                            // responder -> initiator
+      10'd460: q <= trunc(1'b0);
+      10'd461: q <= h_ktag(SNK_SEED, KC_T2);
+      10'd462: q <= s2b(E_TAG, B_SM_TAG);
+      10'd463: q <= szero(E_TAG);
+      10'd464: q <= u_end(R_OK);
 
       // ---------------- OPEN (480) ----------------
-      10'd480: ins = u_br(BC_NOSK, X_NOSK);
-      10'd481: ins = ctr(IO_CTRC);                            // replay window check
-      10'd482: ins = u_br(BC_BAD, X_REPLAY);
-      10'd483: ins = trunc(1'b1);                             // length check only
-      10'd484: ins = u_br(BC_BAD, X_BADTAG);                  // (a sender never seals such a length)
-      10'd485: ins = u_set(ST_RESEED);
-      10'd486: ins = m_op(M_OKINI);
-      10'd487: ins = u_br(BC_ROLE, 10'd490);
-      10'd488: ins = h_ktag(SNK_MCMP, KC_T2);                 // initiator opens R -> I
-      10'd489: ins = u_br(BC_ALWAYS, 10'd491);
-      10'd490: ins = h_ktag(SNK_MCMP, KC_T1);                 // responder opens I -> R
-      10'd491: ins = m_op(M_OKCHK);                           // the two ok copies must agree
-      10'd492: ins = m_op(M_OKOUT);
-      10'd493: ins = u_br(BC_BAD, X_BADTAG);                  // stays encrypted, window unchanged
-      10'd494: ins = u_set(ST_RXACC);                         // authentic: mark the counter
-      10'd495: ins = u_br(BC_ROLE, 10'd499);
-      10'd496: ins = h_kks(KC_E2);
-      10'd497: ins = trunc(1'b0);                             // plaintext bytes from L on := 0
-      10'd498: ins = u_end(R_OK);
-      10'd499: ins = h_kks(KC_E1);
-      10'd500: ins = trunc(1'b0);
-      10'd501: ins = u_end(R_OK);
+      10'd480: q <= u_br(BC_NOSK, X_NOSK);
+      10'd481: q <= ctr(IO_CTRC);                            // replay window check
+      10'd482: q <= u_br(BC_BAD, X_REPLAY);
+      10'd483: q <= trunc(1'b1);                             // length check only
+      10'd484: q <= u_br(BC_BAD, X_BADTAG);                  // (a sender never seals such a length)
+      10'd485: q <= u_set(ST_RESEED);
+      10'd486: q <= m_op(M_OKINI);
+      10'd487: q <= u_br(BC_ROLE, 10'd490);
+      10'd488: q <= h_ktag(SNK_MCMP, KC_T2);                 // initiator opens R -> I
+      10'd489: q <= u_br(BC_ALWAYS, 10'd491);
+      10'd490: q <= h_ktag(SNK_MCMP, KC_T1);                 // responder opens I -> R
+      10'd491: q <= m_op(M_OKCHK);                           // the two ok copies must agree
+      10'd492: q <= m_op(M_OKOUT);
+      10'd493: q <= u_br(BC_BAD, X_BADTAG);                  // stays encrypted, window unchanged
+      10'd494: q <= u_set(ST_RXACC);                         // authentic: mark the counter
+      10'd495: q <= u_br(BC_ROLE, 10'd499);
+      10'd496: q <= h_kks(KC_E2);
+      10'd497: q <= trunc(1'b0);                             // plaintext bytes from L on := 0
+      10'd498: q <= u_end(R_OK);
+      10'd499: q <= h_kks(KC_E1);
+      10'd500: q <= trunc(1'b0);
+      10'd501: q <= u_end(R_OK);
 
       // ---------------- IMPORT (512): TEST / PERSO ----------------
-      10'd512: ins = u_set(ST_RESEED);
-      10'd513: ins = h_hbuf(B_EKOWN, 8'd148, E_H);
-      10'd514: ins = scmpn(E_H, B_INJH, 4'd0);                // dk hash check (4 lanes)
-      10'd515: ins = u_br(BC_BAD, X_BADIN);
-      10'd516: ins = dec(DM_WR, 4'd12, 1'b0, B_XIN,         S0);
-      10'd517: ins = msplit(S0, S1);                          // s^_0 -> shares S0, S1
-      10'd518: ins = dec(DM_WR, 4'd12, 1'b0, B_XIN + 9'd48, S2);
-      10'd519: ins = msplit(S2, S3);
-      10'd520: ins = dec(DM_WR, 4'd12, 1'b0, B_XIN + 9'd96, S4);
-      10'd521: ins = msplit(S4, S5);
-      10'd522: ins = b2s(B_INJZ, E_Z);
-      10'd523: ins = sremask(E_Z);
-      10'd524: ins = u_set(ST_KEYV);
-      10'd525: ins = u_end(R_OK);
+      10'd512: q <= u_set(ST_RESEED);
+      10'd513: q <= h_hbuf(B_EKOWN, 8'd148, E_H);
+      10'd514: q <= scmpn(E_H, B_INJH, 4'd0);                // dk hash check (4 lanes)
+      10'd515: q <= u_br(BC_BAD, X_BADIN);
+      10'd516: q <= dec(DM_WR, 4'd12, 1'b0, B_XIN,         S0);
+      10'd517: q <= msplit(S0, S1);                          // s^_0 -> shares S0, S1
+      10'd518: q <= dec(DM_WR, 4'd12, 1'b0, B_XIN + 9'd48, S2);
+      10'd519: q <= msplit(S2, S3);
+      10'd520: q <= dec(DM_WR, 4'd12, 1'b0, B_XIN + 9'd96, S4);
+      10'd521: q <= msplit(S4, S5);
+      10'd522: q <= b2s(B_INJZ, E_Z);
+      10'd523: q <= sremask(E_Z);
+      10'd524: q <= u_set(ST_KEYV);
+      10'd525: q <= u_end(R_OK);
 
       // ---------------- ENROLL (528): TEST / PERSO ----------------
-      10'd528: ins = u_set(ST_RESEED);
-      10'd529: ins = h_trng(E_TMP);                           // k (masked)
-      10'd530: ins = u_puf(PF_ENROLL, E_TMP, B_HELP);         // helper -> 15 lanes, k canonical
-      10'd531: ins = h_kchk(E_TMP, E_W0);
-      10'd532: ins = s2bn(E_W0, B_HELP_CHK, 4'd1);            // check value -> helper lane 15
-      10'd533: ins = szero(E_W0);
-      10'd534: ins = szero(E_TMP);
-      10'd535: ins = u_end(R_OK);
+      10'd528: q <= u_set(ST_RESEED);
+      10'd529: q <= h_trng(E_TMP);                           // k (masked)
+      10'd530: q <= u_puf(PF_ENROLL, E_TMP, B_HELP);         // helper -> 15 lanes, k canonical
+      10'd531: q <= h_kchk(E_TMP, E_W0);
+      10'd532: q <= s2bn(E_W0, B_HELP_CHK, 4'd1);            // check value -> helper lane 15
+      10'd533: q <= szero(E_W0);
+      10'd534: q <= szero(E_TMP);
+      10'd535: q <= u_end(R_OK);
 
       // ---------------- PUFRAW (544) / TRNGRAW (548): TEST ----------------
-      10'd544: ins = u_puf(PF_RAW, 4'd0, B_XOUT);             // 960 bits -> 15 lanes
-      10'd545: ins = u_end(R_OK);
-      10'd548: ins = u_io(IO_T2B, DM_WR, 4'd0, 1'b0, 1'b0, B_XOUT, 4'd0, 4'd0, 4'd0); // 136 words
-      10'd549: ins = u_end(R_OK);
+      10'd544: q <= u_puf(PF_RAW, 4'd0, B_XOUT);             // 960 bits -> 15 lanes
+      10'd545: q <= u_end(R_OK);
+      10'd548: q <= u_io(IO_T2B, DM_WR, 4'd0, 1'b0, 1'b0, B_XOUT, 4'd0, 4'd0, 4'd0); // 136 words
+      10'd549: q <= u_end(R_OK);
 
       // ---------------- ZEROIZE (560) ----------------
-      10'd560: ins = pzero(4'd0);   10'd561: ins = pzero(4'd1);   10'd562: ins = pzero(4'd2);
-      10'd563: ins = pzero(4'd3);   10'd564: ins = pzero(4'd4);   10'd565: ins = pzero(4'd5);
-      10'd566: ins = pzero(4'd6);   10'd567: ins = pzero(4'd7);   10'd568: ins = pzero(4'd8);
-      10'd569: ins = pzero(4'd9);   10'd570: ins = pzero(4'd10);  10'd571: ins = pzero(4'd11);
-      10'd572: ins = pzero(4'd12);  10'd573: ins = pzero(4'd13);  10'd574: ins = pzero(4'd14);
-      10'd575: ins = pzero(4'd15);
-      10'd576: ins = szero(4'd0);   10'd577: ins = szero(4'd1);   10'd578: ins = szero(4'd2);
-      10'd579: ins = szero(4'd3);   10'd580: ins = szero(4'd4);   10'd581: ins = szero(4'd5);
-      10'd582: ins = szero(4'd6);   10'd583: ins = szero(4'd7);   10'd584: ins = szero(4'd8);
-      10'd585: ins = szero(4'd9);   10'd586: ins = szero(4'd10);  10'd587: ins = szero(4'd11);
-      10'd588: ins = szero(4'd12);  10'd589: ins = szero(4'd13);  10'd590: ins = szero(4'd14);
-      10'd591: ins = szero(4'd15);
-      10'd592: ins = s2b(E_TMP, B_K);                         // E_TMP is 0 now
-      10'd593: ins = s2b(E_TMP, B_TMP);
-      10'd594: ins = s2b(E_TMP, B_SM);                        // secure-message window
-      10'd595: ins = s2b(E_TMP, B_SM + 9'd4);
-      10'd596: ins = s2b(E_TMP, B_SM + 9'd8);
-      10'd597: ins = s2b(E_TMP, B_SM + 9'd12);
-      10'd598: ins = s2b(E_TMP, B_SM + 9'd16);
-      10'd599: ins = s2b(E_TMP, B_SM + 9'd20);
-      10'd600: ins = u_set(ST_KEYC);
-      10'd601: ins = u_set(ST_SKC);
-      10'd602: ins = u_end(R_OK);
+      10'd560: q <= pzero(4'd0);   10'd561: q <= pzero(4'd1);   10'd562: q <= pzero(4'd2);
+      10'd563: q <= pzero(4'd3);   10'd564: q <= pzero(4'd4);   10'd565: q <= pzero(4'd5);
+      10'd566: q <= pzero(4'd6);   10'd567: q <= pzero(4'd7);   10'd568: q <= pzero(4'd8);
+      10'd569: q <= pzero(4'd9);   10'd570: q <= pzero(4'd10);  10'd571: q <= pzero(4'd11);
+      10'd572: q <= pzero(4'd12);  10'd573: q <= pzero(4'd13);  10'd574: q <= pzero(4'd14);
+      10'd575: q <= pzero(4'd15);
+      10'd576: q <= szero(4'd0);   10'd577: q <= szero(4'd1);   10'd578: q <= szero(4'd2);
+      10'd579: q <= szero(4'd3);   10'd580: q <= szero(4'd4);   10'd581: q <= szero(4'd5);
+      10'd582: q <= szero(4'd6);   10'd583: q <= szero(4'd7);   10'd584: q <= szero(4'd8);
+      10'd585: q <= szero(4'd9);   10'd586: q <= szero(4'd10);  10'd587: q <= szero(4'd11);
+      10'd588: q <= szero(4'd12);  10'd589: q <= szero(4'd13);  10'd590: q <= szero(4'd14);
+      10'd591: q <= szero(4'd15);
+      10'd592: q <= s2b(E_TMP, B_K);                         // E_TMP is 0 now
+      10'd593: q <= s2b(E_TMP, B_TMP);
+      10'd594: q <= s2b(E_TMP, B_SM);                        // secure-message window
+      10'd595: q <= s2b(E_TMP, B_SM + 9'd4);
+      10'd596: q <= s2b(E_TMP, B_SM + 9'd8);
+      10'd597: q <= s2b(E_TMP, B_SM + 9'd12);
+      10'd598: q <= s2b(E_TMP, B_SM + 9'd16);
+      10'd599: q <= s2b(E_TMP, B_SM + 9'd20);
+      10'd600: q <= u_set(ST_KEYC);
+      10'd601: q <= u_set(ST_SKC);
+      10'd602: q <= u_end(R_OK);
 
-      default: ins = u_end(R_UNKNOWN);
+      default: q <= u_end(R_UNKNOWN);
     endcase
   end
 endmodule

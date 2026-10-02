@@ -47,8 +47,9 @@ module pqse_modq24 (
   // v5: floor(x * q / 2^24) instead of x mod q - the same use (a mask mod q
   // from 24 random bits) and the same bound on the bias (each value has
   // floor or ceil of 2^24 / q preimages, statistical distance < q / 2^24),
-  // but q = 2^11 + 2^10 + 2^8 + 1, so three adds and no multiplier (the
-  // Barrett version took two multipliers per instance, three instances)
-  wire [35:0] xq = {1'b0, x, 11'd0} + {2'b0, x, 10'd0} + {4'd0, x, 8'd0} + {12'd0, x};
+  // with one constant multiplication (Barrett took two per instance). On the
+  // 9K it goes to a DSP multiplier: as three adders (q = 2^11 + 2^10 + 2^8 + 1)
+  // it cost ~100 LUT / ALU per instance, and the LUTs are the scarce resource
+  wire [35:0] xq = x * 12'd3329;
   assign r = xq[35:24];                      // 0 .. q-1
 endmodule

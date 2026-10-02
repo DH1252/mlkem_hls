@@ -110,6 +110,16 @@ module pqse_io (
   reg         busy_r;
   assign busy = start | busy_r;
 
+  // x + y (sb = 0) or x - y (sb = 1) mod q: one adder / subtractor and one correction
+  function [11:0] asq(input [11:0] x, input [11:0] y, input sb);
+    reg [12:0] s, t;
+    begin
+      s   = sb ? ({1'b0, x} - {1'b0, y}) : ({1'b0, x} + {1'b0, y});
+      t   = sb ? (s + 13'd3329) : (s - 13'd3329);
+      asq = sb ? (s[12] ? t[11:0] : s[11:0]) : ((s >= 13'd3329) ? t[11:0] : s[11:0]);
+    end
+  endfunction
+
   function [15:0] w16(input [63:0] v, input [1:0] k);    // word k of a lane
     case (k)
       2'd0:    w16 = v[15:0];
@@ -166,8 +176,12 @@ module pqse_io (
   wire [11:0] yred  = ybig ? (y - 12'd3329) : y;
   wire [11:0] val   = j_cmp ? (ar[11:0] + {11'd0, rb}) : yred;
   wire [23:0] nw    = {v1q, v0q};
-  wire [23:0] dres  = (j_dm == DM_ADD)  ? {addq(rdata[23:12], v1q), addq(rdata[11:0], v0q)} :
-                      (j_dm == DM_RSUB) ? {subq(v1q, rdata[23:12]), subq(v0q, rdata[11:0])} : nw;
+  // ADD: slot + value, RSUB: value - slot; one add-or-subtract unit per coefficient
+  wire        d_sb  = (j_dm == DM_RSUB);
+  wire [23:0] d_x   = d_sb ? nw : rdata;
+  wire [23:0] d_y   = d_sb ? rdata : nw;
+  wire [23:0] dres  = ((j_dm == DM_ADD) || d_sb) ? {asq(d_x[23:12], d_y[23:12], d_sb),
+                                                    asq(d_x[11:0],  d_y[11:0],  d_sb)} : nw;
   wire        dec_done = (ci == 9'd256) && !wpend;
 
   localparam [2:0] E_RD = 3'd0, E_LD = 3'd1, E_CV = 3'd2, E_SH = 3'd3, E_FIN = 3'd4, E_DV = 3'd5;
