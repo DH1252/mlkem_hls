@@ -113,8 +113,8 @@ module pqse_puf_raw #(
   wire [31:0]  colv;            // per column: the released row's cell (excited rows neutral)
 `ifdef PQSE_PUF_BFLY
   // butterfly: the latch gates of a column (only the column being read is open)
-  reg  [31:0]  g_col;
-  always @(posedge clk) g_col <= 32'd1 << csel;
+  reg  [31:0]  pgate;
+  always @(posedge clk) pgate <= 32'd1 << csel;
 `endif
   genvar g, gc;
   generate
@@ -129,7 +129,7 @@ module pqse_puf_raw #(
 `endif
       for (gc = 0; gc < 32; gc = gc + 1) begin : g_cell
 `ifdef PQSE_PUF_BFLY
-        pqse_bflycell u_c (.x(x_row), .g(g_col[gc]), .q(qv[32*g + gc]));
+        pqse_bflycell u_c (.x(x_row), .g(pgate[gc]), .q(qv[32*g + gc]));
 `else
         pqse_pufcell u_c (.e(e_row), .q(qv[32*g + gc]));
 `endif
