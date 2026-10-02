@@ -328,20 +328,29 @@ ACT ?= 0.1
 # gate, with transition times of microseconds, which wrecks the timing report
 # and inflates the internal power (it grows with the input slew)
 PERIOD_PS ?= 20000
+# RAM_MACRO=1: the RAMs become black-box SRAM macros (scripts/power/
+# pqse_ram_macro.v replaces hw/se/pqse_mem.v; scripts/power/pqse_sram_lib.py
+# writes their Liberty stub: pins, 2 ns clock to data, no power). The report
+# then covers the logic only - built from flip-flops, the RAMs dominate the
+# power (every bit clocked every cycle) and their decode trees the timing.
+RAM_MACRO ?= 0
+PW_SRC    := $(if $(filter 1,$(RAM_MACRO)),$(filter-out hw/se/pqse_mem.v,$(SE_SRC)) scripts/power/pqse_ram_macro.v,$(SE_SRC))
+PW_RAMLIB := $(if $(filter 1,$(RAM_MACRO)),$(BUILD)/sepower/pqse_sram.lib,)
 se-power: | $(BUILD)
 	@test -n "$(SKY130_LIB)" || { echo "set SKY130_LIB=<path to sky130_fd_sc_hd__tt_025C_1v80.lib>"; exit 1; }
 	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
 	    echo "or use OpenROAD, which contains it: make se-power STA=openroad"; exit 1; }
 	mkdir -p $(BUILD)/sepower
-	yosys -q -l $(BUILD)/sepower/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(SE_SRC); \
+	$(if $(PW_RAMLIB),$(PYTHON) scripts/power/pqse_sram_lib.py $(PW_RAMLIB))
+	yosys -q -l $(BUILD)/sepower/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(PW_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
 	    delete t:\$$scopeinfo; \
 	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB) -D $(PERIOD_PS); opt_clean; \
 	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO; \
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
 	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(BUILD)/sepower/pqse_top_sky130.v
-	SKY130_LIB=$(SKY130_LIB) NETLIST=$(BUILD)/sepower/pqse_top_sky130.v ACT=$(ACT) VCD=$(VCD) SCOPE=$(SCOPE) \
-	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(BUILD)/sepower/power_m$(MASKED).txt
+	SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(BUILD)/sepower/pqse_top_sky130.v ACT=$(ACT) VCD=$(VCD) SCOPE=$(SCOPE) \
+	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(BUILD)/sepower/power_m$(MASKED)$(if $(PW_RAMLIB),_rammacro).txt
 
 # Switching activity for se-power from a gate-level simulation: the sky130
 # netlist (net names enumerated, so the VCD and the netlist OpenSTA reads use the
