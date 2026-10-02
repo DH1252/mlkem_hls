@@ -232,8 +232,9 @@ module pqse_pufcell (
   sky130_fd_sc_hd__nand2_1 u_a (.A(e), .B(qb), .Y(q));
   sky130_fd_sc_hd__nand2_1 u_b (.A(e), .B(q),  .Y(qb));
 `else
-  (* keep = 1 *) wire n_a;
-  (* keep = 1 *) wire n_b;
+  // keep: Yosys / Quartus; syn_keep: GowinSynthesis
+  (* keep = 1 *) wire n_a /* synthesis syn_keep = 1 */;
+  (* keep = 1 *) wire n_b /* synthesis syn_keep = 1 */;
   assign n_a = ~(e & n_b);
   assign n_b = ~(e & n_a);
   assign q   = n_a;
@@ -255,11 +256,17 @@ module pqse_bflycell (
   input  wire x,
   output wire q
 );
-  (* keep = 1 *) wire q_a;
-  (* keep = 1 *) wire q_b;
-  // gate pin: CLK in the Yosys / nextpnr cell library (G in Gowin's UG288)
-  (* keep = 1 *) DLC              u_a (.D(q_b), .CLK(1'b1), .CLEAR(x),  .Q(q_a));
+  (* keep = 1 *) wire q_a /* synthesis syn_keep = 1 */;
+  (* keep = 1 *) wire q_b /* synthesis syn_keep = 1 */;
+`ifdef PQSE_GOWIN_EDA
+  // Gowin EDA (GowinSynthesis, UG288): the latch gate pin is G
+  DLC #(.INIT(1'b0)) u_a (.D(q_b), .G(1'b1), .CLEAR(x),  .Q(q_a));
+  DLP #(.INIT(1'b1)) u_b (.D(q_a), .G(1'b1), .PRESET(x), .Q(q_b));
+`else
+  // Yosys / nextpnr cell library: the latch gate pin is CLK
+  (* keep = 1 *) DLC #(.INIT(1'b0)) u_a (.D(q_b), .CLK(1'b1), .CLEAR(x),  .Q(q_a));
   (* keep = 1 *) DLP #(.INIT(1'b1)) u_b (.D(q_a), .CLK(1'b1), .PRESET(x), .Q(q_b));
+`endif
   assign q = q_a;
 endmodule
 `endif

@@ -21,6 +21,7 @@
 #   make se-area   Yosys gate count of the secure element (MASKED=0/1)
 #   make se-power SKY130_LIB=...  SKY130 power + timing (Yosys + OpenSTA)
 #   make se-gowin [PUF=0|bfly] [MASKED=0] [FLAT=0]  fit on the Tang Nano 20K (GW2AR-18)
+#   make se-gowin-eda [PUF=0|bfly] [MASKED=0]  the same with GowinSynthesis + Gowin P&R (gw_sh)
 #   make ip        package the Platform Designer component (quartus/ip)
 #   make sw-emu    build + run the ARM program against a software model
 #   make sw-arm    cross-compile the ARM program for the DE10-Nano
@@ -62,7 +63,7 @@ BAMBU_SIM   := --generate-tb=../../hls/tb_accel.c --simulate --simulator=VERILAT
 VERILATOR_ROOT_DIR := $(shell $(VERILATOR) --getenv VERILATOR_ROOT 2>/dev/null)
 HLS_ENV := CPATH="$(VERILATOR_ROOT_DIR)/include/vltstd$${CPATH:+:$$CPATH}"
 
-.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-gowin se-probe ip sw-emu sw-arm vectors clean
+.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla se-area se-power se-gowin se-gowin-eda se-probe ip sw-emu sw-arm vectors clean
 
 all: test
 
@@ -276,6 +277,15 @@ se-gowin: | $(BUILD)
 	    | { grep -v -E '^(Warning: found logic loop|    cell .*(u_c|g_cell)|      [AB]\[0\] --> Y)' || true; }
 	@test $(PUF) = 1 && echo "(the PUF cells are cross-coupled gates by design: their 'logic loop' warnings are hidden)" || true
 	$(PYTHON) scripts/pqse_fit.py $(GW).log --modules $(GW)_modules.txt
+
+# The same fit with the vendor flow (Gowin EDA's gw_sh: GowinSynthesis with
+# -opt_goal area, then place & route, so the report is the real fit). Options as
+# for se-gowin; MAP=2 tries GowinSynthesis's LUT5-oriented mapping, STEP=syn
+# stops after synthesis. Reports: build/gowin/m<MASKED>_p<PUF>/impl/pnr/pqse.rpt.txt
+GW_SH ?= gw_sh
+se-gowin-eda:
+	PUF=$(PUF) MASKED=$(MASKED) MAP=$(MAP) STEP=$(STEP) \
+	    $(GW_SH) gowin/pqse_gowin.tcl
 
 # Power and timing estimate on SkyWater 130 nm: Yosys maps the design to
 # sky130_fd_sc_hd, OpenSTA (sta) reports power (vectorless with ACT toggles
