@@ -316,8 +316,12 @@ def single(a):
     if tot or una:
         share = tot / float(tot + una) if tot + una else 0.0
         print('annotated pins     %d of %d (%.1f %%)' % (tot, tot + una, 100 * share))
-        if share < 0.8:
-            print('WARNING: under 80 %% of the pins carry simulated activity - the rest is '
+        if tot == 0:
+            print('ERROR: no pin carries simulated activity (the dump did not match: SCOPE?) - '
+                  'the logic numbers below are OpenSTA\'s propagated guess, NOT a measurement; '
+                  'the SRAM access counts are still valid')
+        elif share < 0.8:
+            print('WARNING: under 80 % of the pins carry simulated activity - the rest is '
                   'propagated (a SCOPE mismatch, or a dump without the cell pins)')
     print('window             %d clocks (%s)%s' % (nclk, eng(nclk * period, 's'),
                                                   ', the whole command' if full else ''))

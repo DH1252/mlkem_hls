@@ -56,7 +56,55 @@ set_output_delay 0.0 -clock clk [all_outputs]
 set_input_transition 0.1 [all_inputs]
 set_load 0.01 [all_outputs]
 
+# The dump's path to the design instance "dut" (SCOPE=auto or empty): the
+# hierarchy above it depends on the simulator (Verilator's --binary main names
+# its top level differently from a C++ main's "TOP"), and a scope that does not
+# match annotates nothing. SAIF: INSTANCE nesting by indentation; VCD: $scope.
+proc find_dut_scope {f} {
+  set saif [regexp {\.saif$} $f]
+  if {[catch {open $f r} ch]} { return "" }
+  set stack {}
+  set n 0
+  set found ""
+  while {[gets $ch line] >= 0 && [incr n] < 2000000} {
+    if {$saif} {
+      if {[regexp {^(\s*)\(INSTANCE\s+([^\s()]+)} $line -> ind name]} {
+        set lvl [string length $ind]
+        while {[llength $stack] && [lindex [lindex $stack end] 0] >= $lvl} {
+          set stack [lrange $stack 0 end-1]
+        }
+        lappend stack [list $lvl $name]
+        if {$name eq "dut"} {
+          set names {}
+          foreach e $stack { lappend names [lindex $e 1] }
+          set found [join $names /]
+          break
+        }
+      }
+    } else {
+      if {[regexp {^\s*\$scope\s+\S+\s+(\S+)\s+\$end} $line -> name]} {
+        lappend stack $name
+        if {$name eq "dut"} { set found [join $stack /]; break }
+      } elseif {[regexp {^\s*\$upscope} $line]} {
+        set stack [lrange $stack 0 end-1]
+      } elseif {[regexp {\$enddefinitions} $line]} {
+        break
+      }
+    }
+  }
+  close $ch
+  return $found
+}
+
 if {$vcd ne ""} {
+  if {$scope eq "" || $scope eq "auto"} {
+    set scope [find_dut_scope $vcd]
+    if {$scope eq ""} {
+      puts "WARNING: no instance \"dut\" found in $vcd: reading it without a scope"
+    } else {
+      puts "scope found in the dump: $scope"
+    }
+  }
   if {[regexp {\.saif(\.gz)?$} $vcd]} {
     if {[info commands read_saif] eq ""} {
       puts "ERROR: this OpenSTA has no read_saif: build a current OpenSTA"
