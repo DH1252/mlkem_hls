@@ -19,9 +19,12 @@
 # parameters, so the script writes one wrapper file: the defines, an `include
 # of every hw/se source, and a top pqse_gowin_top that sets MASKED.
 # No pin constraints: place & route places the 9 pins itself (a fit estimate,
-# not a board build).
+# not a board build). Without a display, gw_sh prints a Qt / OpenGL warning
+# ("Cannot create platform OpenGL context"): harmless; QT_QPA_PLATFORM=offscreen
+# silences it.
 #
-# Results in build/gowin/m<MASKED>_p<PUF>/impl/:
+# Results in build/gowin/m<MASKED>_p<PUF>/pqse/impl/ (create_project makes the
+# pqse/ project directory):
 #   gwsynthesis/pqse_syn.rpt.html   synthesis resource report
 #   pnr/pqse.rpt.txt / .rpt.html    the fit after place & route ("Resource
 #                                   Usage Summary": Logic = LUT + ALU + SSRAM,
@@ -81,15 +84,23 @@ set_option -top_module            pqse_gowin_top
 set_option -verilog_std           v2001
 set_option -include_path          [file join $root hw se]
 set_option -output_base_name      pqse
-set_option -synthesis_tool        GowinSynthesis
-set_option -global_freq           50
+
+# tuning options: not every gw_sh version knows every option (or value), so an
+# unknown one is reported and skipped instead of stopping the build
+# (GowinSynthesis is the default synthesis tool: no -synthesis_tool needed)
+proc try_option {args} {
+  if {[catch {set_option {*}$args} msg]} {
+    puts "pqse_gowin.tcl: skipped 'set_option $args' ($msg)"
+  }
+}
+try_option -global_freq           50
 # area first: the card design has no speed target beyond its 50 MHz clock
-set_option -opt_goal              area
-set_option -map_option            $MAP
-set_option -rw_check_on_ram       0
-set_option -replicate_resources   0
+try_option -opt_goal              area
+try_option -map_option            $MAP
+try_option -rw_check_on_ram       0
+try_option -replicate_resources   0
 # the Tang Nano 20K's dual-purpose pins are ordinary I/O
-set_option -use_mspi_as_gpio      1
-set_option -use_sspi_as_gpio      1
+try_option -use_mspi_as_gpio      1
+try_option -use_sspi_as_gpio      1
 
 run $STEP
