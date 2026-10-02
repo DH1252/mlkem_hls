@@ -20,6 +20,9 @@
 #   DEVICE  20k (default: Tang Nano 20K, GW2AR-LV18QN88C8/I7) or 9k (Tang Nano 9K,
 #           GW1NR-LV9QN88PC6/I5); both boards have a 27 MHz oscillator. 9k builds
 #           go to build/gowin/m<MASKED>_p<PUF>_9k/
+#   PLACE   place & route effort: -place_option (0 default; 1, 2: more effort,
+#   ROUTE   better at congested fits) / -route_option (0 default; 1, 2); unset:
+#           the tool's defaults. For a nearly full 9K: PLACE=1 ROUTE=1 (or 2)
 #   TOP     synthesize one hw/se module alone instead of the whole design
 #           (diagnosis: make se-gowin-bisect runs every module with STEP=syn
 #           and counts GowinSynthesis errors per module); build/gowin/bisect/<TOP>/
@@ -51,6 +54,8 @@ set STEP   [env_or STEP all]
 set TOP    [env_or TOP pqse_gowin_top]
 set FREQ   [env_or FREQ 27]
 set DEVICE [env_or DEVICE 20k]
+set PLACE  [env_or PLACE ""]
+set ROUTE  [env_or ROUTE ""]
 
 set root [file normalize [file join [file dirname [info script]] ..]]
 switch -- $DEVICE {
@@ -135,5 +140,8 @@ try_option -replicate_resources   0
 # the board's dual-purpose pins are ordinary I/O
 try_option -use_mspi_as_gpio      1
 try_option -use_sspi_as_gpio      1
+# place & route effort (congested fits)
+if {$PLACE ne ""} { try_option -place_option $PLACE }
+if {$ROUTE ne ""} { try_option -route_option $ROUTE }
 
 run $STEP

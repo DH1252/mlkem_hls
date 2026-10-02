@@ -459,9 +459,17 @@ module pqse_core #(
   pqse_ram_1r1w #(.AW(8), .DW(17), .RAMSTYLE(1)) u_seed0 (
     .clk(clk), .we(sr_we), .waddr(sr_wa), .wdata({^sr_wd0, sr_wd0}),
     .re(sr_re), .raddr(sr_ra), .rdata(sp0));
+  // share 1 lives at the complemented address: the two share RAMs then have
+  // different address nets, so synthesis cannot pack them into one block RAM
+  // (GowinSynthesis did: 2 x 17 bits fit one 36-bit-wide BSRAM), and the shares
+  // keep separate RAM blocks
+  (* keep = 1 *) wire [7:0] sr_ra1 /* synthesis syn_keep = 1 */;
+  (* keep = 1 *) wire [7:0] sr_wa1 /* synthesis syn_keep = 1 */;
+  assign sr_ra1 = ~sr_ra;
+  assign sr_wa1 = ~sr_wa;
   pqse_ram_1r1w #(.AW(8), .DW(17), .RAMSTYLE(1)) u_seed1 (
-    .clk(clk), .we(sr_we & (MASKED != 0)), .waddr(sr_wa), .wdata({^sr_wd1, sr_wd1}),
-    .re(sr_re & (MASKED != 0)), .raddr(sr_ra), .rdata(sp1));
+    .clk(clk), .we(sr_we & (MASKED != 0)), .waddr(sr_wa1), .wdata({^sr_wd1, sr_wd1}),
+    .re(sr_re & (MASKED != 0)), .raddr(sr_ra1), .rdata(sp1));
   assign sr_rd0 = sp0[15:0];
   assign sr_rd1 = (MASKED != 0) ? sp1[15:0] : 16'd0;   // unprotected build: no share-1 RAM
   // per-share parity, registered separately: the two shares of a seed lane
