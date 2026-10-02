@@ -40,6 +40,7 @@ module pqse_perm (
   input  wire [63:0] rnd,
   output wire        rnd_take,
   input  wire [6:0]  idx,       // lookup: the index needed next clock
+  input  wire        look,      // a lookup user may run (low power: the lookup copy reads only then)
   output wire [6:0]  val
 );
   reg        m64;      // NTT mode
@@ -66,12 +67,13 @@ module pqse_perm (
   pqse_ram_1r1w #(.AW(7), .DW(7), .RAMSTYLE(2)) u_tb (
     .clk(clk), .we(t_we), .waddr(t_wa), .wdata(t_wd),
     .re(gact && (gph == 2'd0)), .raddr(gbase | jn), .rdata(rb));
-  // lookup copy: read every clock; the half flips with "next" in the same clock
+  // lookup copy: read every clock while a shuffled instruction can use it
+  // (look); the half flips with "next" in the same clock
   wire        cur_n = (m64 && next) ? ~cur : cur;
   wire [6:0]  ra;
   pqse_ram_1r1w #(.AW(7), .DW(7), .RAMSTYLE(2)) u_ta (
     .clk(clk), .we(t_we), .waddr(t_wa), .wdata(t_wd),
-    .re(1'b1), .raddr(m64 ? {cur_n, idx[5:0]} : idx), .rdata(ra));
+    .re(look), .raddr(m64 ? {cur_n, idx[5:0]} : idx), .rdata(ra));
 
   assign val      = m64 ? {1'b0, ra[5:0]} : ra;
   assign busy     = start | (gact && gfg);

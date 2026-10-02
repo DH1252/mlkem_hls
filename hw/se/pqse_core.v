@@ -210,9 +210,12 @@ module pqse_core #(
   pqse_prng u_prng (.clk(clk), .rst(rst), .masked_en(MASKED != 0), .reseed(pr_reseed),
                     .seed_en(pr_ten), .seed_valid(t_valid), .seed(t_word), .seed_take(pr_take),
                     .busy(pr_busy), .take(r_take), .take_hi(r_hi), .rnd(rnd));
+  // the lookup RAM reads only while a shuffled poly / masked instruction can
+  // use it (from its start clock on: the read is registered)
+  wire       pg_look = hide_en && run && ((cls == C_POLY) || (cls == C_MASK));
   pqse_perm u_perm (.clk(clk), .rst(rst), .start(pg_start), .n64(pg_n64),
                     .next(pg_next), .busy(pg_busy), .ready(pg_ready),
-                    .rnd(rnd), .rnd_take(pg_rt), .idx(pq_idx), .val(pq_val));
+                    .rnd(rnd), .rnd_take(pg_rt), .idx(pq_idx), .look(pg_look), .val(pq_val));
 
   // ---- measurement trigger (board-level TVLA, scripts/pqse_tvla.py board) ----
   // High from M_OKINI to M_OKCHK: in DECAPS that is everything secret (decoding

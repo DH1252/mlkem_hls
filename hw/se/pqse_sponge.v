@@ -126,6 +126,7 @@ module pqse_sponge #(
   reg  [7:0]  kp0, kp1;                 // block B: the previous key word's high byte, per share
 
   reg  [4:0] hs, hret;
+  reg        idl;                       // the idle registers are cleared
   reg  [4:0] pos;                       // lane of the block
   reg  [1:0] wk;                        // word of the lane
   reg        part;
@@ -298,12 +299,19 @@ module pqse_sponge #(
 
   always @(posedge clk) begin
     if (rst) begin
-      hs <= H_IDLE;
+      hs  <= H_IDLE;
+      idl <= 1'b0;
     end else begin
       case (hs)
         H_IDLE: if (!start) begin
-          kp0 <= 8'd0; kp1 <= 8'd0; kx0 <= 16'd0; kx1 <= 16'd0;    // no key / keystream left
+          // no key / keystream left (cleared once on entering idle, then held:
+          // low power, a gateable clock)
+          if (!idl) begin
+            kp0 <= 8'd0; kp1 <= 8'd0; kx0 <= 16'd0; kx1 <= 16'd0;
+            idl <= 1'b1;
+          end
         end else begin
+          idl  <= 1'b0;
           pos  <= 5'd0;
           wk   <= 2'd0;
           part <= 1'b0;

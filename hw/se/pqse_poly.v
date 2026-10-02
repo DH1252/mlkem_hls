@@ -326,8 +326,14 @@ module pqse_poly (
   // transition); and while idle, the registers fed by the RAM read bus would
   // sit next to whatever other engines put on that bus. (The multiplier
   // pipeline gets zero operands in the first clocks of every instruction.)
+  // Low power: cleared at a start and once when the unit goes idle (or in
+  // reset), then held at 0 - not reloaded every idle clock, so the clock of the
+  // idle unit can be gated (nothing loads them while idle).
+  reg        busy_q;
+  always @(posedge clk) busy_q <= busy_r;
+  wire       clr_v = start || rst || (!busy_r && busy_q);
   always @(posedge clk) begin
-    if (start || !busy_r) begin
+    if (clr_v) begin
       wq  <= 24'd0;  a0r <= 12'd0; a1r <= 12'd0; b0r <= 12'd0; b1r <= 12'd0; zr <= 12'd0;
       dl1 <= 12'd0;  dl2 <= 12'd0; dl3 <= 12'd0; dl4 <= 12'd0; dl5 <= 12'd0;
       d1  <= 12'd0;  z1  <= 12'd0; o_add <= 12'd0; o_sub <= 12'd0;

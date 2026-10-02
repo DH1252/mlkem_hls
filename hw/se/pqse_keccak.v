@@ -308,14 +308,19 @@ module pqse_keccak #(
       X0r <= 16'd0; X1r <= 16'd0; Y0r <= 16'd0; Y1r <= 16'd0;
       d00 <= 16'd0; d01 <= 16'd0; d10 <= 16'd0; d11 <= 16'd0;
     end else begin
-      // chi: Y and the products load every clock (their value in their clock, else 0)
-      Y0r <= 16'd0; Y1r <= 16'd0;
-      d00 <= 16'd0; d01 <= 16'd0; d10 <= 16'd0; d11 <= 16'd0;
-      if (dom_now) begin
-        d00 <= X0r & Y0r;
-        d01 <= (X0r & Y1r) ^ rr;
-        d10 <= (X1r & Y0r) ^ rr;
-        d11 <= X1r & Y1r;
+      // chi: Y and the products load every clock while a permutation runs
+      // (their value in their clock, else 0), up to the last write-back clock;
+      // then they are 0 and hold, so an idle Keccak's clock can be gated
+      // (low power: they are 96 flip-flops) without a hold path in use
+      if ((ks != K_IDLE) || wbv) begin
+        Y0r <= 16'd0; Y1r <= 16'd0;
+        d00 <= 16'd0; d01 <= 16'd0; d10 <= 16'd0; d11 <= 16'd0;
+        if (dom_now) begin
+          d00 <= X0r & Y0r;
+          d01 <= (X0r & Y1r) ^ rr;
+          d10 <= (X1r & Y0r) ^ rr;
+          d11 <= X1r & Y1r;
+        end
       end
       wbv <= 1'b0;
 

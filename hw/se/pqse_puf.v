@@ -408,6 +408,7 @@ module pqse_puf #(
                    U_EFN  = 5'd16, U_EF2 = 5'd17;
 
   reg  [4:0]   st;
+  reg          idl;          // the idle registers are cleared
   reg  [1:0]   mode;         // 0 enroll, 1 reconstruct, 2 raw
   reg  [2:0]   nrd;          // reconstruct: reads per response bit (1, 3 or 5, majority)
   reg  [3:0]   ent;
@@ -499,15 +500,21 @@ module pqse_puf #(
 
   always @(posedge clk) begin
     if (rst) begin
-      st <= U_IDLE;
+      st  <= U_IDLE;
+      idl <= 1'b0;
     end else begin
       case (st)
         U_IDLE: if (!start) begin
-          // idle: no key material left in the extractor's registers
-          K0 <= 16'd0; K1 <= 16'd0; kb0 <= 6'd0; kb1 <= 6'd0;
-          y <= 32'd0; wm <= 32'd0; hp <= 1'b0; wb <= 1'b0;
-          R <= 6'd0; xm <= 5'd0; bm <= 6'd0;
+          // idle: no key material left in the extractor's registers (cleared
+          // once on entering idle, then held: low power, a gateable clock)
+          if (!idl) begin
+            K0 <= 16'd0; K1 <= 16'd0; kb0 <= 6'd0; kb1 <= 6'd0;
+            y <= 32'd0; wm <= 32'd0; hp <= 1'b0; wb <= 1'b0;
+            R <= 6'd0; xm <= 5'd0; bm <= 6'd0;
+            idl <= 1'b1;
+          end
         end else begin
+          idl  <= 1'b0;
           mode <= (ins[91:88] == PF_ENROLL) ? 2'd0 : (ins[91:88] == PF_RAW) ? 2'd2 : 2'd1;
           nrd  <= (ins[91:88] == PF_RECON5) ? 3'd5 : (ins[91:88] == PF_RECON3) ? 3'd3 : 3'd1;
           ent  <= ins[87:84];
