@@ -118,14 +118,14 @@ module pqse_puf_raw #(
       end
     end
   endgenerate
-  wire        cell = qv[ix];
+  wire        cq   = qv[ix];       // the cell being read ("cell" is a Verilog-2001 keyword)
 
   always @(posedge clk) begin
     if (rst) begin
       exc <= 1'b0; ph <= 2'd0; done <= 1'b0; s1 <= 1'b0; s2 <= 1'b0;
     end else begin
       done <= 1'b0;
-      s1   <= (ph == 2'd2) ? cell : 1'b0;        // sampled only while a read is settling
+      s1   <= (ph == 2'd2) ? cq : 1'b0;          // sampled only while a read is settling
       s2   <= s1;
       case (ph)
         2'd0: if (req) begin
