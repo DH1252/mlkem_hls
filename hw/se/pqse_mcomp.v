@@ -125,8 +125,8 @@ module pqse_mcomp (
   reg [4:0]  K;
   reg [28:0] M;
   reg [3:0]  sub;        // bit offset of the word in its first buffer word
-  reg [7:0]  cwo;        // first buffer word of the word (relative to bar)
-  reg [15:0] WL, WH;     // ciphertext window: buffer words cwo, cwo + 1
+  reg [10:0] cwa;        // first buffer word of the word (absolute; its read in S_R0)
+  reg [15:0] WL, WH;     // ciphertext window: buffer words cwa, cwa + 1
   reg [15:0] G0, G1;     // m' seed word, share 0 / share 1
   // domain 0 registers (X0w takes the share 0 word off the RAM read bus and
   // hands it to Z0 before the share 1 word arrives: no register whose input
@@ -207,7 +207,7 @@ module pqse_mcomp (
       end
       S_R1: begin
         re = 1'b1; raddr = {S_T, 7'd0};                   // public word of RAM 0: precharge
-        if (md != 2'd0) begin bre = 1'b1; braddr = cba + {3'd0, cwo} + 11'd1; end
+        if (md != 2'd0) begin bre = 1'b1; braddr = cwa + 11'd1; end
       end
       S_RD1: begin re = 1'b1; raddr = {s1, ws}; end       // share 1 word
       S_RF: rnd_take = 1'b1;
@@ -223,10 +223,10 @@ module pqse_mcomp (
         if (md == 2'd0) begin                             // m' word back, both shares
           swe = 1'b1; swaddr = {en_, ws[6:3]}; swd0 = G0; swd1 = G1;
         end else if (md == 2'd2) begin
-          bwe = 1'b1; bwaddr = cba + {3'd0, cwo}; bwdata = WL;
+          bwe = 1'b1; bwaddr = cwa; bwdata = WL;
         end
       end
-      S_WB1: begin bwe = 1'b1; bwaddr = cba + {3'd0, cwo} + 11'd1; bwdata = WH; end
+      S_WB1: begin bwe = 1'b1; bwaddr = cwa + 11'd1; bwdata = WH; end
       default: ;
     endcase
   end
@@ -271,7 +271,7 @@ module pqse_mcomp (
         S_R0: begin
           ws   <= wsh;
           sub  <= offc[3:0];
-          cwo  <= offc[11:4];
+          cwa  <= cba + {3'd0, offc[11:4]};
           st   <= S_R1;
         end
         S_R1: begin

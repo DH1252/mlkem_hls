@@ -60,7 +60,7 @@ module pqse_parse (
   wire        wr   = (kk >= 2'd2);
 
   assign we    = wr;
-  assign waddr = {sl, widx};
+  assign waddr = wr ? {sl, widx} : 11'd0;           // 0 when not writing (OR-combined port, pqse_core.v)
   assign wdata = wr ? {v1, v0} : 24'd0;
   assign done  = fin;
 
