@@ -1,0 +1,20 @@
+# build outputs (make)
+build/
+
+# Quartus / Platform Designer outputs in quartus/jtag (made by build.tcl)
+quartus/jtag/*.mem
+quartus/jtag/*.qpf
+quartus/jtag/*.qsf
+quartus/jtag/*.qws
+quartus/jtag/mlkem_system.qsys
+quartus/jtag/mlkem_system.sopcinfo
+quartus/jtag/mlkem_system/
+quartus/jtag/.qsys_edit/
+quartus/jtag/db/
+quartus/jtag/incremental_db/
+quartus/jtag/output_files/
+quartus/jtag/*.rpt
+quartus/jtag/*.summary
+quartus/jtag/*.smsg
+quartus/jtag/*.done
+quartus/jtag/*.qdf
