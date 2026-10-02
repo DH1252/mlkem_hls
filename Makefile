@@ -351,6 +351,19 @@ RAM_MACRO ?= 0
 # buses), which the power flows enable by default.
 CLOCKGATE ?= 1
 CG_MIN    ?= 4
+# CG_SRST=1 (default): registers written as "if (rst) ... else if (en) ..."
+# (synchronous reset over the enable, the style of most engines here) are
+# rewritten by dfflegalize into enable-over-reset form with enable = en | rst
+# (same behaviour), which clockgate can gate; it skips the reset-over-enable
+# form, and the first gate-level run showed 1,865 of 3,750 flip-flops clocked
+# every cycle, ~80 % of the logic energy. Every other flip-flop type is listed
+# as allowed, so dfflegalize leaves it alone.
+CG_SRST   ?= 1
+PW_CGLEG  := $(if $(and $(filter 1,$(CLOCKGATE)),$(filter 1,$(CG_SRST))),dfflegalize \
+	    -cell \$$_DFF_?_ 01 -cell \$$_DFFE_??_ 01 -cell \$$_DFF_???_ 01 -cell \$$_DFFE_????_ 01 \
+	    -cell \$$_ALDFF_??_ 01 -cell \$$_ALDFFE_???_ 01 -cell \$$_DFFSR_???_ 01 -cell \$$_DFFSRE_????_ 01 \
+	    -cell \$$_SDFF_???_ 01 -cell \$$_SDFFCE_????_ 01 -cell \$$_SR_??_ 01 \
+	    -cell \$$_DLATCH_?_ 01 -cell \$$_DLATCH_???_ 01 -cell \$$_DLATCHSR_???_ 01;,)
 PW_SRC    := $(if $(filter 1,$(RAM_MACRO)),$(filter-out hw/se/pqse_mem.v,$(SE_SRC)) scripts/power/pqse_ram_macro.v,$(SE_SRC))
 PW_RAMLIB := $(if $(filter 1,$(RAM_MACRO)),$(BUILD)/sepower/pqse_sram.lib,)
 PW_DEFS   := $(if $(filter 0,$(LOWPOWER)),,-DPQSE_LOWPOWER)
@@ -376,7 +389,7 @@ PW_DONTUSE = $(foreach c,$(sort $(shell grep -oE 'sky130_fd_sc_hd__(lpflow_|prob
 # it works on the generic enable flip-flops)
 PW_MAP     = read_verilog $(PW_DEFS) -Ihw/se $(PW_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
-	    delete t:\$$scopeinfo; $(PW_CG) \
+	    delete t:\$$scopeinfo; $(PW_CGLEG) $(PW_CG) \
 	    dfflibmap -liberty $(SKY130_LIB); \
 	    abc -liberty $(SKY130_LIB) -D $(PERIOD_PS) -script $(PW_ABCF) $(PW_DONTUSE); opt_clean; \
 	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO;
