@@ -276,6 +276,7 @@ make sim-se-tvla MASKED=0 N=200  # positive control (expect: leaks)
 make se-area                     # Yosys gate count; SKY130_LIB=<.lib> for SkyWater 130 nm
 make se-power SKY130_LIB=<.lib>  # SKY130 power (vectorless, ACT=0.1) and the slowest path; RAM_MACRO=1: logic only
 make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1   # energy per KeyGen from a gate-level run (whole command, SAIF; GL_CMD=2: Encaps)
+make se-power-sample SKY130_LIB=<.lib> RAM_MACRO=1 GL_FMT=vcd GL_CLOCKS=<n>   # the same from 8 sampled 2000-clock windows (fast with VCD; GL_PAR, GL_THREADS for speed)
 make se-gowin                    # fit on the Tang Nano 20K (GW2AR-18), largest modules; PUF=0: without the PUF cells, PUF=bfly: butterfly cells
 make se-gowin-eda                # the same with Gowin EDA (gw_sh: GowinSynthesis, area goal, + place & route): the real fit
 cd quartus/jtag && quartus_sh -t build.tcl se    # DE10-Nano, then source pqse_test.tcl
