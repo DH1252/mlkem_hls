@@ -15,7 +15,8 @@ Counts the mapped Gowin cells in the last "Printing statistics" block of the log
 --modules: the hierarchical statistics (one block per module definition, before
 flattening): the largest modules by LUT4, to see where the area goes. A module
 used several times (the RAM wrappers, the PUF cell) is listed once, with the
-cells of one instance.
+cells of one instance. The flat run (make se-gowin, FLAT=1) keeps only pqse_top
+and the PUF cell; FLAT=0 gives the full per-module breakdown.
 Yosys counts are an estimate: the Gowin tools (GowinSynthesis / gw_sh) or
 nextpnr-himbaechel give the final numbers, usually within ~10-20%.
 """

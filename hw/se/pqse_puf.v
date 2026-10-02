@@ -222,6 +222,7 @@ endmodule
 // settles to q = 0 or 1 as the two gates' mismatch decides, then holds it.
 // Place the two gates next to each other, with identical routing (chip: a
 // symmetric pair of cells; FPGA: both LUTs in one logic cell / slice).
+(* keep_hierarchy *)   // never flattened: synthesis must not restructure the pair
 module pqse_pufcell (
   input  wire e,
   output wire q
@@ -249,14 +250,16 @@ endmodule
 // logic cell (CLS), or in two neighbouring ones if a CLS cannot mix a clear and
 // a preset register, with matched D routes; keep the x fan-out of a row on one
 // net. (Xilinx: LDCE / LDPE, as in the original butterfly PUF.)
+(* keep_hierarchy *)   // never flattened: synthesis must not restructure the pair
 module pqse_bflycell (
   input  wire x,
   output wire q
 );
   (* keep = 1 *) wire q_a;
   (* keep = 1 *) wire q_b;
-  (* keep = 1 *) DLC u_a (.D(q_b), .G(1'b1), .CLEAR(x),  .Q(q_a));
-  (* keep = 1 *) DLP u_b (.D(q_a), .G(1'b1), .PRESET(x), .Q(q_b));
+  // gate pin: CLK in the Yosys / nextpnr cell library (G in Gowin's UG288)
+  (* keep = 1 *) DLC              u_a (.D(q_b), .CLK(1'b1), .CLEAR(x),  .Q(q_a));
+  (* keep = 1 *) DLP #(.INIT(1'b1)) u_b (.D(q_a), .CLK(1'b1), .PRESET(x), .Q(q_b));
   assign q = q_a;
 endmodule
 `endif

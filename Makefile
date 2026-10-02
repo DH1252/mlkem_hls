@@ -20,7 +20,7 @@
 #                  transitions) of the masked gadgets (also run by sim-se)
 #   make se-area   Yosys gate count of the secure element (MASKED=0/1)
 #   make se-power SKY130_LIB=...  SKY130 power + timing (Yosys + OpenSTA)
-#   make se-gowin [PUF=0|bfly] [MASKED=0]  fit on the Tang Nano 20K (GW2AR-18)
+#   make se-gowin [PUF=0|bfly] [MASKED=0] [FLAT=0]  fit on the Tang Nano 20K (GW2AR-18)
 #   make ip        package the Platform Designer component (quartus/ip)
 #   make sw-emu    build + run the ARM program against a software model
 #   make sw-arm    cross-compile the ARM program for the DE10-Nano
@@ -235,23 +235,44 @@ se-area: | $(BUILD)
 	    $(if $(SKY130_LIB),-liberty $(SKY130_LIB))"
 	@grep -A40 "Printing statistics" $(BUILD)/searea/yosys_m$(MASKED).log | tail -40
 
-# Fit on the Tang Nano 20K (Gowin GW2AR-18): Yosys synth_gowin (hierarchical,
-# so the report also lists the largest modules), then the LUT / flip-flop /
-# BSRAM / multiplier counts against the device. PUF=1 (default) includes the
-# SRAM-cell latch PUF array (960 cells, as in the FPGA build); PUF=bfly builds the
-# same array from butterfly cells (two latch-mode flip-flops per bit, no LUTs:
-# ~1,920 LUTs move to ~1,920 flip-flops); PUF=0 synthesizes the simulation PUF
-# model instead. Newer Yosys: GOWIN_OPTS="-family gw2a"
-# selects the GW2A family (the default is GW1N; the cell counts are nearly the same).
+# Fit on the Tang Nano 20K (Gowin GW2AR-18): Yosys synth_gowin, then the LUT /
+# flip-flop / BSRAM / multiplier counts against the device. PUF=1 (default)
+# includes the SRAM-cell latch PUF array (960 cells, as in the FPGA build);
+# PUF=bfly builds the same array from butterfly cells (two latch-mode flip-flops
+# per bit, no LUTs: ~1,920 LUTs move to ~1,920 flip-flops); PUF=0 synthesizes the
+# simulation PUF model instead.
+# Area options (the defaults aim at the fewest cells):
+#   FLAT=1          flatten before synthesis, so constants, unused outputs and
+#                   duplicate logic are optimized across module boundaries. The
+#                   PUF cells keep their own hierarchy (keep_hierarchy), so the
+#                   cross-coupled pairs are never restructured. FLAT=0: the old
+#                   hierarchical run, which also lists the largest modules.
+#   GOWIN_D=20000   LUT-mapping delay target in ps (the 50 MHz clock): abc9 then
+#                   trades unneeded speed for area instead of mapping for the
+#                   best possible delay. GOWIN_D= (empty): best delay.
+#   GOWIN_MAXLUT=8  widest LUT abc9 may build: LUT5..LUT8 use the logic cells'
+#                   MUX2_LUT5..8 muxes, which cost no LUT4. 4: LUT4 only (the
+#                   same as synth_gowin -nowidelut); compare both.
+#   GOWIN_OPTS      extra synth_gowin options. Newer Yosys: "-family gw2a"
+#                   selects the GW2A family (the default is GW1N; the cell
+#                   counts are nearly the same).
 PUF ?= 1
+FLAT ?= 1
+GOWIN_D ?= 20000
+GOWIN_MAXLUT ?= 8
 GOWIN_OPTS ?=
-GW := $(BUILD)/segowin/m$(MASKED)_p$(PUF)
+GW := $(BUILD)/segowin/m$(MASKED)_p$(PUF)$(if $(filter 0,$(FLAT)),_hier)
+GW_SYNTH = synth_gowin -top pqse_top $(if $(filter 0,$(FLAT)),-noflatten) $(GOWIN_OPTS)
 se-gowin: | $(BUILD)
 	mkdir -p $(BUILD)/segowin
 	yosys -q -l $(GW).log -p "read_verilog -Ihw/se \
 	    -DPQSE_LUTRAM_1R $(if $(filter 1,$(PUF)),-DPQSE_PUF_LATCH)$(if $(filter bfly,$(PUF)),-DPQSE_PUF_BFLY) $(SE_SRC); \
-	    chparam -set MASKED $(MASKED) pqse_top; synth_gowin -top pqse_top -noflatten $(GOWIN_OPTS); \
-	    tee -q -o $(GW)_modules.txt stat; flatten; stat" 2>&1 \
+	    chparam -set MASKED $(MASKED) pqse_top; \
+	    $(GW_SYNTH) -run :map_luts; \
+	    sort; read_verilog -icells -lib -specify +/abc9_model.v; \
+	    abc9 -maxlut $(GOWIN_MAXLUT) -W 500 $(if $(GOWIN_D),-D $(GOWIN_D)); clean; \
+	    $(GW_SYNTH) -run map_cells:; \
+	    tee -q -o $(GW)_modules.txt stat; setattr -mod -unset keep_hierarchy; flatten; stat" 2>&1 \
 	    | { grep -v -E '^(Warning: found logic loop|    cell .*(u_c|g_cell)|      [AB]\[0\] --> Y)' || true; }
 	@test $(PUF) = 1 && echo "(the PUF cells are cross-coupled gates by design: their 'logic loop' warnings are hidden)" || true
 	$(PYTHON) scripts/pqse_fit.py $(GW).log --modules $(GW)_modules.txt
