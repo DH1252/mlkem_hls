@@ -52,9 +52,15 @@ module pqse_perm (
   reg  [2:0] lay;      // NTT mode: the layer now running (0..6)
   reg  [6:0] gi, gj, glast;
 
-  // j = floor(r * (i + 1) / 2^24), 0 .. i
+  // j = floor(r * (i + 1) / 2^24), 0 .. i. Low power (PQSE_LOWPOWER, ASIC):
+  // the multiplier sees the random word only while drawing
+`ifdef PQSE_LOWPOWER
+  wire [23:0] rg   = rnd[23:0] & {24{gact}};
+`else
+  wire [23:0] rg   = rnd[23:0];
+`endif
   wire [7:0]  ip1  = {1'b0, gi} + 8'd1;
-  wire [31:0] prod = {8'd0, rnd[23:0]} * {24'd0, ip1};
+  wire [31:0] prod = {8'd0, rg} * {24'd0, ip1};
   wire [6:0]  jn   = prod[30:24];
 
   wire [6:0]  gbase = m64 ? {ghalf, 6'd0} : 7'd0;

@@ -179,7 +179,9 @@ sim-v3: | $(BUILD)
 	@grep -q "TEST PASSED" $(BUILD)/v3sim/sim.log
 
 # ---- the post-quantum secure element (hw/se) ---------------------------------------------
-# TRACE=1 prints every microcode instruction. Also runs the Python check of the
+# TRACE=1 prints every microcode instruction. LOWPOWER=1 simulates the ASIC
+# low-power variant (PQSE_LOWPOWER: operand isolation of the shared buses), as
+# the sky130 power flows build it. Also runs the Python check of the
 # masked-gadget and fuzzy-extractor math and the robust-probing check first,
 # and after the simulation the independent KMAC check of the sealed messages
 # and the PUF / TRNG statistics.
@@ -191,7 +193,7 @@ sim-se: | $(BUILD)
 	cp -r hw/sim/vectors $(BUILD)/sesim/
 	cd $(BUILD)/sesim && $(VERILATOR) --binary --timing -j 2 -Wno-fatal -Wno-lint -Wno-style \
 	    --top-module tb_pqse -Mdir obj -o ../vtb -I../../hw/se \
-	    +define+PQSE_SIM_INIT $(if $(TRACE),+define+PQSE_TRACE) \
+	    +define+PQSE_SIM_INIT $(if $(TRACE),+define+PQSE_TRACE) $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
 	    ../../hw/sim/tb_pqse.sv $(addprefix ../../,$(SE_SRC)) > build.log 2>&1 \
 	    || { tail -30 build.log; exit 1; }
 	cd $(BUILD)/sesim && ./vtb | tee sim.log
