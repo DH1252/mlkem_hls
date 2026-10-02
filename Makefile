@@ -290,7 +290,7 @@ se-gowin: | $(BUILD)
 GW_SH ?= gw_sh
 se-gowin-eda:
 	PUF=$(PUF) MASKED=$(MASKED) MAP=$(MAP) STEP=$(STEP) FREQ=$(FREQ) DEVICE=$(DEVICE) \
-	    $(GW_SH) gowin/pqse_gowin.tcl
+	    PLACE=$(PLACE) ROUTE=$(ROUTE) $(GW_SH) gowin/pqse_gowin.tcl
 
 # Diagnosis: synthesize every secure-element module on its own with
 # GowinSynthesis (STEP=syn) and count its errors, to find the module behind a
