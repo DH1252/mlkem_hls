@@ -43,10 +43,10 @@
 //   - the write-back has its own cone (B[x], d00, d01 / d11, d10)
 // Theta, rho, pi and iota are linear: each share on its own data path.
 //
-// Lane port (pqse_sponge.v): ax_en / rd_en / go are taken only while rdy is
-// high (and only one at a time). An absorb (state[ax_idx] ^= {ax_v1, ax_v0})
-// is a 4-word read-modify-write, ~6 clocks; a read delivers the lane on
-// rd_v0 / rd_v1 when rdy is high again (~6 clocks), held until the next read.
+// Word port (pqse_sponge.v): ax_en / rd_en / go are taken only while rdy is
+// high (and only one at a time). An absorb (word ^= {ax_v1, ax_v0}) is a
+// read-modify-write, 2 clocks; a read delivers the word on rd_v0 / rd_v1 (the
+// RAM output registers) when rdy is high again, held until the next read.
 // Wipe: while clr is high and the RAMs are not known to be clean, every word
 // of both RAMs is written 0 (256 clocks), then word 0 is read so the RAM output
 // registers hold 0, and the lane registers are cleared.
@@ -64,14 +64,16 @@ module pqse_keccak #(
   input  wire        rst,
   input  wire        msk,        // this job is masked
   input  wire        clr,        // keep the state zero: wipe it unless already clean (busy meanwhile)
-  input  wire        ax_en,      // state[ax_idx] ^= {ax_v1, ax_v0}   (taken while rdy)
+  input  wire        ax_en,      // word ax_k of lane ax_idx ^= {ax_v1, ax_v0} (taken while rdy)
   input  wire [4:0]  ax_idx,
-  input  wire [63:0] ax_v0,
-  input  wire [63:0] ax_v1,
-  input  wire        rd_en,      // read lane rd_idx onto rd_v0 / rd_v1 (taken while rdy)
+  input  wire [1:0]  ax_k,
+  input  wire [15:0] ax_v0,
+  input  wire [15:0] ax_v1,
+  input  wire        rd_en,      // read word rd_k of lane rd_idx onto rd_v0 / rd_v1 (taken while rdy)
   input  wire [4:0]  rd_idx,
-  output wire [63:0] rd_v0,
-  output wire [63:0] rd_v1,
+  input  wire [1:0]  rd_k,
+  output wire [15:0] rd_v0,
+  output wire [15:0] rd_v1,
   input  wire        go,         // start a permutation (taken while rdy)
   output wire        busy,
   output wire        rdy,        // the lane port takes a request this clock
@@ -175,7 +177,8 @@ module pqse_keccak #(
   reg  [1:0]  ck, cs;
   reg  [3:0]  cm;
   reg  [4:0]  ci;
-  reg  [4:0]  lsel;       // lane port: the lane
+  reg  [4:0]  lsel;       // word port: the lane
+  reg  [1:0]  lk;         // ... and the word
   // data stage (the read issued last clock)
   reg         dv;
   reg  [2:0]  dx, dy;
@@ -191,8 +194,7 @@ module pqse_keccak #(
   reg         wbv;                 // chi: write-back pending (this clock)
   reg  [4:0]  wbl;
   reg  [1:0]  wbk;
-  reg  [63:0] apv0, apv1;          // absorb: the lane, consumed 16 bits per word
-  reg  [63:0] rdv0, rdv1;          // read: the lane, assembled 16 bits per word
+  reg  [15:0] apv0, apv1;          // absorb: the word to XOR in
 
   wire        use1 = M1 && mj;
   wire [15:0] rr   = use1 ? rnd[15:0] : 16'd0;
@@ -200,8 +202,8 @@ module pqse_keccak #(
   assign rnd_take = dom_now && use1;
   assign rdy  = (ks == K_IDLE) && !wbv && !(clr && !clean);
   assign busy = go | (ks != K_IDLE) | wbv | (clr && !clean);
-  assign rd_v0 = rdv0;
-  assign rd_v1 = M1 ? rdv1 : 64'd0;
+  assign rd_v0 = q0;
+  assign rd_v1 = M1 ? q1 : 16'd0;
 
   // ---- RAMs: one per share ---------------------------------------------------------
   reg         re, we;
@@ -246,8 +248,8 @@ module pqse_keccak #(
     end else if (dv) begin
       case (ks)
         K_LA: begin                                     // absorb: word ^ v
-          we = 1'b1; wa = {1'b0, lsel, dk};
-          wd0 = q0 ^ apv0[15:0]; wd1 = q1 ^ apv1[15:0];
+          we = 1'b1; wa = {1'b0, lsel, lk};
+          wd0 = q0 ^ apv0; wd1 = q1 ^ apv1;
         end
         K_C: if (dy == 3'd4) begin                      // C[x][k] = parity ^ A[x + 20][k]
           we = 1'b1; wa = {LC + {3'd0, dx}, dk};
@@ -273,7 +275,7 @@ module pqse_keccak #(
       K_WIPE:                                           // last clock: word 0 (zero by now) into
         if (wcnt == 8'd255) begin re = 1'b1; ra = 8'd0; end   // the output registers
       K_LA, K_LR:
-        if (iss) begin re = 1'b1; ra = {1'b0, lsel, ck}; end
+        if (iss) begin re = 1'b1; ra = {1'b0, lsel, lk}; end
       K_C:
         if (iss) begin re = 1'b1; ra = {1'b0, lidx(cx, cy), ck}; end
       K_D:
@@ -304,7 +306,7 @@ module pqse_keccak #(
   always @(posedge clk) begin
     if (rst) begin
       ks <= K_IDLE; mj <= 1'b0; clean <= 1'b0; wbv <= 1'b0; dv <= 1'b0; iss <= 1'b0;
-      apv0 <= 64'd0; apv1 <= 64'd0; rdv0 <= 64'd0; rdv1 <= 64'd0;
+      apv0 <= 16'd0; apv1 <= 16'd0;
       T0 <= 16'd0; T1 <= 16'd0; P0 <= 16'd0; P1 <= 16'd0; cb0 <= 1'b0; cb1 <= 1'b0;
       X0r <= 16'd0; X1r <= 16'd0; Y0r <= 16'd0; Y1r <= 16'd0;
       d00 <= 16'd0; d01 <= 16'd0; d10 <= 16'd0; d11 <= 16'd0;
@@ -332,14 +334,16 @@ module pqse_keccak #(
           end else if (ax_en && rdy) begin
             ks    <= K_LA;
             lsel  <= ax_idx;
+            lk    <= ax_k;
             apv0  <= ax_v0;
-            apv1  <= M1 ? ax_v1 : 64'd0;
+            apv1  <= M1 ? ax_v1 : 16'd0;
             clean <= 1'b0;
-            ck <= 2'd0; iss <= 1'b1; dv <= 1'b0;
+            iss <= 1'b1; dv <= 1'b0;
           end else if (rd_en && rdy) begin
             ks    <= K_LR;
             lsel  <= rd_idx;
-            ck <= 2'd0; iss <= 1'b1; dv <= 1'b0;
+            lk    <= rd_k;
+            iss <= 1'b1; dv <= 1'b0;
           end else if (clr && !clean && !wbv) begin
             ks   <= K_WIPE;
             wcnt <= 8'd0;
@@ -349,33 +353,27 @@ module pqse_keccak #(
         K_WIPE: begin
           wcnt <= wcnt + 8'd1;
           T0 <= 16'd0; T1 <= 16'd0; P0 <= 16'd0; P1 <= 16'd0; cb0 <= 1'b0; cb1 <= 1'b0;
-          apv0 <= 64'd0; apv1 <= 64'd0; rdv0 <= 64'd0; rdv1 <= 64'd0;
+          apv0 <= 16'd0; apv1 <= 16'd0;
           if (wcnt == 8'd255) begin
             ks    <= K_IDLE;
             clean <= 1'b1;
           end
         end
 
-        // ---- lane port: 4 words, read (and for an absorb written back ^ v) ----
-        K_LA, K_LR: begin
-          if (iss) begin
-            ck <= ck + 2'd1;
-            if (ck == 2'd3) iss <= 1'b0;
+        // ---- word port: an absorb reads the word, then writes it ^ v (2 clocks);
+        // a read only reads it (the word is on q0 / q1 from the next clock) ----
+        K_LA: begin
+          iss <= 1'b0;
+          dv  <= iss;
+          if (dv) begin                                   // written this clock
+            apv0 <= 16'd0; apv1 <= 16'd0;
+            ks   <= K_IDLE;
+            dv   <= 1'b0;
           end
-          dv <= iss; dk <= ck;
-          if (dv) begin
-            if (ks == K_LA) begin                         // the word written this clock used apv[15:0]
-              apv0 <= {16'd0, apv0[63:16]};
-              apv1 <= {16'd0, apv1[63:16]};
-            end else begin                                // word k arrives: shift in at the top
-              rdv0 <= {q0, rdv0[63:16]};
-              rdv1 <= {(M1 ? q1 : 16'd0), rdv1[63:16]};
-            end
-            if (dk == 2'd3) begin
-              ks <= K_IDLE;
-              dv <= 1'b0;
-            end
-          end
+        end
+        K_LR: begin
+          iss <= 1'b0;
+          ks  <= K_IDLE;
         end
 
         // ---- theta 1: column parities C[x][k] ----

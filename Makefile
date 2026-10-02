@@ -297,7 +297,7 @@ se-gowin-eda:
 # GowinSynthesis error that names no source line. Leaves first: the first
 # module with errors is the culprit (its parents inherit them). One log per
 # module in build/gowin/bisect/<module>.log.
-SE_MODULES := pqse_mulred pqse_modq24 pqse_ram_1r1w pqse_spi pqse_parse pqse_cbd \
+SE_MODULES := pqse_mulred pqse_modq24 pqse_ram_1r1w pqse_spi pqse_parse \
               pqse_ro_src pqse_trng pqse_prng pqse_perm pqse_keccak pqse_sponge pqse_poly \
               pqse_io pqse_masked pqse_mcomp pqse_puf_raw pqse_puf pqse_ucode pqse_host \
               pqse_core pqse_sys pqse_top

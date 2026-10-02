@@ -43,6 +43,10 @@
 //   A0 + A1 = v (b0 + b1 - 2 b0 b1) = v (b0 ^ b1)  (mod q)
 // CBD weights per coefficient: +1, +1, -1, -1 (4 bits); mu: 1665 (1 bit).
 //
+// v5: the sponge stream, the I/O buffer and the seed registers carry 16-bit
+// words (buffer word {lane, k}, seed word {entry, lane, k}); the bit reader,
+// the B2A input and SEL work on one 16-bit word at a time.
+//
 // Word writes: share 0, idle clock, share 1, each from its own write register
 // (and in accumulate mode the reads share 0, a public word of RAM 0, share 1),
 // so no RAM bus, output register or read mux holds or switches between the
@@ -55,10 +59,10 @@ module pqse_masked (
   input  wire [95:0] ins,
   output wire        busy,
   output reg         bad_set,
-  // lane stream from the sponge
+  // word stream from the sponge
   input  wire        s_valid,
-  input  wire [63:0] s_v0,
-  input  wire [63:0] s_v1,
+  input  wire [15:0] s_v0,
+  input  wire [15:0] s_v1,
   output wire        s_ready,
   // polynomial RAM
   output reg         re,
@@ -69,20 +73,20 @@ module pqse_masked (
   output reg  [23:0] wdata,
   // I/O buffer
   output reg         bre,
-  output reg  [8:0]  braddr,
-  input  wire [63:0] brdata,
+  output reg  [10:0] braddr,
+  input  wire [15:0] brdata,
   output reg         bwe,
-  output reg  [8:0]  bwaddr,
-  output reg  [63:0] bwdata,
+  output reg  [10:0] bwaddr,
+  output reg  [15:0] bwdata,
   // seed registers
   output reg         sre,
-  output reg  [5:0]  sraddr,
-  input  wire [63:0] srd0,
-  input  wire [63:0] srd1,
+  output reg  [7:0]  sraddr,
+  input  wire [15:0] srd0,
+  input  wire [15:0] srd1,
   output reg         swe,
-  output reg  [5:0]  swaddr,
-  output reg  [63:0] swd0,
-  output reg  [63:0] swd1,
+  output reg  [7:0]  swaddr,
+  output reg  [15:0] swd0,
+  output reg  [15:0] swd1,
   // randomness
   input  wire [63:0] rnd,
   output wire        rnd_take,
@@ -195,15 +199,15 @@ module pqse_masked (
 `endif
 
   // ============================ ciphertext / tag bit reader =============================
-  reg  [63:0] CL, NL;
-  reg  [5:0]  cb;
-  reg  [8:0]  la;
-  reg  [1:0]  rst_;       // 0 idle, 1 read lane 0, 2 load lane 0 + read lane 1, 3 ready
+  reg  [15:0] CL, NL;
+  reg  [3:0]  cb;
+  reg  [10:0] la;         // buffer word
+  reg  [1:0]  rst_;       // 0 idle, 1 read word 0, 2 load word 0 + read word 1, 3 ready
   reg         rdq;        // a prefetch read was issued last clock (data -> NL)
   wire        rdr_ready = (rst_ == 2'd3);
   wire        cbit = CL[cb];
   reg         ctake;      // a bit was consumed this clock
-  // The tag check starts its reader only when the first squeezed lane arrives:
+  // The tag check starts its reader only when the first squeezed word arrives:
   // until then the sponge is still absorbing and owns the buffer read port.
   // (CMPRC reads its ciphertext bits itself, in shuffled order: pqse_mcomp.v)
   reg         tag_pend;
@@ -212,9 +216,9 @@ module pqse_masked (
   // ============================ compress engine =========================================
   wire        mc_busy, mc_re, mc_swe, mc_sre, mc_ndv, mc_nd0, mc_nd1, mc_rt, mc_bwe, mc_bre, mc_hi;
   wire [10:0] mc_raddr;
-  wire [5:0]  mc_swaddr, mc_sraddr;
-  wire [63:0] mc_swd0, mc_swd1, mc_bwdata;
-  wire [8:0]  mc_bwaddr, mc_braddr;
+  wire [7:0]  mc_swaddr, mc_sraddr;
+  wire [15:0] mc_swd0, mc_swd1, mc_bwdata;
+  wire [10:0] mc_bwaddr, mc_braddr;
   wire [6:0]  mc_pq;
   pqse_mcomp u_mc (
     .clk(clk), .rst(rst),
@@ -235,17 +239,18 @@ module pqse_masked (
   reg         b_act;      // B2A engine running
   reg         b_sd;       // 1: seed source (MU, CBD), 0: sponge stream (STRM)
   reg         b_m1;       // MU: 1 bit per coefficient, weight 1665 (else CBD: 4 bits)
-  reg  [63:0] L0, L1;
+  reg  [15:0] L0, L1;
   reg         lv;
-  reg  [5:0]  bi;
+  reg  [3:0]  bi;
   reg  [1:0]  cbi;        // bit within the coefficient
   reg         chi;        // coefficient within the word
   reg  [7:0]  cw;         // word 0..128
-  // seed source: one lane load per word, the words in the order T[cw] (hiding on)
+  // seed source: one seed-word load per word, the words in the order T[cw] (hiding on)
   reg         mshf;
   wire [6:0]  mw = mshf ? pq_val : cw[6:0];
   assign      pq_idx = mc_busy ? mc_pq : cw[6:0];
   reg         mreq;
+  reg         pqok;       // T[cw] is on pq_val (the lookup is registered: one clock after cw changes)
   // stage 1 (domain separated)
   reg  [11:0] T, Rd, vd;
   reg         b1d;
@@ -286,18 +291,18 @@ module pqse_masked (
   // ============================ select ========================================================
   reg         sel_act;
   reg  [2:0]  sph;        // 0 read K', 1 read K-bar, 2 load, 3 bits, 4 write
-  reg  [1:0]  sj;
-  reg  [6:0]  sb;
-  reg  [63:0] D0, D1, kb0, kb1, Osh0, Osh1;
+  reg  [3:0]  sj;         // key word 0..15
+  reg  [4:0]  sb;
+  reg  [15:0] D0, D1, kb0, kb1, Osh0, Osh1;
   reg         s00, s01, s10, s11;
   wire        r_sel = rnd[50];
   // D and K-bar shift right one bit per clock, so the bit in use is always bit 0
-  // (no 64:1 multiplexers)
+  // (no 16:1 multiplexers)
   wire        db0 = D0[0], db1 = D1[0];
 
   assign s_ready = b_act && !b_sd && !lv;
   assign busy    = start | mc_busy | b_act | sel_act | wbusy | chk_pend | out_pend | okc;
-  assign rnd_take = mc_rt | b_issue | (sel_act && sph == 3'd3 && sb <= 7'd63) | ndv;
+  assign rnd_take = mc_rt | b_issue | (sel_act && sph == 3'd3 && sb <= 5'd15) | ndv;
   // every take here uses only rnd[63:32] (SEL bit 50, B2A bits 32..55, the ok
   // copies bits 49 / 51, the adder's AND clock bit 48), except the Compress
   // engine's refresh clock (bits 0..47)
@@ -306,8 +311,8 @@ module pqse_masked (
   // ---- port multiplexing ---------------------------------------------------------------------
   always @* begin
     re = 1'b0; raddr = 11'd0; we = 1'b0; waddr = 11'd0; wdata = 24'd0;
-    bre = 1'b0; braddr = 9'd0; bwe = 1'b0; bwaddr = 9'd0; bwdata = 64'd0;
-    sre = 1'b0; sraddr = 6'd0; swe = 1'b0; swaddr = 6'd0; swd0 = 64'd0; swd1 = 64'd0;
+    bre = 1'b0; braddr = 11'd0; bwe = 1'b0; bwaddr = 11'd0; bwdata = 16'd0;
+    sre = 1'b0; sraddr = 8'd0; swe = 1'b0; swaddr = 8'd0; swd0 = 16'd0; swd1 = 16'd0;
     bad_set = 1'b0;
     fault_set = 1'b0;
     ndv = 1'b0; ndb0 = 1'b0; ndb1 = 1'b0;
@@ -319,13 +324,13 @@ module pqse_masked (
     if (mc_bre) begin bre = 1'b1; braddr = mc_braddr; end
     if (mc_bwe) begin bwe = 1'b1; bwaddr = mc_bwaddr; bwdata = mc_bwdata; end
     if (mc_ndv) begin ndv = 1'b1; ndb0 = mc_nd0; ndb1 = mc_nd1; end
-    // bit reader: lanes 0 and 1 at the start, then one prefetch per 64 bits
+    // bit reader: words 0 and 1 at the start, then one prefetch per 16 bits
     if (rst_ == 2'd1 || rst_ == 2'd2) begin bre = 1'b1; braddr = la; end
     // tag compare: one bit every other clock
     if (t_issue) begin
       ndv = 1'b1; ndb0 = ~(bb0 ^ cbit); ndb1 = bb1; ctake = 1'b1;
     end
-    if (rst_ == 2'd3 && ctake && cb == 6'd63) begin bre = 1'b1; braddr = la; end
+    if (rst_ == 2'd3 && ctake && cb == 4'd15) begin bre = 1'b1; braddr = la; end
     // B2A word writer, 7 phases:
     //   0 (acc) read share 0        1 o0 := it, (acc) read a public word of RAM 0
     //   2 wd0 := o0 + wr0, o0 := 0  3 (acc) read share 1
@@ -345,12 +350,12 @@ module pqse_masked (
         default: ;
       endcase
     end
-    // seed source, one lane per word:
-    //   MU   bits 2 mw, 2 mw + 1 of m: entry e, lane mw / 32
-    //   CBD  bits 8 mw .. 8 mw + 7 of the PRF output: lane mw / 8 of entries e .. e+3
-    if (b_act && b_sd && !lv && !mreq && cw < 8'd128) begin
+    // seed source, one seed word per word:
+    //   MU   bits 2 mw, 2 mw + 1 of m: entry e, word mw / 8
+    //   CBD  bits 8 mw .. 8 mw + 7 of the PRF output: word mw / 2 of entries e .. e+3
+    if (b_act && b_sd && !lv && !mreq && pqok && cw < 8'd128) begin
       sre    = 1'b1;
-      sraddr = b_m1 ? {e, mw[6:5]} : {e + {2'b00, mw[6:5]}, mw[4:3]};
+      sraddr = b_m1 ? {e, mw[6:3]} : {e + {2'b00, mw[6:5]}, mw[4:1]};
     end
     // select
     if (sel_act) begin
@@ -389,21 +394,21 @@ module pqse_masked (
       if (start) tag_pend <= (i_op == M_STRM) && i_d[0];
       else if (tag_pend && s_valid) tag_pend <= 1'b0;
       if (rdr_start) begin
-        la   <= tag_pend ? tbase : i_ba;
+        la   <= {tag_pend ? tbase : i_ba, 2'b00};
         rst_ <= 2'd1;
-        cb   <= 6'd0;
+        cb   <= 4'd0;
         rdq  <= 1'b0;
       end else if (start) begin
         rst_ <= 2'd0;                       // idle until a tag check starts it
       end else begin
         case (rst_)
-          2'd1: begin                       // lane 0 read issued
-            la   <= la + 9'd1;
+          2'd1: begin                       // word 0 read issued
+            la   <= la + 11'd1;
             rst_ <= 2'd2;
           end
-          2'd2: begin                       // lane 0 arrives, lane 1 read issued
+          2'd2: begin                       // word 0 arrives, word 1 read issued
             CL   <= brdata;
-            la   <= la + 9'd1;
+            la   <= la + 11'd1;
             rdq  <= 1'b1;
             rst_ <= 2'd3;
           end
@@ -411,10 +416,10 @@ module pqse_masked (
             rdq <= 1'b0;
             if (rdq) NL <= brdata;
             if (ctake) begin
-              cb <= cb + 6'd1;
-              if (cb == 6'd63) begin        // switch lanes, prefetch the next one
+              cb <= cb + 4'd1;
+              if (cb == 4'd15) begin        // switch words, prefetch the next one
                 CL  <= NL;
-                la  <= la + 9'd1;
+                la  <= la + 11'd1;
                 rdq <= 1'b1;
               end
             end
@@ -426,27 +431,28 @@ module pqse_masked (
       // ---- B2A / tag engine ----
       tgap <= t_issue;
       if (start && i_op == M_STRM) begin
-        b_act <= 1'b1; b_sd <= 1'b0; b_m1 <= 1'b0; lv <= 1'b0; bi <= 6'd0; cbi <= 2'd0;
+        b_act <= 1'b1; b_sd <= 1'b0; b_m1 <= 1'b0; lv <= 1'b0; bi <= 4'd0; cbi <= 2'd0;
         chi <= 1'b0; cw <= 8'd0; s1v <= 1'b0;
       end else if (start && (i_op == M_MU || i_op == M_CBD)) begin
-        b_act <= 1'b1; b_sd <= 1'b1; b_m1 <= (i_op == M_MU); lv <= 1'b0; bi <= 6'd0;
+        b_act <= 1'b1; b_sd <= 1'b1; b_m1 <= (i_op == M_MU); lv <= 1'b0; bi <= 4'd0;
         cbi <= 2'd0; chi <= 1'b0; cw <= 8'd0; s1v <= 1'b0; mreq <= 1'b0;
-        mshf <= shuf;
+        mshf <= shuf; pqok <= 1'b0;
       end else if (b_act) begin
-        // lane input
-        if (!b_sd && s_valid && s_ready) begin L0 <= s_v0; L1 <= s_v1; lv <= 1'b1; bi <= 6'd0; end
+        // word input
+        if (!b_sd && s_valid && s_ready) begin L0 <= s_v0; L1 <= s_v1; lv <= 1'b1; bi <= 4'd0; end
         if (b_sd) begin
-          // one word per lane load, in the order mw: MU 2 bits of m, CBD 8 PRF bits
-          if (!lv && !mreq && cw < 8'd128) mreq <= 1'b1;
+          // one seed word per word, in the order mw: MU 2 bits of m, CBD 8 PRF bits
+          if (!lv && !mreq && pqok && cw < 8'd128) mreq <= 1'b1;
+          pqok <= !(b_issue && lastc && chi);              // cw advances this clock
           if (mreq) begin
             L0 <= srd0; L1 <= srd1; lv <= 1'b1; mreq <= 1'b0;
-            bi <= b_m1 ? {mw[4:0], 1'b0} : {mw[2:0], 3'b000};
+            bi <= b_m1 ? {mw[2:0], 1'b0} : {mw[0], 3'b000};
           end
         end
         // tag compare: consume bits, 256 in all (cw counts them in pairs)
         if (t_issue) begin
-          bi <= bi + 6'd1;
-          if (bi == 6'd63) lv <= 1'b0;
+          bi <= bi + 4'd1;
+          if (bi == 4'd15) lv <= 1'b0;
           chi <= ~chi;
           if (chi) cw <= cw + 8'd1;
           if (chi && cw == 8'd127) b_act <= 1'b0;
@@ -463,8 +469,8 @@ module pqse_masked (
           s1_hi    <= chi;
           s1_lastw <= lastw;
           s1_w     <= b_sd ? mw : cw[6:0];
-          bi <= bi + 6'd1;
-          if (bi == 6'd63 || (b_sd && lastw)) lv <= 1'b0;  // seed source: reload after each word
+          bi <= bi + 4'd1;
+          if (bi == 4'd15 || (b_sd && lastw)) lv <= 1'b0;  // seed source: reload after each word
           if (lastc) begin
             cbi <= 2'd0;
             chi <= ~chi;
@@ -509,37 +515,37 @@ module pqse_masked (
       end
       // ---- select ----
       if (start && i_op == M_SEL) begin
-        sel_act <= 1'b1; sph <= 3'd0; sj <= 2'd0;
+        sel_act <= 1'b1; sph <= 3'd0; sj <= 4'd0;
       end else if (sel_act) begin
         case (sph)
           3'd0: sph <= 3'd1;
-          3'd1: begin D0 <= srd0; D1 <= srd1; sph <= 3'd2; end          // K' lane
+          3'd1: begin D0 <= srd0; D1 <= srd1; sph <= 3'd2; end          // K' word
           3'd2: begin
             D0 <= D0 ^ srd0; D1 <= D1 ^ srd1;                            // K' ^ K-bar (per share)
             kb0 <= srd0;     kb1 <= srd1;
-            sb <= 7'd0; sph <= 3'd3;
+            sb <= 5'd0; sph <= 3'd3;
           end
           3'd3: begin
-            if (sb <= 7'd63) begin
+            if (sb <= 5'd15) begin
               s00 <= ok0 & db0;
               s01 <= (ok0 & db1) ^ r_sel;
               s10 <= (ok1 & db0) ^ r_sel;
               s11 <= ok1 & db1;
-              D0  <= {1'b0, D0[63:1]};                   // next bit of K' ^ K-bar to bit 0
-              D1  <= {1'b0, D1[63:1]};
+              D0  <= {1'b0, D0[15:1]};                   // next bit of K' ^ K-bar to bit 0
+              D1  <= {1'b0, D1[15:1]};
             end
-            if (sb >= 7'd1) begin
-              Osh0  <= {kb0[0] ^ s00 ^ s01, Osh0[63:1]};
-              Osh1  <= {kb1[0] ^ s11 ^ s10, Osh1[63:1]};
-              kb0 <= {1'b0, kb0[63:1]};                  // next bit of K-bar to bit 0
-              kb1 <= {1'b0, kb1[63:1]};
+            if (sb >= 5'd1) begin
+              Osh0  <= {kb0[0] ^ s00 ^ s01, Osh0[15:1]};
+              Osh1  <= {kb1[0] ^ s11 ^ s10, Osh1[15:1]};
+              kb0 <= {1'b0, kb0[15:1]};                  // next bit of K-bar to bit 0
+              kb1 <= {1'b0, kb1[15:1]};
             end
-            if (sb == 7'd64) sph <= 3'd4;
-            sb <= sb + 7'd1;
+            if (sb == 5'd16) sph <= 3'd4;
+            sb <= sb + 5'd1;
           end
           3'd4: begin
-            if (sj == 2'd3) sel_act <= 1'b0;
-            sj  <= sj + 2'd1;
+            if (sj == 4'd15) sel_act <= 1'b0;
+            sj  <= sj + 4'd1;
             sph <= 3'd0;
           end
           default: sph <= 3'd0;
@@ -548,8 +554,8 @@ module pqse_masked (
       // ---- idle: no secret data left in the gadget registers (zeroization
       // hygiene; the ok shares stay, OKINI .. OKCHK / SEL span instructions) ----
       if (!start && !b_act && !sel_act && !wbusy && !s1v) begin
-        L0  <= 64'd0; L1  <= 64'd0; D0 <= 64'd0; D1 <= 64'd0; kb0 <= 64'd0; kb1 <= 64'd0;
-        Osh0  <= 64'd0; Osh1  <= 64'd0; T  <= 12'd0; Rd <= 12'd0; b1d <= 1'b0;
+        L0  <= 16'd0; L1  <= 16'd0; D0 <= 16'd0; D1 <= 16'd0; kb0 <= 16'd0; kb1 <= 16'd0;
+        Osh0  <= 16'd0; Osh1  <= 16'd0; T  <= 12'd0; Rd <= 12'd0; b1d <= 1'b0;
         acc0 <= 12'd0; acc1 <= 12'd0; wr0 <= 24'd0; wr1 <= 24'd0;
         nw0lo <= 12'd0; nw1lo <= 12'd0;
         s00 <= 1'b0; s01 <= 1'b0; s10 <= 1'b0; s11 <= 1'b0;

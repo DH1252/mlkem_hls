@@ -590,13 +590,13 @@ module tb_pqse;
     report("lifecycle cannot go back", int'(st != 2));
 
     // 13 third fault -> KILLED: a fault in the first decoding of m' ---------------------------
-    // two bits of share 0 of m' (seed entry E_MP = 3, lane 0 = word 12) flip after the first
+    // two bits of share 0 of m' (seed entry E_MP = 3, lane 0, word 0 = RAM word 48) flip after the first
     // decoding: the RAM parity cannot see a double-bit error, the second decoding can
     put(B_XIN, c_a, 0, CT);
     start(DECAPS, 0);
     wait (dut.u_sys.u_core.pc == PC_DC_SEQ);
     @(negedge clk);
-    dut.u_sys.u_core.u_seed0.g_mlab.mem[12] = dut.u_sys.u_core.u_seed0.g_mlab.mem[12] ^ 65'h3;
+    dut.u_sys.u_core.u_seed0.g_mlab.mem[48] = dut.u_sys.u_core.u_seed0.g_mlab.mem[48] ^ 17'h3;
     finish(res, cyc);
     rd(STATUS, st);
     run(KEYGEN, 0, res2, cyc);

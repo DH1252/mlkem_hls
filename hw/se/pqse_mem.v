@@ -12,10 +12,11 @@
 //   polynomial RAM   2 x (1024 x 25): RAM 0 holds the even slots (share 0 and
 //                    public data), RAM 1 the odd slots (share 1); 16 slots x 128
 //                    words, word w = {c[2w+1], c[2w]}, + an even-parity bit
-//   I/O buffer       512 x 64 as two 512 x 32 halves (host writes 32-bit words)
-//   seed registers   2 x (64 x 65): one RAM per Boolean share (+ parity), so
-//                    the two shares never share a RAM, a bit line or an output
-//                    register
+//   I/O buffer       512 lanes x 4 16-bit words as two 1024 x 16 RAMs (even /
+//                    odd words; the host writes 32-bit words)
+//   seed registers   2 x (256 x 17): 16-bit words + parity, one RAM per Boolean
+//                    share, so the two shares never share a RAM, a bit line or
+//                    an output register
 //
 // Side-channel rules ("precharge"): the write-data buses of the polynomial RAMs
 // are AND-gated with their write enables in pqse_core.v; the engines never
@@ -46,8 +47,8 @@ module pqse_ram_1r1w #(
       (* no_rw_check *) reg [DW-1:0] mem [0:(1<<AW)-1];
 `elsif PQSE_GOWIN_EDA
       // GowinSynthesis: block RAM, not shadow SRAM. The read is registered here
-      // anyway, and the two 64 x 65 seed RAMs as shadow SRAM cost ~800 logic
-      // units (each RAM16 counts as 6) against 2 BSRAM each; one RAM per share
+      // anyway, and the two seed RAMs as shadow SRAM cost ~800 logic units
+      // (each RAM16 counts as 6) against one BSRAM each; one RAM per share
       // either way, so the shares still never share a RAM.
       reg [DW-1:0] mem [0:(1<<AW)-1] /* synthesis syn_ramstyle = "block_ram" */;
 `else

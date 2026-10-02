@@ -10,9 +10,10 @@
 // Memories
 //   polynomial RAM  two 1024 x 25 RAMs: even slots (share 0, public data) and
 //                   odd slots (share 1). 24 data bits + even parity.
-//   I/O buffer      512 x 64 as two 32-bit halves (the host writes 32-bit words
-//                   while the core is idle)
-//   seed registers  2 x 64 x 65: one RAM per Boolean share, + parity
+//   I/O buffer      512 lanes x 4 16-bit words, as two 1024 x 16 RAMs (even /
+//                   odd words; the host writes 32-bit words while the core is idle)
+//   seed registers  2 x 256 x 17: one RAM per Boolean share, 16-bit words +
+//                   parity (16 entries x 4 lanes x 4 words)
 //
 // Side channels (first order, robust probing model with glitches and
 // transitions; the gadget-level proof is scripts/pqse_probe_verify.py):
@@ -65,9 +66,10 @@ module pqse_core #(
 
   // =============================== sequencer ===========================================
   localparam [3:0] Q_IDLE = 4'd0, Q_FETCH = 4'd1, Q_DLY = 4'd2, Q_EXEC = 4'd3,
-                   Q_WAIT = 4'd4, Q_RSD = 4'd5, Q_RSW = 4'd6,
+                   Q_WAIT = 4'd4,                Q_RSW = 4'd6,   // (5: unused)
                    Q_PG = 4'd7,     // decide: does this instruction need a fresh permutation?
-                   Q_PW = 4'd8;     // wait for the Fisher-Yates shuffle (pqse_perm.v)
+                   Q_PW = 4'd8,     // wait for the Fisher-Yates shuffle (pqse_perm.v)
+                   Q_RXS = 4'd9;    // ST_RXACC: slide the replay window, one bit per clock
   reg  [3:0]  q;
   reg  [9:0]  pc;           // 1024-entry microcode ROM
   reg  [9:0]  pcn;          // always ~pc (fault detection)
@@ -83,11 +85,10 @@ module pqse_core #(
   reg  [63:0] rx_max;       // ... the highest accepted counter
   reg  [63:0] rx_bits;      // ... 64-message replay window: bit k = counter rx_max - k accepted
   wire [63:0] ctr_rx;       // counter of the message being opened (pqse_io.v)
-  wire [63:0] rx_sh  = ctr_rx - rx_max;    // newer by
-  wire [63:0] rx_age = rx_max - ctr_rx;    // older by
+  wire        rx_new;       // ... newer than rx_max (pqse_io.v, IO_CTRC)
+  wire [6:0]  rx_dist;      // ... newer / older by (64: 64 or more)
+  reg  [5:0]  rxc;          // Q_RXS: window shifts left
   reg  [3:0]  dly;
-  reg  [1:0]  rw;           // reseed: TRNG words collected
-  reg [191:0] rseed;
   reg         wfirst;       // first clock of Q_WAIT
   reg         fault;        // a fault was detected during this command
 
@@ -184,13 +185,15 @@ module pqse_core #(
   wire        t_valid, t_take_sp, t_take_io;
   wire [63:0] t_word;
   wire        t_en_sp, t_en_io;
-  wire        rs_take  = (q == Q_RSD) && t_valid && (rw != 2'd3);
-  wire        t_take   = rs_take | t_take_sp | t_take_io;
-  wire        t_en     = (q == Q_RSD) | t_en_sp | t_en_io;
-  wire        pr_reseed = (q == Q_RSD) && (rw == 2'd3);
+  // ST_RESEED: the PRNG loads its key and IV straight from 3 TRNG words
+  wire        pr_ten, pr_take;
+  wire        pr_reseed = exec && (cls == C_SET) && (ins_r[91:88] == ST_RESEED);
+  wire        t_take   = pr_take | t_take_sp | t_take_io;
+  wire        t_en     = pr_ten | t_en_sp | t_en_io;
   // dummy clocks before an engine start; not while pqse_perm draws an NTT layer
-  // order in the background (it takes a word every 2 clocks: no room for a third
-  // taker, and that instruction is shuffled per layer anyway)
+  // order in the background (it takes a word every 3 clocks, and a word is fully
+  // fresh only 2 clocks after a take: no room for another taker; that
+  // instruction is shuffled per layer anyway)
   wire        dly_ok   = hide_en && is_eng && pg_ready;
   wire        dly_take = (q == Q_DLY) && dly_ok && (dly == 4'd0);
   wire        sp_rt, p_rt, io_rt, m_rt, pf_rt, m_hi;
@@ -201,7 +204,8 @@ module pqse_core #(
   pqse_trng u_trng (.clk(clk), .rst(rst), .en(t_en), .take(t_take),
                     .word(t_word), .valid(t_valid), .fail(trng_fail), .ok(trng_ok));
   pqse_prng u_prng (.clk(clk), .rst(rst), .masked_en(MASKED != 0), .reseed(pr_reseed),
-                    .seed(rseed[159:0]), .busy(pr_busy), .take(r_take), .take_hi(r_hi), .rnd(rnd));
+                    .seed_en(pr_ten), .seed_valid(t_valid), .seed(t_word), .seed_take(pr_take),
+                    .busy(pr_busy), .take(r_take), .take_hi(r_hi), .rnd(rnd));
   pqse_perm u_perm (.clk(clk), .rst(rst), .start(pg_start), .n64(pg_n64),
                     .next(pg_next), .busy(pg_busy), .ready(pg_ready),
                     .rnd(rnd), .rnd_take(pg_rt), .idx(pq_idx), .val(pq_val));
@@ -229,7 +233,7 @@ module pqse_core #(
       cycles <= 32'd0; dly <= 4'd0; bad <= 1'b0; wrap <= 1'b0; inj <= 1'b0; kx <= 1'b0;
       zc <= 1'b0; role <= 1'b0; ctr_tx <= 64'd0;
       rx_any <= 1'b0; rx_max <= 64'd0; rx_bits <= 64'd0;
-      pc <= 10'd0; pcn <= 10'h3FF; rw <= 2'd0; wfirst <= 1'b0; fault <= 1'b0; ins_p <= 1'b0;
+      pc <= 10'd0; pcn <= 10'h3FF; wfirst <= 1'b0; fault <= 1'b0; ins_p <= 1'b0;
       ins_r <= 96'd0; fr <= 1'b0;
     end else begin
       done <= 1'b0;
@@ -267,8 +271,8 @@ module pqse_core #(
               result <= R_RNGFAIL;
               done   <= 1'b1;
               q      <= Q_IDLE;
-            end else begin
-              fr    <= 1'b0;
+            end else if (!any_busy) begin    // (after an abort: until the engine still
+              fr    <= 1'b0;                 //  running has finished; the engines read ins_r)
               ins_r <= rom_q;
               ins_p <= rom_p;
               q     <= Q_PG;
@@ -317,24 +321,27 @@ module pqse_core #(
                     rx_any <= 1'b0; rx_max <= 64'd0; rx_bits <= 64'd0;
                   end
                   ST_TXINC: ctr_tx <= ctr_tx + 64'd1;
-                  // accept ctr_rx (pqse_io.v checked it is fresh): slide the window
+                  // accept ctr_rx (pqse_io.v checked it is fresh and measured
+                  // how far it is from rx_max): slide the window. A newer counter
+                  // shifts the window by its distance, one bit per clock (Q_RXS)
                   ST_RXACC: begin
-                    if (!rx_any) begin
+                    if (!rx_any || (rx_new && rx_dist[6])) begin
                       rx_any  <= 1'b1;
                       rx_max  <= ctr_rx;
                       rx_bits <= 64'd1;
-                    end else if (ctr_rx > rx_max) begin
+                    end else if (rx_new) begin
                       rx_max  <= ctr_rx;
-                      rx_bits <= (rx_sh >= 64'd64) ? 64'd1 : ((rx_bits << rx_sh[5:0]) | 64'd1);
+                      rxc     <= rx_dist[5:0];
                     end else begin
-                      rx_bits <= rx_bits | (64'd1 << rx_age[5:0]);
+                      rx_bits <= rx_bits | (64'd1 << rx_dist[5:0]);
                     end
                   end
                   default: ;
                 endcase
                 if (ins_r[91:88] == ST_RESEED) begin
-                  rw <= 2'd0;
-                  q  <= Q_RSD;
+                  q  <= Q_RSW;                // pr_reseed pulses in this clock
+                end else if (ins_r[91:88] == ST_RXACC && rx_any && rx_new && !rx_dist[6]) begin
+                  q  <= Q_RXS;
                 end else begin
                   pc  <= pc + 10'd1;
                   pcn <= ~(pc + 10'd1);
@@ -355,18 +362,19 @@ module pqse_core #(
               q   <= Q_FETCH;
             end
           end
-          Q_RSD: begin                    // collect 3 TRNG words, then reseed the PRNG
-            if (rw == 2'd3) begin
-              q <= Q_RSW;
-            end else if (t_valid) begin
-              rseed <= {rseed[127:0], t_word};
-              rw    <= rw + 2'd1;
-            end
-          end
-          Q_RSW: if (!pr_busy) begin
+          Q_RSW: if (!pr_busy) begin      // the PRNG takes 3 TRNG words and initializes
             pc  <= pc + 10'd1;
             pcn <= ~(pc + 10'd1);
             q   <= Q_FETCH;
+          end
+          Q_RXS: begin                    // rx_bits << rx_dist, then bit 0 := 1 (ctr_rx)
+            rxc     <= rxc - 6'd1;
+            rx_bits <= {rx_bits[62:0], (rxc == 6'd1)};
+            if (rxc == 6'd1) begin
+              pc  <= pc + 10'd1;
+              pcn <= ~(pc + 10'd1);
+              q   <= Q_FETCH;
+            end
           end
           default: q <= Q_IDLE;
         endcase
@@ -402,42 +410,44 @@ module pqse_core #(
   wire [23:0] pm_rd  = pm_rdp[23:0];
   wire        perr_p = pm_rv && (^pm_rdp);
 
-  // ---- I/O buffer, two 32-bit halves ----
+  // ---- I/O buffer: 16-bit words (v5), lane l word k at {l, k}; two RAMs, even
+  // and odd words, so a host 32-bit word ({lane, half}) is one address of both ----
   reg         cb_re, cb_we;
-  reg  [8:0]  cb_ra, cb_wa;
-  reg  [63:0] cb_wd;
-  wire [31:0] lo_rd, hi_rd;
+  reg  [10:0] cb_ra, cb_wa;          // {lane, word}
+  reg  [15:0] cb_wd;
+  wire [15:0] ev_rd, od_rd;
   wire        b_core = run;
-  wire        lo_we  = b_core ? cb_we : (h_we && !h_addr[0]);
-  wire        hi_we  = b_core ? cb_we : (h_we &&  h_addr[0]);
-  wire [8:0]  b_wa   = b_core ? cb_wa : h_addr[9:1];
-  wire [31:0] lo_wd  = b_core ? cb_wd[31:0]  : h_wdata;
-  wire [31:0] hi_wd  = b_core ? cb_wd[63:32] : h_wdata;
+  wire        ev_we  = b_core ? (cb_we && !cb_wa[0]) : h_we;
+  wire        od_we  = b_core ? (cb_we &&  cb_wa[0]) : h_we;
+  wire [9:0]  b_wa   = b_core ? cb_wa[10:1] : h_addr;
+  wire [15:0] ev_wd  = b_core ? cb_wd : h_wdata[15:0];
+  wire [15:0] od_wd  = b_core ? cb_wd : h_wdata[31:16];
   wire        b_re   = b_core ? cb_re : h_re;
-  wire [8:0]  b_ra   = b_core ? cb_ra : h_addr[9:1];
-  pqse_ram_1r1w #(.AW(9), .DW(32), .RAMSTYLE(0)) u_blo (
-    .clk(clk), .we(lo_we), .waddr(b_wa), .wdata(lo_wd), .re(b_re), .raddr(b_ra), .rdata(lo_rd));
-  pqse_ram_1r1w #(.AW(9), .DW(32), .RAMSTYLE(0)) u_bhi (
-    .clk(clk), .we(hi_we), .waddr(b_wa), .wdata(hi_wd), .re(b_re), .raddr(b_ra), .rdata(hi_rd));
-  wire [63:0] cb_rd = {hi_rd, lo_rd};
-  reg         h_half;
-  always @(posedge clk) if (h_re && !b_core) h_half <= h_addr[0];
-  assign h_rdata = h_half ? hi_rd : lo_rd;
+  wire [9:0]  b_ra   = b_core ? cb_ra[10:1] : h_addr;
+  pqse_ram_1r1w #(.AW(10), .DW(16), .RAMSTYLE(2)) u_blo (
+    .clk(clk), .we(ev_we), .waddr(b_wa), .wdata(ev_wd), .re(b_re), .raddr(b_ra), .rdata(ev_rd));
+  pqse_ram_1r1w #(.AW(10), .DW(16), .RAMSTYLE(2)) u_bhi (
+    .clk(clk), .we(od_we), .waddr(b_wa), .wdata(od_wd), .re(b_re), .raddr(b_ra), .rdata(od_rd));
+  reg         cb_sel;                // the word the core read last: odd
+  always @(posedge clk) if (b_re && b_core) cb_sel <= cb_ra[0];
+  wire [15:0] cb_rd = cb_sel ? od_rd : ev_rd;
+  assign h_rdata = {od_rd, ev_rd};
 
-  // ---- seed registers: one RAM per share, 64 bits + parity ----
+  // ---- seed registers: one RAM per share, 16-bit words + parity (v5), word
+  // address {entry, lane, word} ----
   reg         sr_re, sr_we;
-  reg  [5:0]  sr_ra, sr_wa;
-  reg  [63:0] sr_wd0, sr_wd1;
-  wire [64:0] sp0, sp1;
-  wire [63:0] sr_rd0, sr_rd1;
-  pqse_ram_1r1w #(.AW(6), .DW(65), .RAMSTYLE(1)) u_seed0 (
+  reg  [7:0]  sr_ra, sr_wa;
+  reg  [15:0] sr_wd0, sr_wd1;
+  wire [16:0] sp0, sp1;
+  wire [15:0] sr_rd0, sr_rd1;
+  pqse_ram_1r1w #(.AW(8), .DW(17), .RAMSTYLE(1)) u_seed0 (
     .clk(clk), .we(sr_we), .waddr(sr_wa), .wdata({^sr_wd0, sr_wd0}),
     .re(sr_re), .raddr(sr_ra), .rdata(sp0));
-  pqse_ram_1r1w #(.AW(6), .DW(65), .RAMSTYLE(1)) u_seed1 (
+  pqse_ram_1r1w #(.AW(8), .DW(17), .RAMSTYLE(1)) u_seed1 (
     .clk(clk), .we(sr_we & (MASKED != 0)), .waddr(sr_wa), .wdata({^sr_wd1, sr_wd1}),
     .re(sr_re & (MASKED != 0)), .raddr(sr_ra), .rdata(sp1));
-  assign sr_rd0 = sp0[63:0];
-  assign sr_rd1 = (MASKED != 0) ? sp1[63:0] : 64'd0;   // unprotected build: no share-1 RAM
+  assign sr_rd0 = sp0[15:0];
+  assign sr_rd1 = (MASKED != 0) ? sp1[15:0] : 16'd0;   // unprotected build: no share-1 RAM
   // per-share parity, registered separately: the two shares of a seed lane
   // never meet in one gate (each check bit is constant 0 unless a fault hit)
   reg         sr_rv, pe0, pe1;
@@ -452,11 +462,11 @@ module pqse_core #(
   // =============================== engines ============================================
   // ---- sponge + unmasked samplers ----
   wire        sp_sre, sp_swe, sp_bre, sp_bwe;
-  wire [5:0]  sp_sra, sp_swa;
-  wire [63:0] sp_swd0, sp_swd1, sp_bwd;
-  wire [8:0]  sp_bra, sp_bwa;
+  wire [7:0]  sp_sra, sp_swa;
+  wire [15:0] sp_swd0, sp_swd1, sp_bwd;
+  wire [10:0] sp_bra, sp_bwa;
   wire        so_valid, so_ready;
-  wire [63:0] so_v0, so_v1;
+  wire [15:0] so_v0, so_v1;
   wire        pa_ready, pa_done, pa_we, m_sready;
   wire [10:0] pa_wa;
   wire [23:0] pa_wd;
@@ -478,7 +488,7 @@ module pqse_core #(
 
   pqse_parse u_parse (
     .clk(clk), .rst(rst), .start(pa_start), .slot(ins_r[11:8]),
-    .in_valid(so_valid && sink == SNK_SNTT), .in_lane(so_v0), .in_ready(pa_ready),
+    .in_valid(so_valid && sink == SNK_SNTT), .in_word(so_v0), .in_ready(pa_ready),
     .done(pa_done), .we(pa_we), .waddr(pa_wa), .wdata(pa_wd));
 
   // ---- polynomial unit ----
@@ -497,9 +507,9 @@ module pqse_core #(
   wire        io_re, io_we, io_bre, io_bwe, io_sre, io_swe;
   wire [10:0] io_ra, io_wa;
   wire [23:0] io_wd;
-  wire [8:0]  io_bra, io_bwa;
-  wire [63:0] io_bwd, io_swd0, io_swd1;
-  wire [5:0]  io_sra, io_swa;
+  wire [10:0] io_bra, io_bwa;
+  wire [15:0] io_bwd, io_swd0, io_swd1;
+  wire [7:0]  io_sra, io_swa;
   pqse_io u_io (
     .clk(clk), .rst(rst), .start(io_start), .ins(ins_r), .busy(io_busy), .bad_set(io_bad),
     .re(io_re), .raddr(io_ra), .rdata(pm_rd), .we(io_we), .waddr(io_wa), .wdata(io_wd),
@@ -509,15 +519,16 @@ module pqse_core #(
     .rnd(rnd), .rnd_take(io_rt),
     .t_en(t_en_io), .t_valid(t_valid), .t_word(t_word), .t_take(t_take_io),
     .ctr_tx(ctr_tx), .rx_any(rx_any), .rx_max(rx_max), .rx_bits(rx_bits), .ctr_rx(ctr_rx),
+    .rx_new(rx_new), .rx_dist(rx_dist),
     .fault_set(io_fault));
 
   // ---- masked unit ----
   wire        m_re, m_we, m_bre, m_bwe, m_sre, m_swe;
   wire [10:0] m_ra, m_wa;
   wire [23:0] m_wd;
-  wire [8:0]  m_bra, m_bwa;
-  wire [63:0] m_bwd, m_swd0, m_swd1;
-  wire [5:0]  m_sra, m_swa;
+  wire [10:0] m_bra, m_bwa;
+  wire [15:0] m_bwd, m_swd0, m_swd1;
+  wire [7:0]  m_sra, m_swa;
   pqse_masked u_masked (
     .clk(clk), .rst(rst), .start(m_start), .ins(m_ins), .busy(m_busy), .bad_set(m_bad),
     .s_valid(so_valid && (sink == SNK_MB2A || sink == SNK_MCMP)), .s_v0(so_v0), .s_v1(so_v1),
@@ -531,9 +542,9 @@ module pqse_core #(
 
   // ---- PUF ----
   wire        pf_bre, pf_bwe, pf_sre, pf_swe;
-  wire [8:0]  pf_bra, pf_bwa;
-  wire [63:0] pf_bwd, pf_swd0, pf_swd1;
-  wire [5:0]  pf_sra, pf_swa;
+  wire [10:0] pf_bra, pf_bwa;
+  wire [15:0] pf_bwd, pf_swd0, pf_swd1;
+  wire [7:0]  pf_sra, pf_swa;
   pqse_puf #(.WIN(PUF_WIN)) u_puf (
     .clk(clk), .rst(rst), .start(pf_start), .ins(ins_r), .busy(pf_busy),
     .bre(pf_bre), .braddr(pf_bra), .brdata(cb_rd), .bwe(pf_bwe), .bwaddr(pf_bwa), .bwdata(pf_bwd),
@@ -544,8 +555,8 @@ module pqse_core #(
   // =============================== port multiplexing ===================================
   always @* begin
     pm_re = 1'b0; pm_ra = 11'd0; pm_we = 1'b0; pm_wa = 11'd0; pm_wd = 24'd0;
-    cb_re = 1'b0; cb_ra = 9'd0;  cb_we = 1'b0; cb_wa = 9'd0;  cb_wd = 64'd0;
-    sr_re = 1'b0; sr_ra = 6'd0;  sr_we = 1'b0; sr_wa = 6'd0;  sr_wd0 = 64'd0; sr_wd1 = 64'd0;
+    cb_re = 1'b0; cb_ra = 11'd0; cb_we = 1'b0; cb_wa = 11'd0; cb_wd = 16'd0;
+    sr_re = 1'b0; sr_ra = 8'd0;  sr_we = 1'b0; sr_wa = 8'd0;  sr_wd0 = 16'd0; sr_wd1 = 16'd0;
     // Precharge of the two polynomial-RAM output registers between instructions
     // (no engine runs in these clocks): RAM 1 reads the all-zero slot S_Z, RAM 0
     // a public word (S_T word 0). An instruction then never starts with a word
