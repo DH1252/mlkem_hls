@@ -164,6 +164,7 @@ module pqse_keccak #(
   reg  [4:0]  wbi;
   // absorb pipeline
   reg         ap;
+  reg         apn;                 // apv may hold a lane value (loaded last clock)
   reg  [4:0]  apa;
   reg  [63:0] apv0, apv1;
 
@@ -257,23 +258,33 @@ module pqse_keccak #(
   always @(posedge clk) begin
     if (rst) begin
       ks <= K_IDLE; mj <= 1'b0; clean <= 1'b0; ap <= 1'b0; wbv <= 1'b0; dv <= 1'b0; iss <= 1'b0;
-      apv0 <= 64'd0; apv1 <= 64'd0; T0 <= 64'd0; T1 <= 64'd0;
+      apn <= 1'b0; apv0 <= 64'd0; apv1 <= 64'd0; T0 <= 64'd0; T1 <= 64'd0;
       X0r <= 64'd0; X1r <= 64'd0; Y0r <= 64'd0; Y1r <= 64'd0;
       d00 <= 64'd0; d01 <= 64'd0; d10 <= 64'd0; d11 <= 64'd0;
     end else begin
-      // absorb: the lane is written the next clock (from apv, 0 outside an absorb)
+      // absorb: the lane is written the next clock (from apv, 0 outside an absorb).
+      // Low power: apa / apv load only in an absorb clock and the clock after
+      // it (back to 0), then hold 0 - their clock can be gated between absorbs
       ap   <= ax_en && (ks == K_IDLE);
-      apa  <= ax_idx;
-      apv0 <= ax_en ? ax_v0 : 64'd0;
-      apv1 <= (ax_en && M1) ? ax_v1 : 64'd0;
-      // chi: Y and the products load every clock (their value in their clock, else 0)
-      Y0r <= 64'd0; Y1r <= 64'd0;
-      d00 <= 64'd0; d01 <= 64'd0; d10 <= 64'd0; d11 <= 64'd0;
-      if (dom_now) begin
-        d00 <= X0r & Y0r;
-        d01 <= (X0r & Y1r) ^ rr;
-        d10 <= (X1r & Y0r) ^ rr;
-        d11 <= X1r & Y1r;
+      apn  <= ax_en;
+      if (ax_en || apn) begin
+        apa  <= ax_idx;
+        apv0 <= ax_en ? ax_v0 : 64'd0;
+        apv1 <= (ax_en && M1) ? ax_v1 : 64'd0;
+      end
+      // chi: Y and the products load every clock while a permutation runs
+      // (their value in their clock, else 0), up to the last write-back clock;
+      // then they are 0 and hold, so an idle Keccak's clock can be gated
+      // (low power: 384 flip-flops) without a hold path in use
+      if ((ks != K_IDLE) || wbv) begin
+        Y0r <= 64'd0; Y1r <= 64'd0;
+        d00 <= 64'd0; d01 <= 64'd0; d10 <= 64'd0; d11 <= 64'd0;
+        if (dom_now) begin
+          d00 <= X0r & Y0r;
+          d01 <= (X0r & Y1r) ^ rr;
+          d10 <= (X1r & Y0r) ^ rr;
+          d11 <= X1r & Y1r;
+        end
       end
       wbv <= 1'b0;
 

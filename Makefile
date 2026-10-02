@@ -183,7 +183,9 @@ sim-v3: | $(BUILD)
 	@grep -q "TEST PASSED" $(BUILD)/v3sim/sim.log
 
 # ---- the post-quantum secure element (hw/se) ---------------------------------------------
-# TRACE=1 prints every microcode instruction. Also runs the Python check of the
+# TRACE=1 prints every microcode instruction. LOWPOWER=1 simulates the ASIC
+# low-power variant (PQSE_LOWPOWER: operand isolation of the shared buses), as
+# the sky130 power flows build it. Also runs the Python check of the
 # masked-gadget and fuzzy-extractor math and the robust-probing check first,
 # and after the simulation the independent KMAC check of the sealed messages
 # and the PUF / TRNG statistics.
@@ -195,7 +197,7 @@ sim-se: | $(BUILD)
 	cp -r hw/sim/vectors $(BUILD)/sesim/
 	cd $(BUILD)/sesim && $(VERILATOR) --binary --timing -j 2 -Wno-fatal -Wno-lint -Wno-style \
 	    --top-module tb_pqse -Mdir obj -o ../vtb -I../../hw/se \
-	    +define+PQSE_SIM_INIT $(if $(TRACE),+define+PQSE_TRACE) \
+	    +define+PQSE_SIM_INIT $(if $(TRACE),+define+PQSE_TRACE) $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
 	    ../../hw/sim/tb_pqse.sv $(addprefix ../../,$(SE_SRC)) > build.log 2>&1 \
 	    || { tail -30 build.log; exit 1; }
 	cd $(BUILD)/sesim && ./vtb | tee sim.log
@@ -347,6 +349,8 @@ RAM_MACRO ?= 0
 # low): a register that holds its value is then not clocked at all - the
 # clock-pin power of an idle flip-flop is most of its power. CLOCKGATE=0 keeps
 # enable flip-flops (a mux feedback, clocked every cycle), as before.
+# LOWPOWER=0 builds without PQSE_LOWPOWER (operand isolation of the shared
+# buses), which the power flows enable by default.
 CLOCKGATE ?= 1
 CG_MIN    ?= 4
 # CG_SRST=1 (default): registers written as "if (rst) ... else if (en) ..."
@@ -368,7 +372,7 @@ PW_CGLEG  := $(if $(and $(filter 1,$(CLOCKGATE)),$(filter 1,$(CG_SRST))),dfflega
 	    -cell \$$_DLATCH_?_ 01 -cell \$$_DLATCH_???_ 01 -cell \$$_DLATCHSR_???_ 01; opt_merge; opt_clean;,)
 PW_SRC    := $(if $(filter 1,$(RAM_MACRO)),$(filter-out hw/se/pqse_mem.v,$(SE_SRC)) scripts/power/pqse_ram_macro.v,$(SE_SRC))
 PW_RAMLIB := $(if $(filter 1,$(RAM_MACRO)),$(BUILD)/sepower/pqse_sram.lib,)
-PW_DEFS   :=
+PW_DEFS   := $(if $(filter 0,$(LOWPOWER)),,-DPQSE_LOWPOWER)
 PW_CG     := $(if $(filter 1,$(CLOCKGATE)),clockgate -pos sky130_fd_sc_hd__dlclkp_1 GATE:CLK:GCLK -min_net_size $(CG_MIN);,)
 PW_TAG    := _m$(MASKED)$(if $(PW_RAMLIB),_rammacro)$(if $(PW_CG),_cg)$(if $(PW_DEFS),_lp)
 # ABC_BUF=1 (default): after mapping, ABC buffers high-fan-out nets and sizes
@@ -406,6 +410,8 @@ se-power: | $(BUILD)
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
 	@grep -h "Converted .* FFs" $(BUILD)/sepower/yosys$(PW_TAG).log | sed 's/^/clockgate: /' || true
 	sed -i -E 's/^([[:space:]]*(wire|input|output|reg))[[:space:]]+signed[[:space:]]/\1 /' $(BUILD)/sepower/pqse_top_sky130.v
+	$(PYTHON) scripts/power/pqse_ff_report.py $(BUILD)/sepower/pqse_top_sky130.v > $(BUILD)/sepower/ffs$(PW_TAG).txt
+	@head -25 $(BUILD)/sepower/ffs$(PW_TAG).txt; echo "(all: $(BUILD)/sepower/ffs$(PW_TAG).txt)"
 	SKY130_LIB=$(SKY130_LIB) RAM_LIB=$(PW_RAMLIB) NETLIST=$(BUILD)/sepower/pqse_top_sky130.v ACT=$(ACT) VCD=$(VCD) SCOPE=$(SCOPE) \
 	    $(STA) -no_splash -exit scripts/pqse_power.tcl 2>&1 | tee $(BUILD)/sepower/power$(PW_TAG).txt
 

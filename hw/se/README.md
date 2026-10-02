@@ -79,6 +79,38 @@ Speed is no longer a priority (v4): the target is a contactless card, where the 
 
 What the protection costs in time: running NTT, PWM and INTT once per share; the masked compression (two clocks per adder bit, ~50 clocks per coefficient for d = 10); the second decoding of m′ (~10 k clocks); drawing a Fisher–Yates order before every shuffled instruction (128–256 clocks each, the next NTT layer's order is drawn while the current layer runs); the χ DOM AND (4 clocks per lane). A PUF read takes ~15 clocks (excite a row, let it settle, sample), so a reconstruction is ~15 k clocks, and the 3- or 5-read retry ~45 k / ~75 k.
 
+### Power and energy (ASIC, SkyWater 130 nm)
+
+Measured with `make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1`: the mapped,
+clock-gated netlist runs a whole masked KeyGen in Verilator, every net's
+toggles go into a SAIF, OpenSTA turns them into power and
+`scripts/power/pqse_energy.py` into energy (sky130_fd_sc_hd, tt, 25 C, 1.8 V;
+SRAM macros from access counts with an assumed energy per access; no clock
+tree, wires, pads or analog blocks). Before the low-power RTL below:
+
+| KeyGen | v4 | v5 (serial, Tang Nano 9K) |
+|---|---|---|
+| Clocks | 242,129 | 944,548 |
+| Time at 3.39 MHz | 71 ms | 279 ms |
+| Energy (logic + SRAM) | 49.2 uJ | 59.3 uJ |
+| Average power at 3.39 MHz | 0.69 mW | 0.21 mW |
+
+v4 is the primary design: about one contactless-card transaction slot per KEM
+operation, and the lower energy per operation.
+
+Low-power RTL (no change in function or in the masking schedule):
+
+| Technique | Where |
+|---|---|
+| Idle registers cleared once on going idle (not rewritten every idle clock), so they hold and can be clock-gated | `pqse_poly`, `pqse_mcomp`, `pqse_puf`, `pqse_sponge`, `pqse_masked` (gadget registers) |
+| chi DOM registers (384 flip-flops) load only while a permutation runs; the absorb-port registers only around an absorb | `pqse_keccak` |
+| Operand isolation (`PQSE_LOWPOWER`, ASIC builds): the PRNG word, the TRNG word and the shared RAM read buses reach an engine only while it is busy; the shuffle multiplier sees the PRNG word only while drawing | `pqse_core`, `pqse_perm` |
+| Clock gating (Yosys `clockgate`; registers with a synchronous reset over the enable are first rewritten to enable = en \| rst, `CG_SRST=1`) | `make se-power*`, `CLOCKGATE=1` |
+
+`make se-power` also lists the flip-flops still clocked every cycle, by RTL
+register (`build/sepower/ffs_<tag>.txt`), the next candidates.
+`make sim-se LOWPOWER=1` simulates the operand-isolated variant.
+
 ## 4. Security design (threat → countermeasure)
 
 | Threat | Countermeasure | Where |

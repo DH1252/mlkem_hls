@@ -110,6 +110,7 @@ module pqse_mcomp (
                    S_RD1 = 4'd11;  // read the share 1 word (X0w is clear by now)
 
   reg [3:0]  st;
+  reg        idl;        // the idle registers are cleared
   reg [1:0]  md;
   reg        ng, shf;
   reg [8:0]  bar;        // ciphertext base lane
@@ -223,7 +224,8 @@ module pqse_mcomp (
 
   always @(posedge clk) begin
     if (rst) begin
-      st <= S_IDLE;
+      st  <= S_IDLE;
+      idl <= 1'b0;
     end else begin
       // DOM partial products: loaded in every clock, 0 except right after the
       // AND clock (no hold path). A held p01 / p10 would sit next to the carry
@@ -235,12 +237,18 @@ module pqse_mcomp (
         S_IDLE: if (!start) begin
           // idle: the registers behind the RAM read bus hold nothing (the bus
           // carries other instructions' words, possibly the other share), and
-          // no share of m' or of a coefficient stays behind (zeroization)
-          X0w <= 24'd0; X1w <= 24'd0; Z0 <= 24'd0;
-          G0  <= 64'd0; G1  <= 64'd0; y0r <= 24'd0; y1r <= 24'd0;
-          A0  <= 24'd0; A1  <= 24'd0; B0  <= 24'd0; B1  <= 24'd0;
-          C0  <= 1'b0;  C1  <= 1'b0;  ad0 <= 1'b0;  ad1 <= 1'b0;
+          // no share of m' or of a coefficient stays behind (zeroization).
+          // Cleared once on entering idle, then held (low power: the idle
+          // unit's clock can be gated; nothing loads them while idle)
+          if (!idl) begin
+            X0w <= 24'd0; X1w <= 24'd0; Z0 <= 24'd0;
+            G0  <= 64'd0; G1  <= 64'd0; y0r <= 24'd0; y1r <= 24'd0;
+            A0  <= 24'd0; A1  <= 24'd0; B0  <= 24'd0; B1  <= 24'd0;
+            C0  <= 1'b0;  C1  <= 1'b0;  ad0 <= 1'b0;  ad1 <= 1'b0;
+            idl <= 1'b1;
+          end
         end else begin
+          idl <= 1'b0;
           md  <= mode;
           bar <= ba;
           dd  <= d;

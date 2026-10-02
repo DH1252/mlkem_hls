@@ -108,6 +108,7 @@ module pqse_masked (
   wire       i_acc = ins[57];
 
   reg  [3:0] op;
+  reg        g_idl;    // the idle gadget registers are cleared
   reg  [3:0] s0, s1, e, e2;
   reg  [8:0] ba;
   reg        acc;
@@ -377,7 +378,7 @@ module pqse_masked (
     if (rst) begin
       b_act <= 1'b0; sel_act <= 1'b0; wbusy <= 1'b0; s1v <= 1'b0; lv <= 1'b0;
       rst_ <= 2'd0; rdq <= 1'b0; mreq <= 1'b0; tag_pend <= 1'b0;
-      wd0 <= 24'd0; wd1 <= 24'd0; tgap <= 1'b0;
+      wd0 <= 24'd0; wd1 <= 24'd0; tgap <= 1'b0; g_idl <= 1'b0;
     end else begin
       if (start) begin
         op <= i_op; s0 <= i_s0; s1 <= i_s1; e <= i_e; e2 <= i_e2; ba <= i_ba;
@@ -546,13 +547,20 @@ module pqse_masked (
         endcase
       end
       // ---- idle: no secret data left in the gadget registers (zeroization
-      // hygiene; the ok shares stay, OKINI .. OKCHK / SEL span instructions) ----
+      // hygiene; the ok shares stay, OKINI .. OKCHK / SEL span instructions).
+      // Cleared once on entering idle, then held (low power: nothing loads them
+      // while idle, so their clock can be gated) ----
       if (!start && !b_act && !sel_act && !wbusy && !s1v) begin
-        L0  <= 64'd0; L1  <= 64'd0; D0 <= 64'd0; D1 <= 64'd0; kb0 <= 64'd0; kb1 <= 64'd0;
-        Osh0  <= 64'd0; Osh1  <= 64'd0; T  <= 12'd0; Rd <= 12'd0; b1d <= 1'b0;
-        acc0 <= 12'd0; acc1 <= 12'd0; wr0 <= 24'd0; wr1 <= 24'd0;
-        nw0lo <= 12'd0; nw1lo <= 12'd0;
-        s00 <= 1'b0; s01 <= 1'b0; s10 <= 1'b0; s11 <= 1'b0;
+        if (!g_idl) begin
+          L0  <= 64'd0; L1  <= 64'd0; D0 <= 64'd0; D1 <= 64'd0; kb0 <= 64'd0; kb1 <= 64'd0;
+          Osh0  <= 64'd0; Osh1  <= 64'd0; T  <= 12'd0; Rd <= 12'd0; b1d <= 1'b0;
+          acc0 <= 12'd0; acc1 <= 12'd0; wr0 <= 24'd0; wr1 <= 24'd0;
+          nw0lo <= 12'd0; nw1lo <= 12'd0;
+          s00 <= 1'b0; s01 <= 1'b0; s10 <= 1'b0; s11 <= 1'b0;
+          g_idl <= 1'b1;
+        end
+      end else begin
+        g_idl <= 1'b0;
       end
     end
   end
