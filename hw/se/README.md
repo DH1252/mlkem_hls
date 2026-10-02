@@ -59,7 +59,7 @@ A compact, low-power secure-element chip for ML-KEM-768 (FIPS 203), designed sid
 | **Masking by repeating linear steps per share** (NTT, INTT, PWM on share 0, then share 1) | costs time, not area | — | first order |
 | **Bit-serial masked gadgets**: CBD/B2A, Compress, compare, select | one DOM AND per gadget | — | a register stage after every DOM AND, a compress register before its result is reused |
 | **Share-domain RAMs**: even slots (share 0) and odd slots (share 1) in two RAMs; seed shares in two RAMs | same bits, one extra parity bit per word | — | the shares never share a bit line, sense amplifier or output register |
-| **Shuffle table in a 128 × 7 register file** (2 reads, 1 write: LUTRAM / MLAB, a small register file on a chip), inside-out Fisher–Yates, two clocks per element | ~1 k flip-flops less than a flip-flop table | — | a uniformly random order per instruction and per NTT layer |
+| **Shuffle table in a 128 × 7 RAM** (v5: two block-RAM copies with registered reads, one per read port; a small register file on a chip), inside-out Fisher–Yates, three clocks per element | ~1 k flip-flops less than a flip-flop table | — | a uniformly random order per instruction and per NTT layer |
 | **Parity + control-flow redundancy**; duplication only where a fault would leak (the comparison result, the decoding of m′) | one bit per RAM word, a 10-bit pc shadow, one parity bit per instruction | — | detects the common single faults |
 | **SRAM-cell PUF** (960 cross-coupled NAND pairs, one row of 32 excited per read) | 2 gates per bit (~0.01 mm² in SKY130, ~2 k LUTs on the FPGA, or ~1.9 k flip-flops (latches) and no LUTs as butterfly cells, `PQSE_PUF_BFLY`) instead of 1,920 ring oscillators | only the row being read switches | re-excitable, so majority reads work |
 | Clock enables, RAM read enables (the share-1 Keccak RAM idles in unmasked jobs), operand isolation, TRNG ring oscillators only while collecting | — | yes | — |
@@ -79,7 +79,7 @@ Speed is no longer a priority (v4): the target is a contactless card, where the 
 
 What the protection costs in time: running NTT, PWM and INTT once per share; the masked compression (two clocks per adder bit, ~50 clocks per coefficient for d = 10); the second decoding of m′ (~10 k clocks); drawing a Fisher–Yates order before every shuffled instruction (128–256 clocks each, the next NTT layer's order is drawn while the current layer runs); the χ DOM AND (4 clocks per lane). A PUF read takes ~15 clocks (excite a row, let it settle, sample), so a reconstruction is ~15 k clocks, and the 3- or 5-read retry ~45 k / ~75 k.
 
-### Version 5: serial core for the Tang Nano 9K (in progress)
+### Version 5: serial core for the Tang Nano 9K (all units converted; simulation and fit pending)
 
 Goal: the full feature set (masking, hiding, PUF, secure messaging, fault
 detection) on a Tang Nano 9K (GW1NR-9: 8,640 LUT4, 6,480 flip-flops, 26 BSRAM,
@@ -97,7 +97,7 @@ change are re-checked with `make se-probe` and the TVLA flow.
 | 3 | Sponge, seed / buffer paths | 16-bit words end to end: seed registers 2 x 256 x 17 (one BSRAM per share), I/O buffer two 1024 x 16 BSRAMs (even / odd words; the host interface is unchanged), Keccak word port, sponge word-serial (KMAC key shifted 5 bytes with one carried byte per share), SampleNTT fed one word at a time; the unused unmasked CBD sampler is removed | done, untested |
 | 4 | PUF extractor | key shares shift by one bit only (load, rotate, insert, write back: plain shift registers); decoder one bit per clock (~31 k clocks per reconstruction instead of ~1 k) | done, `make sim-se` passes |
 | 5 | `pqse_io` | one 16-bit word per step (unmask, compare, counters, TRUNC); Compress_d as a d-step restoring division and Decompress_d as a per-bit accumulation (no multipliers); the replay-window check word-serial with borrows, the window slide one bit per clock in the sequencer (no 64-bit subtractors, comparator or barrel shifter) | done, untested |
-| 6 | `pqse_core` | engine ports as a narrower, OR-combined bus | planned |
+| 6 | `pqse_core` | engine ports 16 bits wide (buffer, seed registers); the port multiplexers stay (one engine at a time, idle engines do not toggle the buses); replay-window slide one bit per clock | done, untested |
 | 7 | `pqse_masked`, `pqse_mcomp` | 16-bit registers in the SEL / tag reader / B2A input / compression windows (a 32-bit ciphertext window instead of 128 bits; the gadgets themselves are bit-serial and unchanged, so the probing model is the same) | done, untested |
 | 4b | PUF cells | column gate nets instead of a per-cell excite flip-flop (-960 FF) | done, untested (board only) |
 | 4c | masks mod q | `pqse_modq24` = floor(x q / 2^24) by three adds instead of Barrett with two multipliers (3 instances: about -6..-9 of the 9K's 20 multipliers) | done, untested |
