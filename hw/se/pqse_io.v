@@ -159,7 +159,7 @@ module pqse_io (
   reg          ec;        // ENC: rounding carry
   reg  [3:0]   dc;        // ENC: division steps left
   reg          pend;      // a word read is in flight
-  reg  [10:0]  la;        // next word to read / write
+  reg  [10:0]  la;        // buffer word address of every operation: starts at lane ba, counts up
   reg  [8:0]   ci;        // coefficient index 0..256
   reg  [11:0]  v0q, v1q;
   reg          wpend;
@@ -265,9 +265,9 @@ module pqse_io (
       end else if (trunc) begin
         if (tq <= 8'd3) begin bre = 1'b1; braddr = {B_SM_HDR + 9'd1, tq[1:0]}; end
         if (tchk && tbad) bad_set = 1'b1;
-        if (tq >= 8'd5 && !tu[0]) begin bre = 1'b1; braddr = {j_ba + {5'd0, tm[5:2]}, tm[1:0]}; end
+        if (tq >= 8'd5 && !tu[0]) begin bre = 1'b1; braddr = la; end          // message word tm
         if (tq >= 8'd6 && tu[0]) begin
-          bwe = 1'b1; bwaddr = {j_ba + {5'd0, tm[5:2]}, tm[1:0]}; bwdata = brdata & tmask;
+          bwe = 1'b1; bwaddr = la; bwdata = brdata & tmask;
         end
       end else if (dec) begin
         if (rd_word) begin bre = 1'b1; braddr = la; end
@@ -282,19 +282,19 @@ module pqse_io (
         if (es == E_RD) begin re = 1'b1; raddr = {j_sl, ew}; end
         if (efull && (es == E_SH || es == E_FIN)) begin bwe = 1'b1; bwaddr = la; bwdata = L; end
       end else if (t2b) begin
-        if (t_valid) begin bwe = 1'b1; bwaddr = {j_ba + {1'b0, tl}, wk}; bwdata = w16(t_word, wk); end
+        if (t_valid) begin bwe = 1'b1; bwaddr = la; bwdata = w16(t_word, wk); end
       end else if (ctrc) begin
         // header lane 0, word wk: read (sph 0), then the borrow step (sph 1)
-        if (!sph) begin bre = 1'b1; braddr = {j_ba, wk}; end
+        if (!sph) begin bre = 1'b1; braddr = la; end
         else if (wk == 2'd3 && !fresh) bad_set = 1'b1;
       end else begin
         case (j_op)
           IO_S2B: if (sph == 2'd0) begin
                     if (lane_on) begin sre = 1'b1; sraddr = {j_e, wi}; end
                   end else if (sph == 2'd2 && lane_on) begin
-                    bwe = 1'b1; bwaddr = {j_ba + {7'd0, li}, wk}; bwdata = um0 ^ um1;
+                    bwe = 1'b1; bwaddr = la; bwdata = um0 ^ um1;
                   end
-          IO_B2S: if (!sph) begin bre = 1'b1; braddr = {j_ba + {7'd0, li}, wk}; end
+          IO_B2S: if (!sph) begin bre = 1'b1; braddr = la; end
                   else begin swe = 1'b1; swaddr = {j_e, wi}; swd0 = brdata; swd1 = 16'd0; end
           IO_S2S: if (!sph) begin sre = 1'b1; sraddr = {j_e, wi}; end
                   else begin swe = 1'b1; swaddr = {j_e2, wi}; swd0 = srd0; swd1 = srd1; end
@@ -307,11 +307,11 @@ module pqse_io (
           IO_SCMP: if (sph == 2'd0) begin
                     if (lane_on) begin sre = 1'b1; sraddr = {j_e, wi}; end
                   end else if (sph == 2'd1) begin
-                    if (lane_on) begin bre = 1'b1; braddr = {j_ba + {7'd0, li}, wk}; end
+                    if (lane_on) begin bre = 1'b1; braddr = la; end
                   end else if (lane_on && ((um0 ^ um1) != brdata)) bad_set = 1'b1;
           // message header: lane 0 = send counter, lane 1 = length (kept), lanes 2, 3 = 0
           IO_CTRW: if (sph && li != 2'd1) begin
-                    bwe = 1'b1; bwaddr = {j_ba + {7'd0, li}, wk};
+                    bwe = 1'b1; bwaddr = la;
                     bwdata = (li == 2'd0) ? w16(ctr_tx, wk) : 16'd0;
                   end
           default: ;
@@ -361,6 +361,7 @@ module pqse_io (
         // bad length, or cmp = 1: check only (OPEN, before the tag is checked)
         if ((tchk && tbad) || (tq == 8'd4 && j_cmp)) busy_r <= 1'b0;
         tq <= tq + 8'd1;
+        if (tq >= 8'd6 && tu[0]) la <= la + 11'd1;          // message word written
         if (tq == 8'd132) busy_r <= 1'b0;
       end else if (dec) begin
         // one bit per clock from L into cy; a new word when L is empty
@@ -440,6 +441,7 @@ module pqse_io (
       end else if (t2b) begin
         if (t_valid) begin
           wi <= wi + 4'd1;                                   // (wk: word of the TRNG word)
+          la <= la + 11'd1;
           if (wk == 2'd3) begin
             tl <= tl + 8'd1;
             if (tl == 8'd135) busy_r <= 1'b0;
@@ -455,6 +457,7 @@ module pqse_io (
           ahi <= ahi_n;   nhi <= nhi_n;
           sph <= 2'd0;
           wi  <= wi + 4'd1;
+          la  <= la + 11'd1;
           if (wk == 2'd3) begin
             busy_r  <= 1'b0;
             rx_new  <= newer;
@@ -465,6 +468,7 @@ module pqse_io (
         if (unm && sph == 2'd1 && lane_on) begin um0 <= srd0; um1 <= srd1; end
         if (ph_end) begin
           wi  <= wi + 4'd1;
+          la  <= la + 11'd1;
           sph <= 2'd0;
           if (wi == 4'd15) busy_r <= 1'b0;
         end else begin

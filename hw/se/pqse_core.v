@@ -90,6 +90,7 @@ module pqse_core #(
   wire [6:0]  rx_dist;      // ... newer / older by (64: 64 or more)
   reg  [5:0]  rxc;          // Q_RXS: window shifts left / Q_TXI: bits done
   reg         txc;          // Q_TXI: carry
+  reg         rxo;          // Q_RXS: an older counter (set its bit) instead of a newer one (shift)
   reg  [3:0]  dly;
   reg         wfirst;       // first clock of Q_WAIT
   reg         fault;        // a fault was detected during this command
@@ -334,15 +335,17 @@ module pqse_core #(
                     end else if (rx_new) begin
                       rx_max  <= ctr_rx;
                       rxc     <= rx_dist[5:0];
+                      rxo     <= 1'b0;
                     end else begin
-                      rx_bits <= rx_bits | (64'd1 << rx_dist[5:0]);
+                      rxc     <= 6'd0;          // older: bit rx_dist := 1 by rotation (Q_RXS)
+                      rxo     <= 1'b1;
                     end
                   end
                   default: ;
                 endcase
                 if (ins_r[91:88] == ST_RESEED) begin
                   q  <= Q_RSW;                // pr_reseed pulses in this clock
-                end else if (ins_r[91:88] == ST_RXACC && rx_any && rx_new && !rx_dist[6]) begin
+                end else if (ins_r[91:88] == ST_RXACC && rx_any && !(rx_new && rx_dist[6])) begin
                   q  <= Q_RXS;
                 end else if (ins_r[91:88] == ST_TXINC) begin
                   q  <= Q_TXI;
@@ -383,7 +386,18 @@ module pqse_core #(
               q   <= Q_FETCH;
             end
           end
-          Q_RXS: begin                    // rx_bits << rx_dist, then bit 0 := 1 (ctr_rx)
+          // newer counter: rx_bits << rx_dist, then bit 0 := 1 (ctr_rx); older:
+          // rotate right 64 times, bit 0 being the original bit rxc, and set it
+          // when rxc = rx_dist (no 64-way decoder)
+          Q_RXS: if (rxo) begin
+            rxc     <= rxc + 6'd1;
+            rx_bits <= {rx_bits[0] | (rxc == rx_dist[5:0]), rx_bits[63:1]};
+            if (rxc == 6'd63) begin
+              pc  <= pc + 10'd1;
+              pcn <= ~(pc + 10'd1);
+              q   <= Q_FETCH;
+            end
+          end else begin
             rxc     <= rxc - 6'd1;
             rx_bits <= {rx_bits[62:0], (rxc == 6'd1)};
             if (rxc == 6'd1) begin

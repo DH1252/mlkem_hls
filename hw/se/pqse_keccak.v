@@ -83,32 +83,29 @@ module pqse_keccak #(
   localparam M1 = (MASKED != 0);
 
   // ---- constants -------------------------------------------------------------
-  function [63:0] rc_of(input [4:0] r);
+  // round constant RC[r]: only bits 0, 1, 3, 7, 15, 31, 63 can be set (FIPS 202
+  // Alg. 6: RC[2^j - 1] = rc(j + 7 ir)), so the table holds those 7 bits
+  // {b63, b31, b15, b7, b3, b1, b0} instead of 64
+  function [6:0] rcb(input [4:0] r);
     case (r)
-      5'd0:  rc_of = 64'h0000000000000001; 5'd1:  rc_of = 64'h0000000000008082;
-      5'd2:  rc_of = 64'h800000000000808A; 5'd3:  rc_of = 64'h8000000080008000;
-      5'd4:  rc_of = 64'h000000000000808B; 5'd5:  rc_of = 64'h0000000080000001;
-      5'd6:  rc_of = 64'h8000000080008081; 5'd7:  rc_of = 64'h8000000000008009;
-      5'd8:  rc_of = 64'h000000000000008A; 5'd9:  rc_of = 64'h0000000000000088;
-      5'd10: rc_of = 64'h0000000080008009; 5'd11: rc_of = 64'h000000008000000A;
-      5'd12: rc_of = 64'h000000008000808B; 5'd13: rc_of = 64'h800000000000008B;
-      5'd14: rc_of = 64'h8000000000008089; 5'd15: rc_of = 64'h8000000000008003;
-      5'd16: rc_of = 64'h8000000000008002; 5'd17: rc_of = 64'h8000000000000080;
-      5'd18: rc_of = 64'h000000000000800A; 5'd19: rc_of = 64'h800000008000000A;
-      5'd20: rc_of = 64'h8000000080008081; 5'd21: rc_of = 64'h8000000000008080;
-      5'd22: rc_of = 64'h0000000080000001; default: rc_of = 64'h8000000080008008;
+      5'd0:     rcb = 7'h01; 5'd1:     rcb = 7'h1A; 5'd2:     rcb = 7'h5E; 5'd3:     rcb = 7'h70;
+      5'd4:     rcb = 7'h1F; 5'd5:     rcb = 7'h21; 5'd6:     rcb = 7'h79; 5'd7:     rcb = 7'h55;
+      5'd8:     rcb = 7'h0E; 5'd9:     rcb = 7'h0C; 5'd10:    rcb = 7'h35; 5'd11:    rcb = 7'h26;
+      5'd12:    rcb = 7'h3F; 5'd13:    rcb = 7'h4F; 5'd14:    rcb = 7'h5D; 5'd15:    rcb = 7'h53;
+      5'd16:    rcb = 7'h52; 5'd17:    rcb = 7'h48; 5'd18:    rcb = 7'h16; 5'd19:    rcb = 7'h66;
+      5'd20:    rcb = 7'h79; 5'd21:    rcb = 7'h58; 5'd22:    rcb = 7'h21; default:  rcb = 7'h74;
     endcase
   endfunction
 
   function [15:0] rcw(input [4:0] r, input [1:0] k);   // word k of the round constant
-    reg [63:0] c;
+    reg [6:0] c;
     begin
-      c = rc_of(r);
+      c = rcb(r);
       case (k)
-        2'd0:    rcw = c[15:0];
-        2'd1:    rcw = c[31:16];
-        2'd2:    rcw = c[47:32];
-        default: rcw = c[63:48];
+        2'd0:    rcw = {c[4], 7'd0, c[3], 3'd0, c[2], 1'b0, c[1], c[0]};   // bits 15, 7, 3, 1, 0
+        2'd1:    rcw = {c[5], 15'd0};                                      // bit 31
+        2'd2:    rcw = 16'd0;
+        default: rcw = {c[6], 15'd0};                                      // bit 63
       endcase
     end
   endfunction
