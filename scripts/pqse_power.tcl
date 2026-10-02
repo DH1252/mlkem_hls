@@ -177,7 +177,10 @@ if {[catch {
         puts "one gated and one ungated flip-flop (simulated activity: the gated one"
         puts "should draw less; equal means its clock pin was not annotated):"
       }
-      report_power -instances [list $gff $uff] -digits 4
+      puts "gated flip-flop [get_full_name $gff]:"
+      report_power -instances [list $gff] -digits 4
+      puts "ungated flip-flop [get_full_name $uff]:"
+      report_power -instances [list $uff] -digits 4
     }
   }
 } err]} {
