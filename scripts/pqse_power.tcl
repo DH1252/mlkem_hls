@@ -58,6 +58,12 @@ set_load 0.01 [all_outputs]
 
 if {$vcd ne ""} {
   if {[regexp {\.saif(\.gz)?$} $vcd]} {
+    if {[info commands read_saif] eq ""} {
+      puts "ERROR: this OpenSTA has no read_saif: build a current OpenSTA"
+      puts "(github.com/parallaxsw/OpenSTA), or use make se-power-vcd GL_FMT=vcd"
+      puts "with a window (GL_LEN, GL_START, GL_CLOCKS)"
+      exit 1
+    }
     puts "activity: SAIF $vcd (scope $scope)"
     read_saif -scope $scope $vcd
   } else {
@@ -79,7 +85,51 @@ puts "\nPQSE secure element, sky130_fd_sc_hd, clock period $period ns"
 puts "==================== power ===================="
 report_power -digits 4
 puts "==================== highest-power instances ===================="
-catch {report_power -highest_power_instances 25 -digits 4}
+if {[catch {report_power -highest_power_instances 25 -digits 4} err]} {
+  puts "(not available in this OpenSTA: $err)"
+}
+
+# Clock gating: how many integrated clock gates, and whether this OpenSTA lets
+# a gated clock toggle less than the clock. Current OpenSTA gives a gate's
+# output the clock activity x the enable's duty (vectorless) or the simulated
+# toggles (VCD / SAIF); older versions give every clock pin the full clock
+# activity, and then clock gating shows no saving at all. Compared: one
+# flip-flop behind a gate and one on the bare clock.
+puts "==================== clock gating ===================="
+if {[catch {
+  set icgs [get_cells -quiet -filter "ref_name =~ *dlclkp*" *]
+  puts "integrated clock gates: [llength $icgs]"
+  if {[llength $icgs] > 0} {
+    set gff ""
+    foreach icg $icgs {
+      set gnet [get_nets -of_objects [get_pins [get_full_name $icg]/GCLK]]
+      foreach p [get_pins -quiet -of_objects $gnet] {
+        set c [get_cells -of_objects $p]
+        if {[string match "*df*" [get_property $c ref_name]]} { set gff $c; break }
+      }
+      if {$gff ne ""} { break }
+    }
+    set uff ""
+    foreach p [get_pins -quiet -of_objects [get_nets clk]] {
+      set c [get_cells -quiet -of_objects $p]
+      if {$c ne "" && [string match "*df*" [get_property $c ref_name]]} { set uff $c; break }
+    }
+    set nff [llength [get_cells -quiet -filter "ref_name =~ *df*" *]]
+    set ngated 0
+    foreach icg $icgs {
+      set gnet [get_nets -of_objects [get_pins [get_full_name $icg]/GCLK]]
+      incr ngated [expr {[llength [get_pins -quiet -of_objects $gnet]] - 1}]
+    }
+    puts "flip-flops: $nff, behind a clock gate: $ngated"
+    if {$gff ne "" && $uff ne ""} {
+      puts "one gated and one ungated flip-flop (equal internal power: this OpenSTA"
+      puts "ignores clock gating; a gated one should draw less):"
+      report_power -instances [list $gff $uff] -digits 4
+    }
+  }
+} err]} {
+  puts "(clock-gating check failed: $err)"
+}
 puts "==================== timing (slowest path) ===================="
 # fanout, load capacitance and slew per stage: a stage with a large fanout and
 # a slow transition is a net a real flow would buffer (placement-based repair)

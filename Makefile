@@ -354,18 +354,34 @@ PW_RAMLIB := $(if $(filter 1,$(RAM_MACRO)),$(BUILD)/sepower/pqse_sram.lib,)
 PW_DEFS   := $(if $(filter 0,$(LOWPOWER)),,-DPQSE_LOWPOWER)
 PW_CG     := $(if $(filter 1,$(CLOCKGATE)),clockgate -pos sky130_fd_sc_hd__dlclkp_1 GATE:CLK:GCLK -min_net_size $(CG_MIN);,)
 PW_TAG    := _m$(MASKED)$(if $(PW_RAMLIB),_rammacro)$(if $(PW_CG),_cg)$(if $(PW_DEFS),_lp)
+# ABC_BUF=1 (default): after mapping, ABC buffers high-fan-out nets and sizes
+# the gates (buffer / upsize / dnsize, as OpenROAD-flow-scripts does). Without
+# it a control signal can drive hundreds of inputs from a size-1 gate, with
+# transition times of ~10 ns: the slowest path is then that net, and the
+# internal power, which grows with the input slew, is overstated.
+# The sky130 lpflow_* (power-domain isolation, keep-alive) and probe cells are
+# not used for logic (the OpenROAD-flow-scripts sky130hd don't-use list): ABC
+# otherwise picks e.g. lpflow_inputiso1p_1 as a cheap OR gate.
+ABC_BUF   ?= 1
+PW_ABCF   := $(BUILD)/sepower/abc_map.script
+PW_ABCGEN  = printf '%s\n' strash '&get -n' '&fraig -x' '&put' scorr dc2 dret strash '&get -n' \
+	    '&dch -f' '&nf -D $(PERIOD_PS)' '&put' \
+	    $(if $(filter 1,$(ABC_BUF)),'buffer -c' topo 'stime -c' 'upsize -c' 'dnsize -c') > $(PW_ABCF)
+PW_DONTUSE = $(foreach c,$(sort $(shell grep -oE 'sky130_fd_sc_hd__(lpflow_|probe)[A-Za-z0-9_]*' $(SKY130_LIB) 2>/dev/null)),-dont_use $(c))
 # the mapping, shared by se-power and se-power-vcd (clockgate before dfflibmap:
 # it works on the generic enable flip-flops)
 PW_MAP     = read_verilog $(PW_DEFS) -Ihw/se $(PW_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
 	    delete t:\$$scopeinfo; $(PW_CG) \
-	    dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB) -D $(PERIOD_PS); opt_clean; \
+	    dfflibmap -liberty $(SKY130_LIB); \
+	    abc -liberty $(SKY130_LIB) -D $(PERIOD_PS) -script $(PW_ABCF) $(PW_DONTUSE); opt_clean; \
 	    setundef -zero; hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO;
 se-power: | $(BUILD)
 	@test -n "$(SKY130_LIB)" || { echo "set SKY130_LIB=<path to sky130_fd_sc_hd__tt_025C_1v80.lib>"; exit 1; }
 	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
 	    echo "or use OpenROAD, which contains it: make se-power STA=openroad"; exit 1; }
 	mkdir -p $(BUILD)/sepower
+	$(PW_ABCGEN)
 	$(if $(PW_RAMLIB),$(PYTHON) scripts/power/pqse_sram_lib.py $(PW_RAMLIB))
 	yosys -q -l $(BUILD)/sepower/yosys$(PW_TAG).log -p "$(PW_MAP) \
 	    write_verilog -noattr -noexpr $(BUILD)/sepower/pqse_top_sky130.v"
@@ -415,6 +431,7 @@ se-power-vcd: | $(BUILD)
 	@command -v $(STA) >/dev/null 2>&1 || { echo "$(STA) not found: install OpenSTA (not part of OSS CAD Suite),"; \
 	    echo "or use OpenROAD, which contains it: make se-power-vcd STA=openroad"; exit 1; }
 	mkdir -p $(GLD)
+	$(PW_ABCGEN)
 	$(if $(PW_RAMLIB),$(PYTHON) scripts/power/pqse_sram_lib.py $(PW_RAMLIB) --models $(GLD)/sram_models.sv)
 	yosys -q -l $(GLD)/yosys$(PW_TAG).log -p "$(PW_MAP) \
 	    rename -hide w:* i:* o:* %u %d; rename -hide c:*; rename -enumerate; \
