@@ -95,10 +95,12 @@ change are re-checked with `make se-probe` and the TVLA flow.
 | 1 | PUF read, SampleNTT, seed RAMs | idle-excited rows (column OR/AND instead of a 960-way mux); byte-serial `pqse_parse`; seed RAMs in BSRAM | done, `make sim-se` passes (the PUF cell array itself: board only) |
 | 2 | Keccak | 16-bit words (one 256 x 16 BSRAM per share, 16-bit funnel shifter, 16-bit DOM chi), ~19.3 k clocks per permutation instead of 3.9 k; the sponge waits on the lane port (`rdy`) | done, `make sim-se` passes |
 | 3 | Sponge, seed / buffer paths | 16-bit lane words end to end (removes the 64-bit lane registers kept for the v4 interface) | planned |
-| 4 | PUF extractor | key shares shift by one bit only (load, rotate, insert, write back: plain shift registers); decoder one bit per clock (~31 k clocks per reconstruction instead of ~1 k) | done, untested |
+| 4 | PUF extractor | key shares shift by one bit only (load, rotate, insert, write back: plain shift registers); decoder one bit per clock (~31 k clocks per reconstruction instead of ~1 k) | done, `make sim-se` passes |
 | 5 | `pqse_io` | 16-bit lane operations (compare, counters, unmask) | planned |
 | 6 | `pqse_core` | engine ports as a narrower, OR-combined bus | planned |
 | 7 | `pqse_masked`, `pqse_mcomp` | 16-bit registers in the SEL / tag / compression gadgets (probing re-check) | planned |
+| 4b | PUF cells | column gate nets instead of a per-cell excite flip-flop (-960 FF) | done, untested (board only) |
+| 4c | masks mod q | `pqse_modq24` = floor(x q / 2^24) by three adds instead of Barrett with two multipliers (3 instances: about -6..-9 of the 9K's 20 multipliers) | done, untested |
 | 8 | `pqse_prng`, `pqse_poly` | 16 random bits per clock; shared adders | planned |
 
 The Keccak permutation is the main cost in time: ~50 permutations per KEM
