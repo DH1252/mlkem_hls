@@ -37,8 +37,6 @@ module pqse_parse (
 
   wire        can  = !fin && (bcnt >= 5'd3);
   // the next 3 bytes b0 b1 b2 = sbuf[23:0]: d1 = {b1[3:0], b0}, d2 = {b2, b1[7:4]}
-  // (taken straight from sbuf: GowinSynthesis fails with SP00018 "error bus
-  // name set" on byte wires that d1 / d2 are then built from)
   wire [11:0] d1   = sbuf[11:0];
   wire [11:0] d2   = sbuf[23:12];
   wire        a1   = can && (d1 < 12'd3329);
@@ -48,6 +46,24 @@ module pqse_parse (
   wire  [4:0] bc_a = can ? (bcnt - 5'd3) : bcnt;
   assign in_ready  = !fin && (bc_a <= 5'd8);
   wire        take = in_valid && in_ready;
+  // the new lane placed after the bc_a bytes still held: a take needs
+  // bc_a <= 8, so 9 placements (an explicit mux instead of a 128-bit shift by
+  // {bc_a, 3'b000}, which GowinSynthesis fails on with SP00018 "error bus name set")
+  reg [127:0] ins;
+  always @* begin
+    case (bc_a[3:0])
+      4'd0:    ins = {64'd0, in_lane};
+      4'd1:    ins = {56'd0, in_lane,  8'd0};
+      4'd2:    ins = {48'd0, in_lane, 16'd0};
+      4'd3:    ins = {40'd0, in_lane, 24'd0};
+      4'd4:    ins = {32'd0, in_lane, 32'd0};
+      4'd5:    ins = {24'd0, in_lane, 40'd0};
+      4'd6:    ins = {16'd0, in_lane, 48'd0};
+      4'd7:    ins = { 8'd0, in_lane, 56'd0};
+      4'd8:    ins = {       in_lane, 64'd0};
+      default: ins = 128'd0;                     // never taken (bc_a > 8: no take)
+    endcase
+  end
 
   // accepted values in stream order: pend (if any), d1 (if a1), d2 (if a2)
   wire  [1:0] kk   = {1'b0, pv} + {1'b0, a1} + {1'b0, a2};
@@ -72,13 +88,13 @@ module pqse_parse (
     end else begin
       if (can || take)
         sbuf <= (can ? (sbuf >> 24) : sbuf)
-              | (take ? ({64'd0, in_lane} << {bc_a, 3'b000}) : 128'd0);
+              | (take ? ins : 128'd0);
       bcnt <= bc_a + (take ? 5'd8 : 5'd0);
       n    <= nn;
       if (nn == 9'd256) fin <= 1'b1;
       if (wr) widx <= widx + 7'd1;
       case (kk)
-        2'd0: ;
+        2'd0: begin end
         2'd1: begin pend <= v0; pv <= 1'b1; end
         2'd2: pv <= 1'b0;
         default: begin pend <= d2; pv <= 1'b1; end
