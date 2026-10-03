@@ -51,7 +51,11 @@ temperatures = [25]
 analytical_delay = _os.environ.get("PQSE_OR_ANALYTICAL", "0") == "1"
 spice_name = _os.environ.get("PQSE_OR_SPICE", "ngspice")
 num_sim_threads = int(_os.environ.get("PQSE_OR_THREADS", "4"))
-if _os.environ.get("PQSE_OR_TABLE", "0") != "1":
+# one load / slew point (SPICE only; the analytical model ignores it). OpenRAM
+# warns that the lib's delay / slew tables are then that point repeated:
+# fine here, pqse_sram_char.py reads only the power and the minimum period
+# (do not use these libs for timing)
+if _os.environ.get("PQSE_OR_TABLE", "0") != "1" and not analytical_delay:
     # (load fF, input slew ns): sky130 tech.py dff_in_cap and rise_time
     use_specified_load_slew = [(6.89, 0.005)]
 
