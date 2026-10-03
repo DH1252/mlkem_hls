@@ -567,7 +567,8 @@ se-power-vcd-report:
 # Liberty files into build/sepower/openram/sram_table.txt (pJ per read / write
 # / idle clock, leakage), which SRAM_TABLE=... feeds to the energy report.
 # Setup, once: git clone https://github.com/VLSIDA/OpenRAM; cd OpenRAM;
-#   pip install -r requirements.txt; make sky130-pdk; make sky130-install
+#   python3 -m pip install -r requirements.txt (into the Python OR_PYTHON names);
+#   make sky130-pdk; make sky130-install
 #   (and ngspice on PATH, or OR_NIX=1 to use OpenRAM's Nix environment)
 #   make se-sram-char OPENRAM_DIR=<OpenRAM checkout> [SRAM_SHAPES="a6_d65"]
 #        [OR_LAYOUT=1 [OR_PEX=1] [OR_DRC=1]] [OR_PORTS=1rw1r|1r1w] [OR_THREADS=4]
@@ -584,10 +585,21 @@ OR_PORTS    ?= 1rw1r
 OR_SPICE    ?= ngspice
 OR_THREADS  ?= 4
 OR_NIX      ?= 0
+# the Python OpenRAM runs in: needs OpenRAM's requirements (numpy, scipy,
+# scikit-learn, ...). In an OSS CAD Suite shell python3 is the suite's own:
+# install them there (OR_PYTHON -m pip install -r <OpenRAM>/requirements.txt)
+# or point OR_PYTHON at another interpreter, e.g. OR_PYTHON=/usr/bin/python3
+OR_PYTHON   ?= $(PYTHON)
 SRAM_CHAR_D := $(BUILD)/sepower/openram
 se-sram-char: | $(BUILD)
 	@test -f $(OPENRAM_DIR)/sram_compiler.py || { echo "OpenRAM not found at OPENRAM_DIR=$(OPENRAM_DIR):"; \
 	    echo "  git clone https://github.com/VLSIDA/OpenRAM; then make sky130-pdk sky130-install there"; exit 1; }
+	@$(OR_PYTHON) -c "import numpy, scipy, sklearn" 2>/dev/null || { \
+	    echo "OpenRAM's Python packages are missing in $$(command -v $(OR_PYTHON)) ($$($(OR_PYTHON) --version 2>&1)):"; \
+	    echo "  $(OR_PYTHON) -m pip install -r $(OPENRAM_DIR)/requirements.txt"; \
+	    echo "or use another interpreter that has them: make se-sram-char OR_PYTHON=/usr/bin/python3 ..."; exit 1; }
+	@command -v $(OR_SPICE) >/dev/null || [ "$(OR_NIX)" = 1 ] || { \
+	    echo "$(OR_SPICE) not found on PATH (sudo apt install ngspice), or OR_NIX=1 for OpenRAM's Nix tools"; exit 1; }
 	mkdir -p $(SRAM_CHAR_D)
 	for s in $(SRAM_SHAPES); do \
 	    echo "OpenRAM: $$s (log: $(SRAM_CHAR_D)/openram_$$s.log)"; \
@@ -596,7 +608,7 @@ se-sram-char: | $(BUILD)
 	    PQSE_OR_THREADS=$(OR_THREADS) PQSE_OR_NIX=$(OR_NIX) \
 	    OPENRAM_HOME=$(OPENRAM_DIR)/compiler OPENRAM_TECH=$(OPENRAM_DIR)/technology \
 	    PDK_ROOT=$${PDK_ROOT:-$(OPENRAM_DIR)} OPENRAM_TMP=$(abspath $(SRAM_CHAR_D))/tmp_$$s \
-	    python3 -u $(OPENRAM_DIR)/sram_compiler.py -v -c $(abspath scripts/power/openram/pqse_sram_$$s.py) \
+	    $(OR_PYTHON) -u $(OPENRAM_DIR)/sram_compiler.py -v -c $(abspath scripts/power/openram/pqse_sram_$$s.py) \
 	        > $(SRAM_CHAR_D)/openram_$$s.log 2>&1 \
 	        || { tail -30 $(SRAM_CHAR_D)/openram_$$s.log; exit 1; }; \
 	done
