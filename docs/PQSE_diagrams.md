@@ -1,216 +1,243 @@
 # PQSE diagrams
 
-Mermaid diagrams of the PQSE secure element (v4, `hw/se`). GitHub renders them in place; elsewhere, paste a block into [mermaid.live](https://mermaid.live). Names in `code` are RTL modules, instances, microcode labels or Makefile targets. The text explanations are in [`PQSE_design.md`](PQSE_design.md) and [`hw/se/README.md`](../hw/se/README.md).
+Diagrams of the PQSE secure element (v4, `hw/se`) in Mermaid. GitHub draws them in place; elsewhere, paste a block into [mermaid.live](https://mermaid.live). Names in `code` are RTL modules, instances, microcode labels or Makefile targets. The design is explained in [`PQSE_design.md`](PQSE_design.md), the RTL in [`hw/se/README.md`](../hw/se/README.md).
+
+Conventions: solid arrows carry data or control, dotted arrows go to a fault or error exit, thick borders mark checks.
 
 1. [System overview](#1-system-overview)
 2. [Module hierarchy](#2-module-hierarchy)
-3. [Share domains and memories](#3-share-domains-and-memories)
-4. [Masked AND gadget (DOM)](#4-masked-and-gadget-dom)
-5. [Sequencer state machine](#5-sequencer-state-machine)
-6. [Lifecycle and security state](#6-lifecycle-and-security-state)
-7. [A command and the fault response](#7-a-command-and-the-fault-response)
-8. [KeyGen with its fault checks](#8-keygen-with-its-fault-checks)
-9. [Masked Decaps](#9-masked-decaps)
+3. [Share domains](#3-share-domains)
+4. [Masked AND gate (DOM)](#4-masked-and-gate-dom)
+5. [Sequencer](#5-sequencer)
+6. [Lifecycle](#6-lifecycle)
+7. [Command and fault response](#7-command-and-fault-response)
+8. [KeyGen](#8-keygen)
+9. [Decaps](#9-decaps)
 10. [PUF key and key wrapping](#10-puf-key-and-key-wrapping)
 11. [Secure messaging](#11-secure-messaging)
 12. [Verification and energy flow](#12-verification-and-energy-flow)
 
 ## 1. System overview
 
-The host talks to a 32-bit register bus through SPI (chip) or Avalon-MM (FPGA). `pqse_host` owns the lifecycle, the access rules and the fault response; `pqse_core` runs one engine at a time under microcode.
+Three layers: the pins, the host interface `pqse_host`, and the core `pqse_core`, which runs one engine at a time.
 
 ```mermaid
-flowchart LR
-    reader["Card reader / host CPU"]
-    subgraph pins["Chip pins"]
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart TB
+    subgraph L1["Pins"]
+        direction LR
         spi["SPI, 4 pins"]
         tamper["tamper in"]
         irq["IRQ out"]
-        trig["trigger out<br/>(TEST only)"]
+        trig["trigger out, TEST only"]
     end
-    reader <--> spi
-    subgraph chip["pqse_top"]
-        spis["pqse_spi<br/>SPI slave"]
-        subgraph host["pqse_host"]
-            regs["registers<br/>ID, CTRL, STATUS, CYCLES,<br/>LIFECYCLE, CONFIG"]
-            policy["lifecycle and<br/>command policy"]
-            wd["watchdog, 2^22 clocks"]
-            wipe["wipe on power-on,<br/>fault, tamper"]
-            nvm["pqse_nvm<br/>persistent security state"]
-        end
-        buf["I/O buffer 4 KB<br/>(host access only when idle)"]
-        subgraph core["pqse_core"]
-            seq["sequencer +<br/>microcode ROM 1024 x 96"]
-            eng["engines<br/>Keccak / sponge, poly unit,<br/>masked gadgets, I/O, SampleNTT, PUF"]
-            mem["share-domain RAMs<br/>polynomial, seed, Keccak state"]
-            rng["TRNG, Trivium PRNG,<br/>Fisher-Yates shuffler"]
-        end
+    subgraph L2["pqse_host"]
+        direction LR
+        regs["registers<br/>CTRL, STATUS, CYCLES,<br/>LIFECYCLE, CONFIG"]
+        policy["lifecycle and<br/>command policy"]
+        guard["watchdog, wipe,<br/>fault counter"]
+        nvm["pqse_nvm<br/>persistent state"]
     end
-    spi <--> spis
-    spis <-->|"32-bit register bus"| regs
-    tamper --> wipe
-    host --> irq
-    core --> trig
-    regs -->|"command, start"| seq
-    seq -->|"result, done"| regs
-    regs <-->|"buffer windows"| buf
+    subgraph L3["pqse_core"]
+        direction LR
+        seq["sequencer<br/>ROM 1024 x 96"]
+        eng["engines<br/>Keccak, poly unit,<br/>masked gadgets, I/O,<br/>SampleNTT, PUF"]
+        mem["RAMs<br/>polynomial, seed,<br/>Keccak state"]
+        buf["I/O buffer 4 KB"]
+    end
+    spi --> regs
+    tamper --> guard
+    regs --> irq
+    regs --> policy
+    policy --> nvm
+    regs --> seq
     seq --> eng
-    eng <--> mem
-    eng <--> buf
-    rng --> eng
-    policy --- nvm
+    eng --> mem
+    eng --> buf
+    regs --> buf
+    seq --> trig
 ```
 
 ## 2. Module hierarchy
 
-Instance names as in the RTL. `pqse_avalon` replaces `pqse_top` on the FPGA; both wrap `pqse_sys`.
+Instance names from the RTL. On the FPGA, `pqse_avalon` takes the place of `pqse_top`; both contain `pqse_sys`.
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart TB
-    top["pqse_top (chip)<br/>or pqse_avalon (FPGA)"] --> spi["u_spi : pqse_spi"]
-    top --> sys["u_sys : pqse_sys"]
-    sys --> host["u_host : pqse_host"]
-    sys --> core["u_core : pqse_core"]
-    host --> nvm["u_nvm : pqse_nvm"]
-    core --> rom["u_rom : pqse_ucode"]
-    core --> trng["u_trng : pqse_trng"]
-    trng --> ro["u_src : pqse_ro_src"]
-    core --> prng["u_prng : pqse_prng (Trivium)"]
-    core --> perm["u_perm : pqse_perm (Fisher-Yates)"]
-    core --> sponge["u_sponge : pqse_sponge"]
-    sponge --> keccak["u_keccak : pqse_keccak"]
-    keccak --> ks["u_s0, u_s1 : pqse_ram_1r1w<br/>Keccak state 64 x 65, one per share"]
-    core --> parse["u_parse : pqse_parse (SampleNTT)"]
-    core --> poly["u_poly : pqse_poly (NTT, INTT, PWM, ADD, SUB, ZCHK)"]
-    core --> io["u_io : pqse_io (encode, decode, seed ops, SEQ)"]
-    core --> masked["u_masked : pqse_masked (CBD/B2A, mu, select, ok copies)"]
-    masked --> mcomp["u_mc : pqse_mcomp (masked Compress)"]
-    core --> puf["u_puf : pqse_puf (fuzzy extractor)"]
-    puf --> praw["u_raw : pqse_puf_raw (960 cells)"]
-    core --> pm["u_pmem0, u_pmem1 : pqse_ram_1r1w<br/>polynomial RAM 1024 x 25"]
-    core --> sr["u_seed0, u_seed1 : pqse_ram_1r1w<br/>seed RAM 64 x 65"]
-    core --> bu["u_blo, u_bhi : pqse_ram_1r1w<br/>I/O buffer 512 x 32 each"]
+    top["pqse_top / pqse_avalon"]
+    top --> spi["u_spi<br/>pqse_spi"]
+    top --> sys["u_sys<br/>pqse_sys"]
+    sys --> host["u_host<br/>pqse_host"]
+    sys --> core["u_core<br/>pqse_core"]
+    host --> nvm["u_nvm<br/>pqse_nvm"]
+    core --> ctl
+    core --> eng
+    core --> ram
+    subgraph ctl["Control and randomness"]
+        direction TB
+        rom["u_rom<br/>pqse_ucode"]
+        trng["u_trng<br/>pqse_trng"]
+        prng["u_prng<br/>pqse_prng"]
+        perm["u_perm<br/>pqse_perm"]
+    end
+    subgraph eng["Engines"]
+        direction TB
+        sponge["u_sponge<br/>pqse_sponge"]
+        keccak["u_keccak<br/>pqse_keccak"]
+        parse["u_parse<br/>pqse_parse"]
+        poly["u_poly<br/>pqse_poly"]
+        io["u_io<br/>pqse_io"]
+        masked["u_masked<br/>pqse_masked"]
+        mcomp["u_mc<br/>pqse_mcomp"]
+        puf["u_puf<br/>pqse_puf"]
+        sponge --> keccak
+        masked --> mcomp
+    end
+    subgraph ram["RAMs, pqse_ram_1r1w"]
+        direction TB
+        pm["u_pmem0, u_pmem1<br/>1024 x 25"]
+        sd["u_seed0, u_seed1<br/>64 x 65"]
+        ks["u_s0, u_s1 in u_keccak<br/>64 x 65"]
+        bu["u_blo, u_bhi<br/>512 x 32"]
+    end
 ```
 
-## 3. Share domains and memories
+## 3. Share domains
 
-Every secret is two shares. Share 0 and share 1 never sit in the same RAM, bus or read register; they meet only inside registered DOM gadgets, which produce either new shares or a value that is public by design.
+A secret exists as share 0 and share 1. The shares are stored in separate RAMs and meet only inside the registered gadgets in the middle column.
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart LR
-    subgraph d0["Domain 0"]
-        pm0["polynomial RAM 0<br/>even slots: share 0 + public"]
-        sd0["seed RAM 0<br/>share 0 of d, z, m, K, KEK, ..."]
+    subgraph D0["Domain 0"]
+        direction TB
+        pm0["polynomial RAM 0<br/>share 0 and public"]
+        sd0["seed RAM 0"]
         ks0["Keccak state RAM 0"]
     end
-    subgraph d1["Domain 1"]
-        pm1["polynomial RAM 1<br/>odd slots: share 1"]
-        sd1["seed RAM 1<br/>share 1"]
-        ks1["Keccak state RAM 1"]
-    end
-    subgraph gad["Registered DOM gadgets"]
+    subgraph G["Registered DOM gadgets"]
+        direction TB
         chi["Keccak chi"]
         b2a["CBD / B2A"]
-        cmp["Compress, ciphertext compare,<br/>two ok copies"]
-        sel["implicit-rejection select"]
+        cmp["Compress, compare,<br/>two ok copies"]
+        sel["select"]
     end
-    pub["Public outputs only<br/>ek (t-hat, rho), ciphertext,<br/>tag check result, OKCHK"]
-    ntt["poly unit: NTT, INTT, PWM<br/>run once per share"]
-    pm0 <--> ntt
-    pm1 <--> ntt
-    ks0 --> chi
-    ks1 --> chi
-    sd0 --> b2a
-    sd1 --> b2a
-    pm0 --> cmp
-    pm1 --> cmp
-    sd0 --> sel
-    sd1 --> sel
-    chi --> ks0
-    chi --> ks1
-    b2a --> pm0
-    b2a --> pm1
+    subgraph D1["Domain 1"]
+        direction TB
+        pm1["polynomial RAM 1<br/>share 1"]
+        sd1["seed RAM 1"]
+        ks1["Keccak state RAM 1"]
+    end
+    pub["Public results only<br/>ek, ciphertext, tag check, OKCHK"]
+    ks0 --- chi --- ks1
+    sd0 --- b2a --- sd1
+    pm0 --- cmp --- pm1
+    sd0 --- sel --- sd1
     cmp --> pub
 ```
 
-## 4. Masked AND gadget (DOM)
+The poly unit (NTT, INTT, PWM) is linear, so it runs once on share 0 and once on share 1 and needs no gadget.
 
-The building block of every nonlinear masked step (Keccak chi, the Compress adder, the ok accumulators, the select). With z = x AND y and x = x0 XOR x1, y = y0 XOR y1, the two cross terms are refreshed with a fresh random bit r and every partial product is registered before the shares are combined.
+## 4. Masked AND gate (DOM)
+
+z = x AND y with x = x0 XOR x1 and y = y0 XOR y1. The cross terms get a fresh random bit r, and every partial product is registered before the shares are recombined. Keccak chi, the Compress adder, the ok copies and the select all use this gate.
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart LR
-    x0["x0"] --> p00["register<br/>x0 AND y0"]
-    y0["y0"] --> p00
-    x0 --> p01["register<br/>(x0 AND y1) XOR r"]
-    y1["y1"] --> p01
-    x1["x1"] --> p10["register<br/>(x1 AND y0) XOR r"]
+    subgraph IN["Inputs"]
+        direction TB
+        x0["x0"]
+        y0["y0"]
+        r["r, fresh"]
+        x1["x1"]
+        y1["y1"]
+    end
+    subgraph PP["Partial products, registered"]
+        direction TB
+        p00["x0 AND y0"]
+        p01["(x0 AND y1) XOR r"]
+        p10["(x1 AND y0) XOR r"]
+        p11["x1 AND y1"]
+    end
+    subgraph OUT["Outputs, registered"]
+        direction TB
+        z0["z0 = p00 XOR p01"]
+        z1["z1 = p11 XOR p10"]
+    end
+    x0 --> p00
+    y0 --> p00
+    x0 --> p01
+    y1 --> p01
+    r --> p01
+    x1 --> p10
     y0 --> p10
-    x1 --> p11["register<br/>x1 AND y1"]
-    y1 --> p11
-    r["fresh random r<br/>(PRNG)"] --> p01
     r --> p10
-    p00 --> z0["z0 = p00 XOR p01<br/>(compress register)"]
+    x1 --> p11
+    y1 --> p11
+    p00 --> z0
     p01 --> z0
-    p10 --> z1["z1 = p11 XOR p10<br/>(compress register)"]
+    p10 --> z1
     p11 --> z1
 ```
 
-## 5. Sequencer state machine
+## 5. Sequencer
 
-`pqse_core`, register `q` with its complemented shadow `q_n`. A shadow mismatch, a pc shadow mismatch, an instruction parity error or an engine that never reported busy raises a fault from any state.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Q_IDLE
-    Q_IDLE --> Q_FETCH: command start, pc set to entry point
-    Q_IDLE --> Q_IDLE: unknown command, result 6
-    Q_FETCH --> Q_PG: ROM read done (2 clocks)
-    Q_FETCH --> Q_IDLE: TRNG failed, result 5
-    Q_PG --> Q_PW: shuffled instruction, hiding on
-    Q_PG --> Q_DLY: no permutation needed
-    Q_PW --> Q_DLY: Fisher-Yates order drawn
-    Q_DLY --> Q_EXEC: after 0 to 15 random dummy clocks
-    Q_EXEC --> Q_WAIT: engine started
-    Q_EXEC --> Q_FETCH: BR or SET, next pc
-    Q_EXEC --> Q_RSD: SET reseed
-    Q_EXEC --> Q_IDLE: END, result, done
-    Q_WAIT --> Q_FETCH: engine idle, pc + 1
-    Q_RSD --> Q_RSW: 3 TRNG words collected
-    Q_RSW --> Q_FETCH: PRNG reseeded
-```
-
-## 6. Lifecycle and security state
-
-The lifecycle only moves forward. The fault counter, the tamper flag and the lifecycle each have a complemented shadow and live in the persistent store `pqse_nvm`, written before the next command is accepted.
+The `q` register in `pqse_core`. It has a complemented copy `q_n`; a mismatch, a pc-shadow mismatch, an instruction parity error or an engine that never started raises a fault in any state.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> TEST
-    TEST --> PERSO: write LIFECYCLE
-    PERSO --> USER: write LIFECYCLE
-    TEST --> KILLED: write LIFECYCLE
-    PERSO --> KILLED: write LIFECYCLE
-    USER --> KILLED: write LIFECYCLE
-    TEST --> KILLED: tamper, 3rd fault, shadow or rollback
-    PERSO --> KILLED: tamper, 3rd fault, shadow or rollback
-    USER --> KILLED: tamper, 3rd fault, shadow or rollback
-    KILLED --> [*]
-    note right of TEST
-        injected seeds, raw PUF / TRNG dumps,
-        trigger pin, K readable
-    end note
-    note right of PERSO
-        key import, PUF enrollment, K readable
-    end note
-    note right of USER
-        field use: K never leaves the chip,
-        it stays masked as the session key
-    end note
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart TB
+    idle(["Q_IDLE"])
+    fetch["Q_FETCH<br/>ROM read, 2 clocks"]
+    pg{"Q_PG<br/>shuffled instruction?"}
+    pw["Q_PW<br/>draw Fisher-Yates order"]
+    dly["Q_DLY<br/>0 to 15 dummy clocks"]
+    exec{"Q_EXEC<br/>instruction class"}
+    wait["Q_WAIT<br/>until the engine is idle"]
+    rsd["Q_RSD<br/>collect 3 TRNG words"]
+    rsw["Q_RSW<br/>reseed the PRNG"]
+    done(["result, done"])
+    idle -->|"command"| fetch
+    fetch --> pg
+    pg -->|"yes"| pw
+    pg -->|"no"| dly
+    pw --> dly
+    dly --> exec
+    exec -->|"engine"| wait
+    exec -->|"SET reseed"| rsd
+    exec -->|"END"| done
+    exec -->|"BR, SET"| fetch
+    wait --> fetch
+    rsd --> rsw
+    rsw --> fetch
+    done --> idle
 ```
 
-## 7. A command and the fault response
+## 6. Lifecycle
 
-Any detector ends the command with result 8 (FAULT). The host wipes every key and counts the fault before it accepts the next command.
+The lifecycle moves only forward. Writing the LIFECYCLE register moves it one or more states on; the events on the right move it straight to KILLED.
+
+```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart LR
+    test["TEST"] --> perso["PERSO"] --> user["USER"] --> killed(["KILLED"])
+    ev["tamper input<br/>third detected fault<br/>shadow mismatch<br/>rolled-back state"] --> killed
+    classDef dead stroke-width:3px
+    class killed dead
+```
+
+| State | Allowed in addition to the normal commands |
+|---|---|
+| TEST | injected seeds, raw PUF and TRNG dumps, trigger pin, K readable |
+| PERSO | key import, PUF enrollment, K readable |
+| USER | none; K stays inside as the masked session key |
+| KILLED | nothing |
+
+## 7. Command and fault response
+
+Any detector ends the command with result 8 (FAULT). The host then wipes every key and records the fault before it accepts another command.
 
 ```mermaid
 sequenceDiagram
@@ -218,115 +245,126 @@ sequenceDiagram
     participant P as pqse_host
     participant C as pqse_core
     participant N as pqse_nvm
-    H->>P: write buffer inputs (idle only)
-    H->>P: write CTRL = command
+    H->>P: buffer inputs, then CTRL = command
     P->>P: lifecycle and policy check
     alt not allowed
-        P-->>H: STATUS done, result 2 (denied)
+        P-->>H: done, result 2
     else allowed
-        P->>C: command, start
-        C->>C: microcode runs, one engine at a time
-        alt no detector fired
+        P->>C: start
+        C->>C: microcode, one engine at a time
+        alt no fault
             C-->>P: result, done
             P-->>H: STATUS done, IRQ
-        else a detector fired or the watchdog expired
-            C-->>P: result 8 (FAULT)
-            P->>C: reset engines
-            P->>C: ZEROIZE: wipe RAMs, seeds, buffer windows
-            P->>N: program fault count (write-ahead)
+        else detector or watchdog
+            C-->>P: result 8
+            P->>C: reset engines, ZEROIZE
+            P->>N: program fault count
             N-->>P: programmed
-            P-->>H: STATUS done, result 8, faults counted
-            Note over P,N: third fault: lifecycle KILLED
+            P-->>H: done, result 8
+            Note over P,N: third fault: KILLED
         end
     end
 ```
 
-## 8. KeyGen with its fault checks
+## 8. KeyGen
 
-Microcode at 16 (seeds), 80 (G), 720 (s and e twice, then the G check at 790), 106 (t-hat), 608 (pairwise test), 144 (wrap, KGWRAP only), 156 (wipe). Everything is masked until t-hat is complete; t-hat and rho are public.
+In microcode order: 16 seeds, 80 G, 720 s and e twice, 790 G check, 106 t-hat and ek, 608 pairwise test (KEYGEN and KGWRAP only), 141 key valid, 144 wrap (KGWRAP only), 156 wipe. Everything is masked until t-hat; t-hat and rho are public.
 
 ```mermaid
-flowchart TD
-    seeds["d, z from the TRNG<br/>conditioned by the masked sponge<br/>(TEST: injected)"]
-    g["G(d || 3), masked Keccak<br/>rho public, sigma masked"]
-    g2["G(d || 3) again, XORed in: must give 0<br/>(IO_SEQ vs zero entry), rho compared"]
-    se1["s0..s2, e0..e2:<br/>PRF, masked CBD, NTT per share"]
-    se2["same again with fresh masks<br/>and new word orders"]
-    zchk["SUB per share, then ZCHK:<br/>both differences sum to 0?"]
-    a["A[i][j] = SampleNTT(rho, j, i)"]
-    t["t-hat = A o s-hat + e-hat<br/>PWM per share, then unmasked"]
-    ek["ek = encode(t-hat) || rho<br/>H(ek)"]
-    pct["pairwise test (608), KEYGEN / KGWRAP:<br/>Encaps to the new ek, Decaps,<br/>K and K' compared share-wise"]
-    valid["key valid<br/>s-hat, z stay masked"]
-    wrap["KGWRAP: blob =<br/>nonce, Enc_KEK(d || z), tag"]
-    wipe["wipe temporaries (156)"]
-    fault["FAULT (result 8):<br/>wipe and count"]
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart TB
+    seeds["d, z from the TRNG<br/>through the masked sponge"]
+    g["G(d || 3)<br/>rho public, sigma masked"]
+    se1["s, e: PRF, masked CBD, NTT"]
+    se2["s, e again, fresh masks"]
+    zchk{"SUB per share, ZCHK:<br/>copies equal?"}
+    gchk{"G(d || 3) again:<br/>XOR is 0?"}
+    t["t-hat = A o s-hat + e-hat<br/>A from SampleNTT(rho)"]
+    ek["ek = encode(t-hat) || rho,<br/>H(ek)"]
+    pct{"pairwise test:<br/>K = K'?"}
+    valid["key valid"]
+    wrap["KGWRAP: wrap d || z"]
+    wipe(["wipe temporaries, done"])
+    f1(["FAULT"])
+    f2(["FAULT"])
+    f3(["FAULT"])
     seeds --> g --> se1 --> se2 --> zchk
-    zchk -->|"differ"| fault
-    zchk --> g2
-    g2 -->|"not 0"| fault
-    g2 --> a --> t --> ek --> pct
-    pct -->|"K != K'"| fault
-    pct --> valid --> wrap --> wipe
-    valid --> wipe
-    ek -->|"UNWRAP: no pairwise test"| valid
+    zchk -->|"yes"| gchk
+    gchk -->|"yes"| t --> ek --> pct
+    pct -->|"yes"| valid --> wrap --> wipe
+    zchk -.->|"no"| f1
+    gchk -.->|"no"| f2
+    pct -.->|"no"| f3
+    classDef check stroke-width:3px
+    class zchk,gchk,pct check
 ```
 
-## 9. Masked Decaps
+UNWRAP derives the same key pair from the unwrapped d and z; it runs the duplicate checks but skips the pairwise test.
 
-Microcode at 320. m', K', r', the comparison result and K never exist unmasked. A fault that forces "c' = c" or disturbs one decoding of m' is caught by the two ok copies (OKCHK) and the double decoding (IO_SEQ).
+## 9. Decaps
+
+Microcode at 320. m', K', r', the comparison result and K are never unmasked.
 
 ```mermaid
-flowchart TD
-    c["ciphertext c (public)"]
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart TB
+    c["ciphertext c"]
     w["w = v - INTT(s-hat o NTT(u))<br/>per share"]
-    m1["m' = Compress_1(w)<br/>masked, Boolean shares"]
-    m2["m' again, fresh masks<br/>and word order"]
-    seqchk["IO_SEQ: decodings equal?"]
-    gk["(K', r') = G(m' || h)<br/>masked Keccak"]
+    m1["m' = Compress_1(w)"]
+    m2["m' again, fresh masks and order"]
+    seqc{"IO_SEQ:<br/>decodings equal?"}
+    gk["(K', r') = G(m' || h)"]
     kb["K-bar = J(z || c)"]
-    reenc["re-encrypt with r':<br/>y, e1, e2 from the masked CBD,<br/>u', v' per share"]
-    cmpc["masked Compress of u', v',<br/>each bit compared with c<br/>into two ok copies"]
-    okchk["OKCHK: copies agree?"]
+    re["re-encrypt with r'<br/>y, e1, e2 from the masked CBD"]
+    cmpc["compare each bit of u', v' with c<br/>into two ok copies"]
+    okc{"OKCHK:<br/>copies equal?"}
     sel["K = ok ? K' : K-bar<br/>masked select"]
-    sk["session key (masked)<br/>TEST / PERSO: K to the buffer"]
-    fault["FAULT (result 8)"]
-    c --> w --> m1 --> m2 --> seqchk
-    seqchk -->|"differ"| fault
-    seqchk --> gk --> reenc --> cmpc --> okchk
+    sk(["session key, masked"])
+    f1(["FAULT"])
+    f2(["FAULT"])
+    c --> w --> m1 --> m2 --> seqc
+    seqc -->|"yes"| gk --> re --> cmpc --> okc
+    okc -->|"yes"| sel --> sk
     c --> kb --> sel
-    okchk -->|"differ"| fault
-    okchk --> sel --> sk
+    seqc -.->|"no"| f1
+    okc -.->|"no"| f2
+    classDef check stroke-width:3px
+    class seqc,okc check
 ```
 
 ## 10. PUF key and key wrapping
 
-The secret key is never stored. The PUF gives a 180-bit key k through an RM(1,5) fuzzy extractor; the key-encryption key KEK = SHA3-256(k ‖ "K") wraps the seed d || z.
+No key is stored. The PUF gives a 180-bit key k through an RM(1,5) fuzzy extractor, and KEK = SHA3-256(k ‖ "K") wraps the seed d ‖ z.
 
 ```mermaid
-flowchart TD
-    subgraph enroll["ENROLL (TEST / PERSO)"]
-        ek1["k from the TRNG"] --> ek2["read each of 960 cells 5 times,<br/>majority = reference r"]
-        ek2 --> ek3["helper w = r XOR C(k)<br/>check value H(k || 'C')"]
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart TB
+    subgraph EN["ENROLL, TEST or PERSO"]
+        direction TB
+        e1["k from the TRNG"] --> e2["5 reads per cell, majority = r"] --> e3["helper w = r XOR C(k),<br/>check value H(k || 'C')"]
     end
-    subgraph recon["Key reconstruction (KGWRAP, UNWRAP)"]
-        r1["1 read per cell,<br/>masked ML decoding"] --> c1{"check value<br/>matches?"}
+    subgraph RC["Key reconstruction, KGWRAP and UNWRAP"]
+        direction TB
+        r1["1 read per cell,<br/>masked decoding"] --> c1{"check value<br/>matches?"}
         c1 -->|"no"| r3["majority of 3 reads"] --> c3{"matches?"}
         c3 -->|"no"| r5["majority of 5 reads"] --> c5{"matches?"}
-        c5 -->|"no"| puferr["result 12 (PUF)"]
         c1 -->|"yes"| kek["KEK = SHA3-256(k || 'K')"]
         c3 -->|"yes"| kek
         c5 -->|"yes"| kek
+        c5 -.->|"no"| pe(["result 12"])
     end
-    ek3 -->|"helper data in the buffer"| r1
-    kek --> kgw["KGWRAP: KeyGen, then<br/>blob = nonce, d || z XOR SHAKE256(KEK || nonce), tag"]
-    kek --> unw["UNWRAP: masked tag check,<br/>decrypt d || z, KeyGen again"]
-    unw -->|"tag wrong"| bad["result 4 (bad blob)"]
+    e3 -->|"helper data"| r1
+    kek --> kgw["KGWRAP: KeyGen, blob =<br/>nonce, encrypted d || z, tag"]
+    kek --> unw{"UNWRAP:<br/>tag correct?"}
+    unw -->|"yes"| kg["decrypt d || z, KeyGen"]
+    unw -.->|"no"| be(["result 4"])
+    classDef check stroke-width:3px
+    class c1,c3,c5,unw check
 ```
 
 ## 11. Secure messaging
 
-The ML-KEM shared secret stays inside as the masked session key SK. SEAL and OPEN use KMAC256 with direction-specific customization, so a message reflected to its sender fails.
+The shared secret stays inside both chips as the masked session key SK. Each direction uses its own KMAC customization ("E1", "T1" from initiator to responder), so a message sent back to its sender fails the tag check.
 
 ```mermaid
 sequenceDiagram
@@ -335,55 +373,47 @@ sequenceDiagram
     participant HB as Host B
     participant B as Responder chip
     HA->>A: ENCAPS(peer ek)
-    A-->>HA: ciphertext c (K kept as SK)
+    A-->>HA: c, K kept as SK
     HA->>HB: c
     HB->>B: DECAPS(c)
     Note over B: same K kept as SK
-    HA->>A: SEAL(M, length L)
-    A->>A: counter += 1, H = counter, L
-    A->>A: C = M XOR KMACXOF256(SK, H, "E1")
-    A->>A: T = KMAC256(SK, H || C, "T1")
+    HA->>A: SEAL(M, L)
+    A->>A: counter + 1, H = counter, L
+    A->>A: C = M XOR KMACXOF256(SK, H, E1)
+    A->>A: T = KMAC256(SK, H || C, T1)
     A-->>HA: H, C, T
     HA->>HB: H, C, T
     HB->>B: OPEN(H, C, T)
-    B->>B: counter new and inside the 64-message window?
-    B->>B: length and tag check
-    alt authentic
+    alt counter replayed or too old
+        B-->>HB: result 11
+    else bad length or tag
+        B-->>HB: result 9
+    else authentic
         B->>B: mark counter, decrypt
         B-->>HB: M
-    else replay or old counter
-        B-->>HB: result 11
-    else bad tag or length
-        B-->>HB: result 9, C left encrypted
     end
 ```
 
 ## 12. Verification and energy flow
 
-The `make` targets and what feeds the reported numbers.
+Top lane: function and security checks. Bottom lane: how the energy figures are produced.
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart LR
-    rtl["RTL hw/se"]
-    subgraph func["Function and security"]
-        sim["make sim-se<br/>Verilator, NIST vectors,<br/>17 fault / tamper tests"]
-        probe["make se-probe<br/>robust probing check"]
-        tvla["make sim-se-tvla<br/>fixed vs random t-test"]
-        fc["make sim-se-fault<br/>random bit-flip campaign"]
+    rtl["RTL<br/>hw/se"]
+    subgraph V["Function and security"]
+        direction LR
+        sim["make sim-se<br/>NIST vectors,<br/>17 fault tests"]
+        probe["make se-probe<br/>probing check"]
+        tvla["make sim-se-tvla<br/>t-test"]
+        fc["make sim-se-fault<br/>bit-flip campaign"]
     end
-    subgraph energy["Energy (sky130)"]
-        ys["Yosys: map to sky130_fd_sc_hd,<br/>clock gating"]
-        gl["Verilator gate-level run<br/>of one KeyGen, SAIF"]
-        sta["OpenSTA: power"]
-        rep["pqse_energy.py:<br/>energy per command"]
-        or["make se-sram-char:<br/>OpenRAM + ngspice<br/>(pqse_openram_run.py)"]
-        tab["sram_table.txt<br/>pJ per read / write / idle"]
+    subgraph E["Energy, sky130"]
+        direction LR
+        ys["Yosys<br/>map, clock gating"] --> gl["gate-level run<br/>of one KeyGen"] --> sta["OpenSTA<br/>power from SAIF"] --> rep["pqse_energy.py<br/>energy per command"]
+        orr["make se-sram-char<br/>OpenRAM + ngspice"] --> tab["sram_table.txt"] --> rep
     end
-    rtl --> sim
-    rtl --> probe
-    rtl --> tvla
-    rtl --> fc
-    rtl --> ys --> gl --> sta --> rep
-    gl -->|"SRAM access counts"| rep
-    or --> tab --> rep
+    rtl --> V
+    rtl --> ys
 ```
