@@ -23,6 +23,11 @@
 #                    point, the nominal load (one flip-flop input) and slew -
 #                    the energy per access hardly depends on them, and this
 #                    cuts the run time several-fold
+#   PQSE_OR_ANALYTICAL 1: OpenRAM's analytical model instead of SPICE: no
+#                    ngspice, seconds and little memory, but a rough number:
+#                    one C V^2 f power at the technology's event frequency
+#                    (sky130: 100 MHz) for read, write and idle alike
+#                    (pqse_sram_char.py converts it with --allow-analytical)
 #   PQSE_OR_NIX      1: let OpenRAM set up its tools with Nix (`nix develop`,
 #                    OpenRAM's default; needs nix). Default 0: the tools on PATH
 #                    (netlist-only characterization needs only ngspice; layout,
@@ -40,10 +45,10 @@ process_corners = ["TT"]
 supply_voltages = [1.8]
 temperatures = [25]
 
-# SPICE characterization instead of the analytical model (the published
-# sky130_sram_macros were built with the analytical model: one power value for
-# read, write and deselected alike)
-analytical_delay = False
+# SPICE characterization by default (the published sky130_sram_macros were
+# built with the analytical model: one power value for read, write and
+# deselected alike); PQSE_OR_ANALYTICAL=1 for that model
+analytical_delay = _os.environ.get("PQSE_OR_ANALYTICAL", "0") == "1"
 spice_name = _os.environ.get("PQSE_OR_SPICE", "ngspice")
 num_sim_threads = int(_os.environ.get("PQSE_OR_THREADS", "4"))
 if _os.environ.get("PQSE_OR_TABLE", "0") != "1":

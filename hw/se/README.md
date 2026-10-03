@@ -107,6 +107,7 @@ Before the last clock-gating changes, 1,152 flip-flops were clocked every cycle,
 - Leave `OR_VERBOSE=0`. OpenRAM's `-v` adds `.plot V(*)` to every ngspice deck, so ngspice stores and prints every node at every time step, which runs out of memory and disk on the larger shapes.
 - By default OpenRAM characterizes the schematic netlist, which has no wire capacitance, at one load and slew point. `OR_LAYOUT=1 OR_PEX=1` uses the extracted layout and also reports the area; `OR_TABLE=1` runs the full 3 x 3 load and slew table. Both are much slower.
 - `OR_THREADS` sets ngspice threads, `OR_PYTHON` the interpreter with OpenRAM's requirements, `OR_NIX=1` OpenRAM's Nix environment.
+- `OR_ANALYTICAL=1` uses OpenRAM's analytical model (`analytical_delay = True`) and runs no SPICE: seconds, little memory, no ngspice needed. It gives one power for read, write and idle, computed as C·V²·f at sky130's 100 MHz event frequency, so `pqse_sram_char.py --allow-analytical` takes energy per access = power / 100 MHz and no idle energy. The numbers are rough but specific to each shape. They go to `build/sepower/openram_analytical/sram_table.txt`, apart from SPICE results.
 - `SRAM_IDLE_CLOCKED=1` also charges the clocks in which a macro is idle; by default an idle macro's clock counts as gated.
 
 ## 5. Side-channel countermeasures

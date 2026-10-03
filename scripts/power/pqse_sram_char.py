@@ -32,9 +32,18 @@ with the shape from the file name (pqse_sram_a<AW>_d<DW>...). The idle energy
 counts only with pqse_energy.py --sram-idle-clocked (the macro's clock not gated
 while it is not accessed).
 
-A library from the ANALYTICAL model (OpenRAM's default; e.g. the published
-sky130_sram_macros) has one value for every condition: it is reported and
-rejected (use --allow-analytical to accept it anyway).
+A library from the ANALYTICAL model (analytical_delay = True, OpenRAM's
+default; e.g. the published sky130_sram_macros; make se-sram-char
+OR_ANALYTICAL=1) has one value for every condition: it is rejected unless
+--allow-analytical is given. That value is not measured over a clock period:
+it is the sum of C V^2 f over the blocks at the technology's event frequency
+(compiler/characterizer/elmore.py; sky130 tech.py default_event_frequency =
+100 MHz), so the energy per access is
+
+    E [pJ] = P [mW] / f_event = P [mW] x 1e3 / f_event [MHz]
+
+for read and write alike (--event-mhz, default 100), and the idle energy is
+written as 0 (the model has none).
 """
 import argparse
 import os
@@ -116,6 +125,8 @@ def main():
     ap.add_argument('libs', nargs='+')
     ap.add_argument('-o', '--out')
     ap.add_argument('--allow-analytical', action='store_true')
+    ap.add_argument('--event-mhz', type=float, default=100.0,
+                    help='event frequency of the analytical model (sky130: 100)')
     a = ap.parse_args()
 
     lines, bad = [], 0
@@ -180,6 +191,13 @@ def main():
                   'deselected); characterize with analytical_delay = False, or --allow-analytical')
             bad += 1
             continue
+        if analytical:
+            # one C V^2 f power at the event frequency, not a per-cycle average
+            e_rd = e_wr = allv[0] * 1e3 / a.event_mhz
+            e_idle = 0.0
+            model = 'analytical@%gMHz' % a.event_mhz
+            print('  -> analytical: %.2f pJ per read / write (%.4f mW / %g MHz), no idle energy'
+                  % (e_rd, allv[0], a.event_mhz))
         lines.append('%s %.4f %.4f %.4f %.4f   # %s, %s, min period %.3f ns' % (
             shape, e_rd, e_wr, lib['leak_w'] * 1e6, e_idle, os.path.basename(path), model,
             period * 1e9))
