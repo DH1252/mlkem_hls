@@ -27,8 +27,12 @@ from the access counts the macro models recorded inside the window,
     E = reads x (E0 + DW x EPB_RD) + writes x (E0 + DW x EPB_WR)
 The defaults (E0 2 pJ, 0.5 / 0.8 pJ per bit read / written) are a first-order
 guess for small 130 nm, 1.8 V macros, NOT a datasheet: --sram-table <file>
-with lines "<shape> <pJ per read> <pJ per write> [leakage uW]" (shape as
-a<AW>_d<DW>, e.g. a10_d16) replaces them with the SRAM compiler's numbers.
+with lines "<shape> <pJ per read> <pJ per write> [leakage uW] [pJ per idle
+clock]" (shape as a<AW>_d<DW>, e.g. a10_d16) replaces them with the SRAM
+compiler's numbers: make se-sram-char writes it from OpenRAM's SPICE
+characterization (scripts/power/pqse_sram_char.py). The idle energy (a clock
+edge while the macro is deselected) counts only with --sram-idle-clocked: by
+default the macro's clock is taken as gated while it is not accessed.
 
 Card clock: the Liberty internal and switching energies are per transition,
 so the energy per clock does not depend on the clock frequency (same voltage):
@@ -166,8 +170,17 @@ def parse_table(path):
             line = line.split('#')[0].split()
             if len(line) >= 3:
                 t[line[0]] = (float(line[1]), float(line[2]),
-                              float(line[3]) if len(line) > 3 else 0.0)
+                              float(line[3]) if len(line) > 3 else 0.0,
+                              float(line[4]) if len(line) > 4 else 0.0)
     return t
+
+
+def idle_pj(a, table, shape, nclk, nr, nw, ninst):
+    """--sram-idle-clocked: the clocks in which a macro is not accessed, x the
+    energy of a deselected clock (table column 5, from pqse_sram_char.py), in pJ"""
+    if not a.sram_idle_clocked or shape not in table:
+        return 0.0
+    return max(0.0, nclk * ninst - (nr + nw)) * table[shape][3]
 
 
 def eng(x, unit):
@@ -195,6 +208,7 @@ def main():
     ap.add_argument('--e0', type=float, default=2.0)
     ap.add_argument('--sram-table')
     ap.add_argument('--sram-leak-uw', type=float, default=0.0)
+    ap.add_argument('--sram-idle-clocked', action='store_true')
     a = ap.parse_args()
     if a.windows:
         sampled(a)
@@ -228,11 +242,11 @@ def window(d, a):
         for shape, (nr, nw, ninst) in parse_sram(os.path.join(d, 'sram_access.txt')).items():
             dw = int(shape.split('_d')[1])
             if shape in table:
-                er, ew, lk = table[shape]
+                er, ew, lk, _ = table[shape]
                 p_sram_leak += lk * 1e-6 * ninst
             else:
                 er, ew = a.e0 + dw * a.epb_rd, a.e0 + dw * a.epb_wr
-            e_sram += (nr * er + nw * ew) * 1e-12
+            e_sram += (nr * er + nw * ew + idle_pj(a, table, shape, nclk, nr, nw, ninst)) * 1e-12
     tot = annot.get('vcd', 0) + annot.get('saif', 0)
     una = annot.get('unannotated', 0)
     share = tot / float(tot + una) if tot + una else float('nan')
@@ -356,15 +370,15 @@ def single(a):
             nr, nw, ninst = acc[shape]
             dw = int(shape.split('_d')[1])
             if shape in table:
-                er, ew, lk = table[shape]
+                er, ew, lk, _ = table[shape]
                 p_sram_leak += lk * 1e-6 * ninst
             else:
                 er = a.e0 + dw * a.epb_rd
                 ew = a.e0 + dw * a.epb_wr
-            e = (nr * er + nw * ew) * 1e-12
+            e = (nr * er + nw * ew + idle_pj(a, table, shape, nclk, nr, nw, ninst)) * 1e-12
             e_sram += e
             print('  %-9s %5d %12d %12d %10.2f %10.2f %12s' % (shape, ninst, nr, nw, er, ew, eng(e, 'J')))
-        src = 'table %s' % a.sram_table if table else \
+        src = 'table %s%s' % (a.sram_table, ', clocked while idle' if a.sram_idle_clocked else '') if table else \
             'E0 %.2f pJ + %.2f / %.2f pJ per bit read / written - an assumption' % (a.e0, a.epb_rd, a.epb_wr)
         print('  (%s)' % src)
     elif a.sram:

@@ -116,6 +116,11 @@ Before the last clock-gating changes, 1,152 flip-flops were clocked every cycle 
 v4 is the primary design: about one contactless-card transaction slot per KEM
 operation, and the lower energy per operation.
 
+**SRAM energy.** With `RAM_MACRO=1` the RAMs are macros whose energy comes from their access counts times an energy per access. By default that energy is an assumption (`pqse_energy.py`). The published sky130 OpenRAM macros don't help: their Liberty files come from OpenRAM's analytical model, with one value for read, write and deselected alike. They are also oversized for the 64 × 65 Keccak and seed RAMs: the smallest is 1 KB at 32 bits wide. `make se-sram-char OPENRAM_DIR=<OpenRAM checkout>` generates PQSE's own shapes (1024 × 25, 64 × 65, 512 × 32) with OpenRAM and characterizes them with SPICE (ngspice, sky130 models, TT / 1.8 V / 25 °C). `scripts/power/pqse_sram_char.py` turns the result into `build/sepower/openram/sram_table.txt`: pJ per read, per write and per deselected clock, plus leakage. OpenRAM's `.lib` gives average power in mW over one cycle at the minimum period, so the energy is that power × the period. Then run `make se-power-vcd-report ... SRAM_TABLE=build/sepower/openram/sram_table.txt`.
+- The default characterizes the schematic netlist, which has no wire capacitance.
+- `OR_LAYOUT=1 OR_PEX=1` characterizes the extracted layout and also gives the area.
+- `SRAM_IDLE_CLOCKED=1` also charges the clocks in which a macro is idle; by default its clock is taken as gated.
+
 Low-power RTL (no change in function or in the masking schedule):
 
 | Technique | Where |

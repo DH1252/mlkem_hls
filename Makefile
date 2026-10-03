@@ -494,6 +494,13 @@ CARD_MHZ  ?= 3.39
 SRAM_EPB_RD ?= 0.5
 SRAM_EPB_WR ?= 0.8
 SRAM_E0     ?= 2.0
+# SRAM_TABLE=<file>: the SRAM energies from a table instead of the assumption
+# above, e.g. the SPICE-characterized one make se-sram-char writes:
+#   make se-power-vcd-report SKY130_LIB=... RAM_MACRO=1 SRAM_TABLE=build/sepower/openram/sram_table.txt
+# SRAM_IDLE_CLOCKED=1: also charge every clock in which a macro is not accessed
+# with its deselected energy (macro clock not gated; default: gated)
+SRAM_TABLE  ?=
+SRAM_IDLE_CLOCKED ?= 0
 GLD       := $(BUILD)/sepower/gl
 GL_DUMP   := gate.$(if $(filter vcd,$(GL_FMT)),vcd,saif)
 # --trace-underscore: Yosys names every internal net _<n>_, and Verilator leaves
@@ -529,6 +536,7 @@ se-power-gl-build: | $(BUILD)
 	    || { tail -30 build.log; exit 1; }
 
 PW_EARGS = --card-mhz $(CARD_MHZ) --epb-rd $(SRAM_EPB_RD) --epb-wr $(SRAM_EPB_WR) --e0 $(SRAM_E0) \
+	    $(if $(SRAM_TABLE),--sram-table $(SRAM_TABLE)) $(if $(filter 1,$(SRAM_IDLE_CLOCKED)),--sram-idle-clocked) \
 	    $(if $(GL_CLOCKS),--command-clocks $(GL_CLOCKS))
 se-power-vcd: se-power-gl-build
 	rm -f $(GLD)/gate.vcd $(GLD)/gate.saif $(GLD)/gl_run.txt $(GLD)/sram_access.txt
@@ -549,6 +557,52 @@ se-power-vcd-report:
 	$(PYTHON) scripts/power/pqse_energy.py $(GLD)/power_gl$(PW_TAG).txt --run $(GLD)/gl_run.txt \
 	    --dump $(GLD)/gate_pins.saif $(if $(PW_RAMLIB),--sram $(GLD)/sram_access.txt) \
 	    $(PW_EARGS) | tee $(GLD)/energy$(PW_TAG).txt
+
+# SPICE-characterized energy of the SRAM shapes PQSE uses (OpenRAM, sky130):
+# generates each shape (scripts/power/openram/pqse_sram_a*_d*.py: 1024 x 25
+# polynomial RAM, 64 x 65 Keccak-state / seed RAM, 512 x 32 I/O buffer) and
+# characterizes it with SPICE at TT / 1.8 V / 25 C (analytical_delay = False:
+# the published sky130_sram_macros use the analytical model, one value for
+# read, write and idle alike); scripts/power/pqse_sram_char.py turns the
+# Liberty files into build/sepower/openram/sram_table.txt (pJ per read / write
+# / idle clock, leakage), which SRAM_TABLE=... feeds to the energy report.
+# Setup, once: git clone https://github.com/VLSIDA/OpenRAM; cd OpenRAM;
+#   pip install -r requirements.txt; make sky130-pdk; make sky130-install
+#   (and ngspice on PATH, or OR_NIX=1 to use OpenRAM's Nix environment)
+#   make se-sram-char OPENRAM_DIR=<OpenRAM checkout> [SRAM_SHAPES="a6_d65"]
+#        [OR_LAYOUT=1 [OR_PEX=1] [OR_DRC=1]] [OR_PORTS=1rw1r|1r1w] [OR_THREADS=4]
+# OR_LAYOUT=0 (default) characterizes the schematic netlist (no wire
+# capacitance: energies somewhat low; minutes to hours per shape);
+# OR_LAYOUT=1 OR_PEX=1 the extracted layout (Magic; slowest, most accurate,
+# also gives the area). Logs: build/sepower/openram/openram_<shape>.log.
+OPENRAM_DIR ?= $(HOME)/OpenRAM
+SRAM_SHAPES ?= a10_d25 a6_d65 a9_d32
+OR_LAYOUT   ?= 0
+OR_PEX      ?= 0
+OR_DRC      ?= 0
+OR_PORTS    ?= 1rw1r
+OR_SPICE    ?= ngspice
+OR_THREADS  ?= 4
+OR_NIX      ?= 0
+SRAM_CHAR_D := $(BUILD)/sepower/openram
+se-sram-char: | $(BUILD)
+	@test -f $(OPENRAM_DIR)/sram_compiler.py || { echo "OpenRAM not found at OPENRAM_DIR=$(OPENRAM_DIR):"; \
+	    echo "  git clone https://github.com/VLSIDA/OpenRAM; then make sky130-pdk sky130-install there"; exit 1; }
+	mkdir -p $(SRAM_CHAR_D)
+	for s in $(SRAM_SHAPES); do \
+	    echo "OpenRAM: $$s (log: $(SRAM_CHAR_D)/openram_$$s.log)"; \
+	    PQSE_OR_OUT=$(abspath $(SRAM_CHAR_D)) PQSE_OR_LAYOUT=$(OR_LAYOUT) PQSE_OR_PEX=$(OR_PEX) \
+	    PQSE_OR_DRC=$(OR_DRC) PQSE_OR_PORTS=$(OR_PORTS) PQSE_OR_SPICE=$(OR_SPICE) \
+	    PQSE_OR_THREADS=$(OR_THREADS) PQSE_OR_NIX=$(OR_NIX) \
+	    OPENRAM_HOME=$(OPENRAM_DIR)/compiler OPENRAM_TECH=$(OPENRAM_DIR)/technology \
+	    PDK_ROOT=$${PDK_ROOT:-$(OPENRAM_DIR)} OPENRAM_TMP=$(abspath $(SRAM_CHAR_D))/tmp_$$s \
+	    python3 -u $(OPENRAM_DIR)/sram_compiler.py -v -c $(abspath scripts/power/openram/pqse_sram_$$s.py) \
+	        > $(SRAM_CHAR_D)/openram_$$s.log 2>&1 \
+	        || { tail -30 $(SRAM_CHAR_D)/openram_$$s.log; exit 1; }; \
+	done
+	$(PYTHON) scripts/power/pqse_sram_char.py \
+	    $$(find $(SRAM_CHAR_D) -name 'pqse_sram_a*_d*_TT_1p8V_25C.lib' -not -path '*/tmp_*') \
+	    -o $(SRAM_CHAR_D)/sram_table.txt
 
 # Sampled energy per command, the fast way with VCD: GL_WINDOWS windows of
 # GL_WLEN clocks, one in the middle of each 1/GL_WINDOWS of the command
