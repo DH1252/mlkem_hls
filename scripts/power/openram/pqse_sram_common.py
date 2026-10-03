@@ -79,5 +79,14 @@ else:
 # whole-word writes (no byte enables)
 write_size = None
 
+# delay chain that times the sense-amp enable (replica-bitline control logic):
+# OpenRAM's default of 9 stages fired the sense amps too early with the sky130
+# models ("Sense amp enable timing error. Increase the delay chain"). Stages
+# must be odd. PQSE_OR_DC_STAGES / PQSE_OR_DC_FANOUT, empty: OpenRAM's default.
+if _os.environ.get("PQSE_OR_DC_STAGES"):
+    delay_chain_stages = int(_os.environ["PQSE_OR_DC_STAGES"])
+if _os.environ.get("PQSE_OR_DC_FANOUT"):
+    delay_chain_fanout_per_stage = int(_os.environ["PQSE_OR_DC_FANOUT"])
+
 output_name = "pqse_sram_a{0}_d{1}".format(int(num_words - 1).bit_length(), word_size)
 output_path = _os.path.join(_os.environ.get("PQSE_OR_OUT", "openram_out"), output_name)
