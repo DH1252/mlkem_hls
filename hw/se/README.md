@@ -1,17 +1,8 @@
-# PQSE: a post-quantum secure element (`hw/se`)
+# PQSE RTL reference (`hw/se`)
 
-A compact, low-power secure-element chip for ML-KEM-768 (FIPS 203), designed side-channel-aware from the start. It targets identity and digital-trust applications: identity cards, digital-signature tokens, payment, and IoT identity. Design priorities, in order:
+PQSE is a masked ML-KEM-768 secure element (FIPS 203) for contactless identity and payment cards. This file is the reference for the RTL: the blocks, the interface, the microcode map, where each countermeasure lives, the testbenches and how to debug them. The reasoning behind the design, written for a wider audience, is in [`docs/PQSE_design.md`](../../docs/PQSE_design.md). Section 19 explains the names used in the RTL and in this file.
 
-1. small area;
-2. very low power;
-3. physical-attack resistance:
-   - **first-order masking of every secret**: KeyGen, Encaps and Decaps, the key wrap, the PUF key and secure messaging, with every masked gadget checked exhaustively in the robust probing model (glitches **and** transitions);
-   - **hiding** (constant time, a fresh random word order for every shuffled instruction and every NTT layer, random dummy cycles);
-   - **fault detection** (duplicated decoding and comparison, control-flow and RAM checks) with a wipe-and-count response.
-
-> **Status.** Version 4 (this one: compact and low-power for a contactless card) passes `make sim-se` (also `LOWPOWER=1`), the robust-probing check, a two-run TVLA with no confirmed first-order leakage and the fault campaign with no silent fault or hang; gate-level energy in section 3. Not yet run with this version: the FPGA board builds. Section 5 lists what changed from version 3.
-
----
+**Status (v4).** `make sim-se` passes, also with `LOWPOWER=1`. The probing check passes, a two-run TVLA finds no confirmed first-order leakage, and the fault campaign gives no silent fault and no hang for Decaps or KeyGen. Gate-level energy is in section 4. The FPGA board builds have not been run with this version.
 
 ## 1. Block diagram
 
@@ -19,370 +10,405 @@ A compact, low-power secure-element chip for ML-KEM-768 (FIPS 203), designed sid
             SPI (4 pins) / Avalon-MM (FPGA)      tamper  IRQ   trigger (TEST only)
                        |                            |     ^     ^
               +--------v----------------------------v-----+-----+-----+
-              |  pqse_host: CSRs, lifecycle TEST>PERSO>USER>KILLED,   |
-              |  buffer windows, command policy, K export policy,     |
-              |  fault counter, power-on / fault / tamper ZEROIZE     |
+              |  pqse_host: registers, lifecycle TEST>PERSO>USER>KILLED|
+              |  buffer windows, command and K-export policy,         |
+              |  fault counter, watchdog, persistent store, wipes     |
               +----------+----------------------------+---------------+
-                         | command, kexp               | host <-> I/O buffer (idle only)
+                         | command, result             | host <-> I/O buffer (idle only)
               +----------v------------+    +----------v---------------------------+
               | sequencer + microcode |    | I/O buffer 4 KB: own ek, PUF helper  |
-              | 1024 x 96 ROM,        |    | + check value, peer ek / c in, c out,|
-              | pc + ~pc shadow,      |    | K (TEST/PERSO), wrapped-key blob,    |
+              | ROM 1024 x 96,        |    | data, peer ek / c in, c out, K       |
+              | pc + ~pc shadow,      |    | (TEST/PERSO), wrapped-key blob,      |
               | instruction parity,   |    | secure message                       |
               | engine-ran check,     |    +--------------------------------------+
               | RAM-port precharge    |
               +--+-----+-----+----+---+
                  |     |     |    |      +-------------------+  +----------------------+
-   +-------------v-+ +-v-----+-+ +v-----v-+ | seed registers  |  | polynomial RAM 0     |
-   | masked Keccak | | poly    | | masked  | | 2 RAMs (one per |  | even slots: share 0, |
-   | state in 2    | | unit:   | | gadgets:| | share) x 64 x 65|  | public    1024 x 25  |
-   | RAMs 64 x 64, | | 1 mult, | | CBD/B2A,| | + parity        |  +----------------------+
-   | DOM, + sponge | | 1 BFU,  | | mu, Com-| +-----------------+  | polynomial RAM 1     |
-   | + SampleNTT   | | shuffled| | press,  |                      | odd slots: share 1   |
-   +-------+-------+ +----+----+ | compare,| +-----------------+  |           1024 x 25  |
-           |              |      | select, | | I/O unit: encode |  +----------------------+
-   +-------v--------------+--+   | 2 x ok  | | decode, seed ops,|  | SRAM-cell PUF+RM(1,5)|
-   | TRNG (ring osc. + 90B   |   +---------+ | counters, SEQ    |  | code-offset extractor|
-   | health tests) -> Trivium|  Fisher-Yates +-----------------+  | masked ML decoding,  |
-   | PRNG 64 bit/clk (masks) |  128x7 2R1W register file          | check value + retry  |
-   +-------------------------+  (pqse_perm.v)                     +----------------------+
+   +-------------v-+ +-v-----+-+ +v-----v-+ | seed RAMs         |  | polynomial RAM 0     |
+   | masked Keccak | | poly    | | masked  | | 2 x 64 x 65,      |  | even slots: share 0  |
+   | state in 2    | | unit:   | | gadgets:| | one per share,    |  | and public, 1024 x 25|
+   | RAMs 64 x 65, | | 1 mult, | | CBD/B2A,| | parity            |  +----------------------+
+   | DOM chi,      | | 1 BFU,  | | mu, Com-| +-------------------+  | polynomial RAM 1     |
+   | sponge, KMAC, | | shuffled| | press,  |                        | odd slots: share 1   |
+   | SampleNTT     | |         | | compare,| +-------------------+  |            1024 x 25 |
+   +-------+-------+ +----+----+ | select, | | I/O unit: encode, |  +----------------------+
+           |              |      | 2 x ok  | | decode, seed ops, |  | PUF: 960 SRAM-type   |
+   +-------v--------------+--+   +---------+ | counters, SEQ     |  | cells, RM(1,5) fuzzy |
+   | TRNG (ring osc. + SP    |               +-------------------+  | extractor, masked    |
+   | 800-90B tests), Trivium |  Fisher-Yates shuffler,              | decoding, retries    |
+   | PRNG, 64 bits per clock |  128 x 7 2R1W register file          +----------------------+
+   +-------------------------+  (pqse_perm.v)
 ```
 
-## 2. How the priorities shaped the design
+## 2. Design choices
 
-| Decision | Area | Power | Physical attacks |
-|---|---|---|---|
-| **One engine at a time** under microcode; every RAM port is a mux on the instruction class | no hazard logic, no duplicated ports | idle engines do not toggle; low peak current | one operation's leakage at a time |
-| **One modular multiplier, one butterfly** for NTT, INTT and pointwise multiply; 1R1W RAMs, 2 coefficients per word | v2 of the fast core had 7–14 multipliers | — | shuffled order |
-| **Lane-serial Keccak with the state in RAM** (two 64 × 64 RAMs, one per share; 64-bit datapath, 162 clocks per round) | ~770 flip-flops instead of ~5,100, no 25-way lane multiplexers | the state's 3,200 bits no longer clocked every cycle | 64 random bits per lane for DOM χ; the shares never share a RAM |
-| **Microcode in a ROM** (registered read, two-clock fetch) | a ROM block instead of ~100 k gates of table logic | one ROM read per instruction | — |
-| **Masking by repeating linear steps per share** (NTT, INTT, PWM on share 0, then share 1) | costs time, not area | — | first order |
-| **Bit-serial masked gadgets**: CBD/B2A, Compress, compare, select | one DOM AND per gadget | — | a register stage after every DOM AND, a compress register before its result is reused |
-| **Share-domain RAMs**: even slots (share 0) and odd slots (share 1) in two RAMs; seed shares in two RAMs | same bits, one extra parity bit per word | — | the shares never share a bit line, sense amplifier or output register |
-| **Shuffle table in a 128 × 7 register file** (2 reads, 1 write: LUTRAM / MLAB, a small register file on a chip), inside-out Fisher–Yates, two clocks per element | ~1 k flip-flops less than a flip-flop table | — | a uniformly random order per instruction and per NTT layer |
-| **Parity + control-flow redundancy**; duplication only where a fault would leak (the comparison result, the decoding of m′) | one bit per RAM word, a 10-bit pc shadow, one parity bit per instruction | — | detects the common single faults |
-| **SRAM-cell PUF** (960 cross-coupled NAND pairs, one row of 32 excited per read) | 2 gates per bit (~0.01 mm² in SKY130, ~2 k LUTs on the FPGA, or ~2.9 k flip-flops and no LUTs as butterfly cells, `PQSE_PUF_BFLY`) instead of 1,920 ring oscillators | only the row being read switches | re-excitable, so majority reads work |
-| Clock enables, RAM read enables (the share-1 Keccak RAM idles in unmasked jobs), operand isolation, TRNG ring oscillators only while collecting | — | yes | — |
-| `MASKED = 0` reference build | removes the share-1 seed RAM and masked Keccak; masks are 0 | — | none (cost comparison and TVLA positive control) |
+| Choice | Effect |
+|---|---|
+| One engine at a time under microcode; each RAM port is a multiplexer selected by the instruction class | No hazard logic or extra RAM ports. Idle engines don't toggle, peak current stays low, and only one operation shows in the power trace. |
+| One modular multiplier and one butterfly for NTT, INTT and PWM; 1R1W RAMs with two coefficients per word | The earlier fast core (v2) had 7 to 14 multipliers. |
+| Lane-serial Keccak with the state in two RAMs (one per share), 64-bit datapath | The 3,200 state bits leave the flip-flops (v3 used about 5,100 flip-flops for Keccak) and the 25-way lane multiplexers go away. 126 clocks per round. |
+| Microcode in a ROM with a registered read (two-clock fetch) | A ROM block instead of about 100 k gates of decode logic. |
+| Masking linear steps by running them once per share | NTT, INTT and PWM cost time per share and no extra area. |
+| Bit-serial masked gadgets (CBD/B2A, Compress, compare, select) | One DOM AND gate per gadget. |
+| Shares in separate RAMs (polynomial slots, seeds, Keccak state) | The two shares never share a bit line, sense amplifier or output register. Cost: one parity bit per word, which also serves fault detection. |
+| Shuffle table in a 128 x 7 register file (2 reads, 1 write) | About 1 k fewer flip-flops than a flip-flop table. LUTRAM / MLAB on an FPGA. |
+| Parity and control-flow shadows everywhere; duplicated computation only where a fault would leak or give a bad key | One parity bit per RAM word, a 10-bit pc shadow, one parity bit per instruction. |
+| SRAM-type PUF cells (960 cross-coupled NAND pairs, read one row of 32 at a time) | 2 gates per bit instead of the 1,920 ring oscillators of v3. Only the row being read switches. |
+| `MASKED = 0` build | Removes the share-1 seed RAM and the masked Keccak; masks are 0. Used for cost comparison and as the TVLA positive control. |
 
 ## 3. Speed
 
-Speed is no longer a priority (v4): the target is a contactless card, where the 13.56 MHz field supplies a few milliwatts and the reader allows waiting-time extensions, so v4 trades clocks for area and energy. Version 1 measured (Verilator): KeyGen 108,669 clocks, Encaps 111,935, masked Decaps ~176–182 k. Version 4, measured with `make sim-se LOWPOWER=1` (hiding on; the Keccak permutation takes ~3,050 clocks, about 50 permutations per KEM operation):
+Measured with `make sim-se LOWPOWER=1`, hiding on. A Keccak permutation takes about 3,050 clocks and a KEM operation needs about 50 of them.
 
-| Command | Clocks (measured) | at 13.56 / 4 = 3.39 MHz (contactless) | at 10 MHz |
+| Command | Clocks | at 3.39 MHz (13.56 MHz / 4) | at 10 MHz |
 |---|---|---|---|
-| KeyGen, masked: s / e and G computed twice + pairwise consistency test (242,129 without them) | 545,344 | 161 ms | 54.5 ms |
+| KeyGen with its fault checks (242,129 without) | 545,344 | 161 ms | 54.5 ms |
 | KGWRAP (PUF key, KeyGen, wrap) | 587,755 | 173 ms | 58.8 ms |
-| Encaps, masked | 267,964 | 79 ms | 26.8 ms |
-| Decaps, masked, m′ decoded twice | 298,465–304,526 (290,116 hiding off) | 88–90 ms | 30 ms |
-| UNWRAP (PUF key right at the first read; s / e computed twice, no pairwise test) | 271,738 (293,466 with the 3-read retry) | 80 ms | 27.2 ms |
-| SEAL / OPEN (128 bytes, KMAC) | 22,550 | 6.7 ms | 2.3 ms |
+| Encaps | 267,964 | 79 ms | 26.8 ms |
+| Decaps (290,116 with hiding off) | 298,465 to 304,526 | 88 to 90 ms | 30 ms |
+| UNWRAP, PUF key right at the first read (293,466 with the 3-read retry) | 271,738 | 80 ms | 27.2 ms |
+| SEAL or OPEN, 128 bytes | 22,550 | 6.7 ms | 2.3 ms |
 | ENROLL | 38,876 | 11.5 ms | 3.9 ms |
 
-The fault hardening of KeyGen (section 8) costs ~300 k clocks: the pairwise consistency test ~250 k (an Encaps and a partial Decaps), the second computation of s, e and G ~50 k. UNWRAP derives the key pair too and runs the duplicates, not the pairwise test.
+The KeyGen fault checks (section 7) add about 300 k clocks: about 250 k for the pairwise consistency test, which is an Encaps plus a partial Decaps, and about 50 k for the second computation of s, e and G. UNWRAP regenerates the key pair and runs the duplicate computation but skips the pairwise test.
 
-What the protection costs in time: running NTT, PWM and INTT once per share; the masked compression (two clocks per adder bit, ~50 clocks per coefficient for d = 10); the second decoding of m′ (~10 k clocks); drawing a Fisher–Yates order before every shuffled instruction (128–256 clocks each, the next NTT layer's order is drawn while the current layer runs); the χ DOM AND (4 clocks per lane). A PUF read takes ~15 clocks (excite a row, let it settle, sample), so a reconstruction is ~15 k clocks, and the 3- or 5-read retry ~45 k / ~75 k.
+The protection costs time in several places. NTT, PWM and INTT run once per share. The masked Compress takes two clocks per adder bit, about 50 clocks per coefficient for d = 10. Decaps decodes m′ a second time (about 10 k clocks). A Fisher–Yates order is drawn before each shuffled instruction (128 to 256 clocks; the next NTT layer's order is drawn while the current layer runs). The masked χ AND takes 4 clocks per lane. A PUF read takes about 15 clocks, so one key reconstruction takes about 15 k clocks and the 3- and 5-read retries about 45 k and 75 k.
 
-### Power and energy (ASIC, SkyWater 130 nm)
+## 4. Energy and low-power design
 
-Measured with `make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1`: the mapped,
-clock-gated netlist runs a whole masked KeyGen in Verilator, every net's
-toggles go into a SAIF, OpenSTA turns them into power and
-`scripts/power/pqse_energy.py` into energy (sky130_fd_sc_hd, tt, 25 C, 1.8 V;
-SRAM macros from access counts with an assumed energy per access; no clock
-tree, wires, pads or analog blocks). Before the low-power RTL below:
+**Measurement.** `make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1` maps the RTL to sky130_fd_sc_hd (typical, 25 °C, 1.8 V) with clock gating, runs a whole masked KeyGen on the netlist in Verilator, writes every net's toggles to a SAIF file, and has OpenSTA compute power. `scripts/power/pqse_energy.py` converts that to energy and adds the SRAM macros from their access counts. Clock tree, wires, pads and analog blocks are not included. 99.6 % of the pins were annotated in the last run.
 
-| KeyGen | v4 | v5 (serial, Tang Nano 9K) |
-|---|---|---|
-| Clocks | 242,129 | 944,548 |
-| Time at 3.39 MHz | 71 ms | 279 ms |
-| Energy (logic + SRAM) | 49.2 uJ | 59.3 uJ |
-| Average power at 3.39 MHz | 0.69 mW | 0.21 mW |
-
-After the low-power RTL, the clock gating and the fault hardening (v4, `LOWPOWER`, `CG_SRST`, KeyGen with the pairwise test and the duplicates, 99.6 % of the pins annotated):
-
-| KeyGen | v4, now |
+| KeyGen (`LOWPOWER`, `CG_SRST`, with fault checks) | |
 |---|---|
-| Clocks (gate-level run) | 549,032 |
-| Time at 3.39 MHz | 162 ms |
-| Energy | 73.5 uJ (logic 52.0 uJ, SRAM 21.5 uJ: the Keccak and seed RAMs 19.2 uJ) |
+| Clocks in the gate-level run | 549,032 (162 ms at 3.39 MHz) |
+| Energy | 73.5 µJ: logic 52.0 µJ, SRAM 21.5 µJ (Keccak-state and seed RAMs 19.2 µJ) |
 | Energy per clock | 133.8 pJ (203 pJ before the low-power RTL) |
 | Average power at 3.39 MHz | 0.45 mW |
-| Flip-flops / behind a clock gate | 7,775 / 7,526 (285 gates) |
+| Flip-flops | 7,775, of which 7,526 behind 285 clock gates |
 | Setup slack at 20 ns | 7.2 ns |
 
-Before the last clock-gating changes, 1,152 flip-flops were clocked every cycle (~2.3 uW each at 50 MHz, ~40 % of the logic energy) and KeyGen took 92.5 uJ; giving the theta column parities, the chi operands, the CSR read register, the cycle counter and the SampleNTT counters plain enables left 249 (small state machines, synchronizers) and brought it to 73.5 uJ. `build/sepower/ffs_<tag>.txt` names the remaining ones.
+Before the last clock-gating changes, 1,152 flip-flops were clocked every cycle, about 40 % of the logic energy, and KeyGen took 92.5 µJ. Plain enables on the θ column parities, the χ operands, the CSR read register, the cycle counter and the SampleNTT counters left 249 such flip-flops (small state machines and synchronizers). `build/sepower/ffs_<tag>.txt` lists the remaining ones by RTL register.
 
-v4 is the primary design: about one contactless-card transaction slot per KEM
-operation, and the lower energy per operation.
-
-**SRAM energy.** With `RAM_MACRO=1` the RAMs are macros whose energy comes from their access counts times an energy per access. By default that energy is an assumption (`pqse_energy.py`). The published sky130 OpenRAM macros don't help: their Liberty files come from OpenRAM's analytical model, with one value for read, write and deselected alike. They are also oversized for the 64 × 65 Keccak and seed RAMs: the smallest is 1 KB at 32 bits wide. `make se-sram-char OPENRAM_DIR=<OpenRAM checkout>` generates PQSE's own shapes (1024 × 25, 64 × 65, 512 × 32) with OpenRAM and characterizes them with SPICE (ngspice, sky130 models, TT / 1.8 V / 25 °C). `scripts/power/pqse_sram_char.py` turns the result into `build/sepower/openram/sram_table.txt`: pJ per read, per write and per deselected clock, plus leakage. OpenRAM's `.lib` gives average power in mW over one cycle at the minimum period, so the energy is that power × the period. Then run `make se-power-vcd-report ... SRAM_TABLE=build/sepower/openram/sram_table.txt`.
-- The default characterizes the schematic netlist, which has no wire capacitance.
-- `OR_LAYOUT=1 OR_PEX=1` characterizes the extracted layout and also gives the area.
-- `SRAM_IDLE_CLOCKED=1` also charges the clocks in which a macro is idle; by default its clock is taken as gated.
-
-Low-power RTL (no change in function or in the masking schedule):
+**Low-power techniques.** None of these changes the function or the masking schedule.
 
 | Technique | Where |
 |---|---|
-| Idle registers cleared once on going idle (not rewritten every idle clock), so they hold and can be clock-gated | `pqse_poly`, `pqse_mcomp`, `pqse_puf`, `pqse_sponge`, `pqse_masked` (gadget registers) |
-| chi Y operands and DOM products (384 flip-flops) written only in the two clocks of a lane slot where they change (load, then back to 0): the same values clock by clock as loading them every clock of a permutation, but clock-gated in the other two chi clocks, in theta / rho-pi and between permutations; the absorb-port registers only around an absorb | `pqse_keccak` |
-| Registers loaded every clock with an unchanged value rewritten with a plain enable (one load condition, no second assignment elsewhere): the CSR read register (only on a read), the cycle counter (only while a command runs), the SampleNTT counters, the poly unit's c-word and write-word registers (`make se-power` had listed them as clocked every cycle) | `pqse_host`, `pqse_core`, `pqse_sample`, `pqse_poly` |
-| theta column parities in registers, accumulated by the chi write-back: the parity pass runs in round 0 only, RP reads only the 5 lanes of a column (per round 35 of 135 state-RAM reads and 36 of 162 clocks fewer; +640 flip-flops). Written per lane with constant indices, so each 64-bit lane is clocked only when it changes (5 write-backs per ~126-clock round); through a variable part-select, synthesis had made all 650 flip-flops clocked every cycle | `pqse_keccak` |
-| Operand isolation (`PQSE_LOWPOWER`, ASIC builds): the PRNG word, the TRNG word and the shared RAM read buses reach an engine only while it is busy; the shuffle multiplier sees the PRNG word only while drawing | `pqse_core`, `pqse_perm` |
-| Clock gating (Yosys `clockgate`; registers with a synchronous reset over the enable are first rewritten to enable = en \| rst, `CG_SRST=1`) | `make se-power*`, `CLOCKGATE=1` |
+| Registers cleared once on going idle, then held, so they can be clock-gated | `pqse_poly`, `pqse_mcomp`, `pqse_puf`, `pqse_sponge`, `pqse_masked` |
+| χ operands and DOM products (384 flip-flops) written only in the two clocks of a lane slot where they change; absorb-port registers only around an absorb | `pqse_keccak` |
+| Registers that were reloaded with the same value every clock rewritten with one plain enable: the CSR read register, the cycle counter, the SampleNTT counters, the poly unit's coefficient and write-word registers | `pqse_host`, `pqse_core`, `pqse_sample`, `pqse_poly` |
+| θ column parities kept in registers and updated by the χ write-back, so only round 0 needs a θ pass (35 fewer state-RAM reads and 36 fewer clocks per round). Each 64-bit lane is written with a constant index so it is clocked only when it changes; a variable part-select had made all 650 bits clocked every cycle. | `pqse_keccak` |
+| Operand isolation (`PQSE_LOWPOWER`): the PRNG word, the TRNG word and the shared RAM read buses reach an engine only while it is busy | `pqse_core`, `pqse_perm` |
+| Read enables only in clocks that use the data; the share-1 Keccak RAM idles in unmasked jobs | `pqse_core`, `pqse_keccak` |
+| Clock gating by Yosys `clockgate`, groups of 4 or more flip-flops per enable. `CG_SRST=1` first rewrites registers with a synchronous reset over the enable to enable = en \| rst. | `make se-power*`, `CLOCKGATE=1` |
 
-`make se-power` also lists the flip-flops still clocked every cycle, by RTL
-register (`build/sepower/ffs_<tag>.txt`), the next candidates.
-`make sim-se LOWPOWER=1` simulates the operand-isolated variant.
+**SRAM energy.** With `RAM_MACRO=1` the RAMs are macros charged per access, and by default the energy per access is an assumption documented in `pqse_energy.py`. The published sky130 OpenRAM macros don't help: their Liberty files come from OpenRAM's analytical model, which gives one number for read, write and idle, and the smallest macro (1 KB, 32 bits wide) is much larger than the 64 x 65 Keccak and seed RAMs. Instead, `make se-sram-char OPENRAM_DIR=<OpenRAM checkout>` generates PQSE's three shapes (1024 x 25, 64 x 65, 512 x 32) with OpenRAM and characterizes them in ngspice with the sky130 models. `scripts/power/pqse_sram_char.py` turns the Liberty files into `build/sepower/openram/sram_table.txt` with pJ per read, per write and per idle clock, and the leakage. OpenRAM reports average power in mW over one cycle at the minimum period, so energy is that power times the period. Then rerun the report with `make se-power-vcd-report ... SRAM_TABLE=build/sepower/openram/sram_table.txt`.
 
-## 4. Security design (threat → countermeasure)
+- The shapes run in parallel with `make -j3`. A finished shape leaves a stamp and is not rerun; `make se-sram-char-clean` removes them.
+- By default OpenRAM characterizes the schematic netlist, which has no wire capacitance, at one load and slew point. `OR_LAYOUT=1 OR_PEX=1` uses the extracted layout and also reports the area; `OR_TABLE=1` runs the full 3 x 3 load and slew table. Both are much slower.
+- `OR_THREADS` sets ngspice threads, `OR_PYTHON` the interpreter with OpenRAM's requirements, `OR_NIX=1` OpenRAM's Nix environment.
+- `SRAM_IDLE_CLOCKED=1` also charges the clocks in which a macro is idle; by default an idle macro's clock counts as gated.
 
-| Threat | Countermeasure | Where |
+## 5. Side-channel countermeasures
+
+| Threat | Countermeasure | Files |
 |---|---|---|
-| Timing attacks | Fixed schedule; no branch, address or loop count depends on a secret. Implicit rejection by a masked select. Branches only on public results (ek/dk checks, tags, the PUF check value) | `pqse_ucode.v`, `pqse_masked.v` |
-| DPA/CPA on Decaps (static key, chosen ciphertexts) | ŝ held as two arithmetic shares mod q. NTT/INTT/PWM per share; masked Compress₁ → m′ as Boolean shares; masked Keccak for G, J, PRF; masked CBD (B2A); masked Compress_d with a bit-by-bit masked comparison c′ = c; masked select K′ / K̄. m′, r′, K′, K̄ and the comparison result are never unmasked | `pqse_mcomp.v`, `pqse_masked.v`, `pqse_keccak.v` |
-| DPA on KeyGen, Encaps, and repeated UNWRAP | KeyGen and Encaps are masked too. TRNG seeds are conditioned by the masked sponge and come out as shares; s, e, y, e₁, e₂ come out of the masked CBD; t̂ is unmasked only when both share sums are complete; the ciphertext leaves through the masked compression | `pqse_ucode.v`, `pqse_mcomp.v` |
-| Side-channel CCA attacks on decryption/re-encryption (plaintext-checking oracles; Ravi et al. 2020, Ueno et al. 2021) | No unmasked m′, no unmasked comparison bit, no early abort, no gate that ever computes ok during the comparison | as above |
-| **Glitches and transitions** | Every masked gadget passes an exhaustive first-order check in the **robust probing model with glitches and transitions** (`make se-probe`, section 6). The rules it enforces: shares meet only in registered DOM cross terms; every DOM result goes through a compress register before it is used again; a value is unmasked only from two registers that nothing else loads; RAM words are read share 0 → public word → share 1 and the two RAM output registers are precharged between instructions; registers behind the read bus never hold one share while the bus carries the other | `pqse_mcomp.v`, `pqse_masked.v`, `pqse_keccak.v`, `pqse_io.v`, `pqse_sponge.v`, `pqse_core.v` |
-| Single-trace / horizontal attacks on the NTT (Primas et al. 2017) | A uniformly random permutation (inside-out Fisher–Yates) for every PWM / ADD / MSPLIT / Compress / μ / CBD instruction, and its own for every NTT / INTT layer (drawn in the background while the previous layer runs); 0–15 random dummy clocks before every engine start | `pqse_perm.v`, `pqse_poly.v`, `pqse_core.v` |
-| Profiled attacks on message decoding with repeated Decaps of one ciphertext (masked FPGA Kyber broken with ~400 traces + majority vote, ASHES 2023 / JCEN 2025) | m′ compression, the re-encryption compare, the ciphertext compression, μ and the CBD process their 128 words in a fresh random order per run; outputs go into registers per share domain | `pqse_mcomp.v`, `pqse_masked.v` |
-| **Fault attacks** (skip the comparison, force "c′ = c", glitch the program counter, flip key bits, disturb the decoding of m′) | Two independently masked copies of the comparison result (OKCHK); **m′ decoded twice with fresh masks and a fresh order, compared share-wise (IO_SEQ)**; pc + complemented shadow; complemented shadows on the sequencer, Keccak and sponge control registers; instruction parity; engine-ran check; parity on every RAM word; a hardware PRNG freshness check; a host command watchdog; the KeyGen pairwise consistency test. Any of them aborts with result 8; the host resets the engines, wipes all keys, counts the fault; the third fault → KILLED | `pqse_core.v`, `pqse_masked.v`, `pqse_io.v`, `pqse_host.v` |
-| Reading keys through the interface | No command outputs dk, ŝ, z, m′, K (in USER) or the KEK. Fixed buffer windows, nothing while a command runs. Temporaries are wiped after every command, engine registers are cleared when idle, the Keccak state is cleared between hash jobs, and a power-on wipe clears RAM contents left over from before a reset | `pqse_host.v`, `pqse_ucode.v`, all engines |
-| The shared secret leaving the chip | In USER, K never leaves: it stays masked as the session key for SEAL / OPEN. Only TEST / PERSO export K (known-answer tests) | `pqse_ucode.v`, `pqse_host.v` |
-| Debug features abused in the field | Injected seeds only in TEST; key import and PUF enrollment only in TEST/PERSO; raw PUF / TRNG dumps and the measurement trigger only in TEST; the lifecycle only moves forward | `pqse_host.v`, `pqse_top.v` |
-| Physical tamper | Tamper input aborts the command, wipes every key, moves to KILLED. A chip ORs its sensors (clock / voltage glitch, temperature, light, an active shield) into it: those are analog cells from the PDK / an IP vendor, not RTL | `pqse_host.v` |
-| Weak randomness | RO TRNG with SP 800-90B repetition-count, adaptive-proportion and startup tests; SHA3-256 conditioning; Trivium PRNG reseeded per command, never handing out a mask bit twice (checked in simulation); failure → result 5 (ZEROIZE still runs) | `pqse_rng.v` |
-| Key storage without NVM | The 64-byte seed d‖z is wrapped with a KEK from the PUF: KEK = SHA3-256(k_PUF ‖ "K"); blob = nonce ‖ (d‖z ⊕ SHAKE256(KEK‖nonce)) ‖ SHA3-256(KEK‖nonce‖ct). The PUF key is decoded in masked form and checked against a 64-bit check value before use (section 7) | `pqse_puf.v`, `pqse_ucode.v` |
+| Timing | Fixed schedule: no branch, address or loop count depends on a secret. Branches only on public results (input checks, tags, the PUF check value). Implicit rejection is a masked select. | `pqse_ucode.v`, `pqse_masked.v` |
+| Power and EM analysis of Decaps (static key, chosen ciphertexts), KeyGen, Encaps and repeated UNWRAP | Every secret is two shares. ŝ, e, y, e₁, e₂ are arithmetic shares mod q and run NTT, INTT and PWM per share. Seeds, m′ and K are Boolean shares. G, J, PRF and KMAC run on the masked Keccak; the CBD sampler, Compress, the comparison c′ = c and the select are masked gadgets. m′, r′, K′, K̄ and the comparison result are never unmasked. t̂ and c are unmasked only as public outputs. | `pqse_mcomp.v`, `pqse_masked.v`, `pqse_keccak.v`, `pqse_ucode.v` |
+| Side-channel attacks on re-encryption (plaintext-checking oracles, Ravi et al. TCHES 2020, Ueno et al. TCHES 2022) | No unmasked m′, no unmasked comparison bit, no early abort. | as above |
+| Glitches and transitions | The gadget rules in section 6, checked by `make se-probe`. | gadgets, `pqse_io.v`, `pqse_sponge.v`, `pqse_core.v` |
+| Single-trace attacks on the NTT (Primas et al. CHES 2017); profiled attacks on message decoding with repeated Decaps of one ciphertext (masked FPGA Kyber broken with about 400 traces and a majority vote, ASHES 2023 / JCEN 2025) | A fresh uniformly random order (inside-out Fisher–Yates) for each PWM, ADD, MSPLIT, Compress, μ and CBD instruction, and for each NTT and INTT layer. 0 to 15 random dummy clocks before each engine start. | `pqse_perm.v`, `pqse_poly.v`, `pqse_core.v` |
+| Fault attacks | Section 7. | |
+| Reading keys through the interface | No command outputs dk, ŝ, z, m′, the KEK, or K in USER. The buffer is reachable only while idle, through fixed windows. Temporaries are wiped after every command, engine registers cleared when idle, the Keccak state cleared between hash jobs, and a power-on wipe clears RAM left over from before a reset. | `pqse_host.v`, `pqse_ucode.v` |
+| Debug features in the field | Injected seeds, raw dumps and the trigger pin only in TEST; key import and PUF enrollment only in TEST or PERSO; the lifecycle only moves forward. | `pqse_host.v`, `pqse_top.v` |
+| Physical tamper | The tamper input aborts the command, wipes every key and moves to KILLED. A chip ORs its sensors into this input (clock and voltage glitch, temperature, light, active shield); those are analog cells from the PDK or an IP vendor, outside this RTL. | `pqse_host.v` |
+| Weak randomness | Ring-oscillator TRNG with the SP 800-90B repetition-count, adaptive-proportion and start-up tests, conditioned by SHA3-256. Trivium PRNG reseeded per command, with a hardware check against reused mask words. A TRNG failure gives result 5; ZEROIZE still runs. | `pqse_rng.v` |
 
-## 5. What changed
+## 6. Masked gadgets
 
-**Version 3 → 4: compact and low-power for a contactless card** (measured with `make se-gowin` on the Tang Nano 20K's GW2AR-18 as the area yardstick: v3 needed 44 k LUT4s, twice the device).
+All gadgets are first-order and follow five rules, which the probing check enforces: shares meet only in registered DOM cross terms; every DOM result passes through a compress register before it is used again; a value is unmasked only from two registers that nothing else loads; RAM words are read in the order share 0, public word, share 1, with both RAM output registers precharged between instructions; and a register behind the read bus never holds one share while the bus carries the other.
 
-| # | Version 3 | Version 4 |
+- **Arithmetic shares mod q** (ŝ, e, y, e₁, e₂, w, u, v): x = x₀ + x₁ mod q. Share 0 lives in even slots (RAM 0), share 1 in odd slots (RAM 1). Linear operations run per share.
+- **Masked CBD (B2A)**, `pqse_masked.v`. The masked sponge writes the PRF output as Boolean shares, one per seed RAM, into scratch entries E_CBD (12 to 15). M_CBD reads one 8-bit word (two coefficients) at a time in the random order and converts each bit b = b₀ ⊕ b₁ of weight v with one fresh R mod q: T = v·b₀ − R (registered), then A₀ = b₁ ? −T : T and A₁ = b₁ ? v − R : R, so A₀ + A₁ = v·b. The weights are +1, +1, −1, −1 for the CBD and 1665 for μ. The word writer reads share 0, a public word, then share 1, and writes each share from its own register.
+- **Compress_d** (d = 1, 4, 10), `pqse_mcomp.v`. Each share is scaled on its own, y_s = round(x_s · 2^K / q) mod 2^K with K = d + 14 and 2¹³ added to share 0. The top d bits of y₀ + y₁ are Compress_d(x). The sum is a bit-serial ripple-carry adder on the Boolean sharings a = (y₀⊕R, R) and b = (R′, y₁⊕R′), two clocks per bit: a DOM AND with four registered partial products, then the carry shares are compressed into registers, carry′ = a ⊕ ((a⊕b) ∧ (a⊕c)). The partial products reload every clock and are 0 outside the compress clock, because a held cross term next to the carry share that contains its random bit would unmask it. Output mode 0 writes m′ as Boolean shares to a seed entry; mode 1 compares each bit with the public ciphertext bit and ANDs the result into `ok`; mode 2 outputs the ciphertext bit, unmasked from two registers only this mode loads.
+- **Comparison.** `ok` is a Boolean-shared bit kept in two copies with independent randomness. Each update is a DOM AND (partial products reloaded every clock) followed by a compress clock. OKCHK unmasks only ok_a ⊕ ok_b, which is 0 unless a fault hit one copy. OKOUT, used only for tag checks, copies the shares into two registers that nothing else loads and combines them there.
+- **Select.** K = K̄ ⊕ (ok ∧ (K′ ⊕ K̄)), one DOM AND per bit. The result stays masked in seed entry E_SK.
+- **Keccak χ.** X = ¬a[x+1] and Y = a[x+2], one DOM AND per bit with 64 fresh random bits per lane. Per lane: read a[x+1] into X, read a[x+2] into Y, AND, then write a[x] ⊕ products back. X is cleared after the AND and Y and the products reload every clock, so the AND never sees both shares of one lane, even across consecutive clocks. That makes any lane order safe; the RTL uses 0, 2, 4, 1, 3.
+- **IO_SEQ.** e ⊕ e₂ is computed per share into registers and the two differences are compared. The result is 0 unless a fault hit one of the two values, and the secret itself is never combined.
+
+**Probing check** (`scripts/pqse_probe_verify.py`, `make se-probe`, also run by `make sim-se`). Each gadget is simulated clock by clock with the RTL's schedule. A probe on a wire sees every register in its combinational cone, every input of every multiplexer in that cone, and a register's own value when its load is a data multiplexer, in the probed clock and the clock before (the robust probing model with glitches and transitions). For each probe and clock, the checker computes the exact distribution of what the probe sees over all masks and random bits, and compares it across all secret values. Covered: the Compress adder (m′ and compare modes, the latter with the ok accumulator), the two ok copies with OKCHK, SEL, the B2A, a χ slice, IO_SEQ, and the RAM read port with the registers behind it. Negative controls (the v2 adder, ok accumulator, χ and read port; v3's χ with the natural lane order; an adder draft with held partial products; χ with held operands) must be reported as leaking. The check works on each gadget's registers and schedule; the synthesized netlist needs a netlist-level tool such as PROLEAD.
+
+## 7. Fault detection and response
+
+| Detector | Catches | Files |
 |---|---|---|
-| 1 | Keccak state in ~5,100 flip-flops (two 1,600-bit shares, column parities, plane and operand registers) behind 25-way lane multiplexers; 86 clocks per round | **State in two 64 × 64 RAMs**, one per share (lanes, parities, the ρπ output); three passes per round (θ parities, θ+ρ+π, χ+ι), one read and one write per clock; ~770 flip-flops; 162 clocks per round. χ operands are loaded one lane each and cleared after the AND (checked by `make se-probe`, which now models this schedule) |
-| 2 | Microcode table read combinationally (synthesized as logic) | **ROM with a registered read** (a ROM block on the FPGA), two-clock fetch |
-| 3 | PUF: 1,920 ring oscillators (one disjoint pair per bit) | **SRAM-cell PUF**: 960 cross-coupled NAND pairs (the storage core of an SRAM cell), re-excited per read; option `PQSE_PUF_SRAM` for a real SRAM macro's power-up values (section 7) |
-| 4 | — | `make se-gowin`: Yosys fit report for the Tang Nano 20K with the largest modules |
-| 5 | ByteEncode / ByteDecode with 128-bit bit buffers and barrel shifters | **bit-serial** (a 64-bit lane register, one bit per clock) |
-| 6 | Trivium PRNG, 64 rounds per clock | **32 rounds per clock** into a 64-bit word that is fully fresh two clocks after a take; consumers that take in consecutive clocks (B2A, SEL, the adder's AND clock, the ok copies) use only the top half, which is always fresh; a hardware check aborts the command with FAULT on any violation (`ferr`). The dummy-cycle delay is skipped while an NTT layer order is drawn in the background |
-| 7 | Keccak rotation as a shift-left / shift-right pair; PUF key shares and SEL operands read by variable bit index | one barrel rotator per share; shift registers (the bit in use is always bit 0) |
-
-**Version 2 → 3:**
-
-| # | Version 2 | Version 3 |
-|---|---|---|
-| 1 | Shuffle table: 128 × 7 flip-flops (~900 FF, ~1,000 LUT); NTT layers ordered by one permutation composed with per-layer affine maps (lowest bit of the order = x₀ ⊕ k) | **128 × 7 2R1W register file** (MLAB / LUTRAM; a register file on a chip), inside-out Fisher–Yates, two clocks per element; **every NTT / INTT layer gets its own uniformly random order**, drawn in the background (double-buffered halves) |
-| 2 | Masked gadgets checked only by TVLA on a register-level power model | **Exhaustive robust-probing check (glitches + transitions)** of every gadget, with negative controls (`make se-probe`). It found, and v3 fixes: the adder carry and the ok accumulators reused a DOM result without a compress register; the adder's partial products held their value after the compress clock (next to the carry share masked by the same random bit); unmasking XORs (`srd0 ^ srd1`, the ciphertext bit, `ok0 ^ ok1`, the K export) were fed by both shares all the time, so they computed m′ bits, keys and the running ok while nothing was meant to be revealed; the χ operands came from plane muxes holding both shares of every lane; the read mux could hold both shares of a coefficient |
-| 3 | PUF reconstruction with single reads; a wrong key showed only as a bad blob | **64-bit key check value** in the helper data (ENROLL), **majority retry** with 3 then 5 reads per bit, result 12 if all fail |
-| 4 | Decoding of m′ protected only indirectly (a wrong m′ fails the re-encryption) | **m′ decoded twice** (fresh masks, fresh order) and compared share-wise without unmasking (IO_SEQ) |
-| 5 | Secure messaging: SHAKE256/SHA3 with a direction byte, fixed 128-byte messages, strict counter order | **KMAC256 / KMACXOF256** (SP 800-185, customization "E1"/"E2"/"T1"/"T2"), **lengths 1–128**, a **64-message sliding replay window** (late messages inside the window are accepted once) |
-| 6 | 512-entry ROM full | **1024-entry ROM** (10-bit pc), room for the new programs |
-| 7 | No measurement support | **Trigger pin** (TEST only), System Console capture script and `pqse_tvla.py board` for oscilloscope traces; `make se-power` (SKY130 power and timing) |
-| 8 | RO-PUF: 32 oscillators compared in 960 overlapping pairs (the whole response carries at most log2(32!) ≈ 118 bits) | **one disjoint oscillator pair per response bit** (1,920 oscillators): independent bits, so the 128-bit target is reachable |
-
-## 6. The masked gadgets in one page
-
-- **Arithmetic shares mod q** (ŝ, e, y, e₁, e₂, w, u, v): x = x₀ + x₁ mod q; linear operations run per share. Share 0 lives in even slots (RAM 0), share 1 in odd slots (RAM 1).
-- **Masked CBD / B2A** (`pqse_masked.v`): the masked sponge writes the PRF output (both shares, each in its own seed RAM) into the scratch entries E_CBD (12–15); M_CBD reads it one word (8 bits = 2 coefficients) at a time in the random order T[w] and turns the Boolean-shared bits into arithmetic shares, T = v·b₀ − R, A₀ = b₁ ? −T : T, A₁ = b₁ ? v − R : R, with weights +1, +1, −1, −1 (and 1665 for μ). The word writer reads share 0, a public word, share 1, and writes each share from its own write register.
-- **Compress_d** (d = 1, 4, 10) of a shared coefficient (`pqse_mcomp.v`): each share scaled on its own, y_s = round(x_s · 2^K / q) mod 2^K, K = d + 14 (+2¹³ on share 0); the top d bits of the sum are exactly Compress_d(x). The sum is a bit-serial ripple-carry adder on Boolean sharings a = (y₀⊕R, R), b = (R′, y₁⊕R′), two clocks per bit: a DOM AND with four registered partial products, then the carry shares compressed into registers: carry′ = a ⊕ ((a⊕b) ∧ (a⊕c)). The partial products load every clock (0 outside the compress clock): a held cross term next to the carry share that contains its random bit would unmask it. Output modes: 0 m′ as Boolean shares into a seed entry; 1 each bit compared with the public ciphertext bit and ANDed into `ok`; 2 the ciphertext bit, unmasked from two registers only this mode loads.
-- **Comparison**: `ok` is a Boolean-shared bit; **two copies** with independent randomness accumulate the same comparisons, each update a DOM AND (partial products reloaded every clock, no hold) followed by a compress clock. OKCHK unmasks only (ok_a ⊕ ok_b), which is 0 unless a fault hit one copy. OKOUT (tag checks only) copies the shares into two registers nothing else loads and combines them there.
-- **Select**: K = K̄ ⊕ (ok ∧ (K′ ⊕ K̄)), one DOM AND per bit; the result stays masked in seed entry E_SK.
-- **Keccak χ** (state in RAM, one RAM per share): X = ¬a[x+1], Y = a[x+2], one DOM AND per bit (64 fresh random bits per lane). Per lane: read a[x+1] → X, read a[x+2] → Y, the AND, then a[x] ⊕ products is written back. X is cleared after the AND and Y and the products load every clock, so the AND never sees both shares of one lane, not even in consecutive clocks; this makes any lane order safe (the RTL keeps 0, 2, 4, 1, 3; the check covers both orders, and the same schedule with the operands held until reloaded as a negative control).
-- **IO_SEQ**: e ⊕ e₂ per share into registers, then the two differences compared: 0 unless a fault hit one decoding; nothing about m′ is ever combined.
-
-**Robust-probing check** (`scripts/pqse_probe_verify.py`, `make se-probe`, also run by `make sim-se`): each gadget is simulated clock by clock as the RTL schedules it; a probe on any wire observes every register of its combinational cone — including a register's own value when its load is a data mux, and every input of every mux — in the probed clock and the clock before. For every probe and clock, the distribution of what it sees is computed exactly over all masks and fresh random bits and compared across all secrets. Gadgets: the Compress adder (m′ and compare modes, the latter together with the ok accumulator), the two ok copies with OKCHK, SEL, the B2A, a χ slice, IO_SEQ, and the RAM read port with the registers behind it. Negative controls (the v2 adder, ok accumulator, χ and read port, v3's χ with the natural lane order, the first v3 adder draft with held partial products, and v4's χ with held operands) must be reported as leaking, which shows the checker can see these leaks. The check is at the level of each gadget's registers and its schedule; the synthesized netlist can be checked the same way with a netlist-level tool (PROLEAD).
-
-## 7. PUF fuzzy extractor (`pqse_puf.v`)
-
-- **Response source: an SRAM-type PUF.** An SRAM cell's power-up value is decided by the mismatch of its two cross-coupled inverters; that is the most studied PUF in smart cards. Four builds of the same 960-bit source (`pqse_puf_raw`):
-  - `PQSE_PUF_LATCH` (FPGA prototype, and the compact choice for an open-PDK chip): 960 cells, each the storage core of an SRAM cell, two cross-coupled NAND gates (`pqse_pufcell`), in 30 rows of 32. A read excites the cell's row (both nodes forced high, as an SRAM cell before power-up), releases it, lets it settle (8 clocks) and samples the cell through a synchronizer. Each read re-runs the "power-up", so the 3- and 5-read majority retries work. Cost: 2 gates per bit, ~0.01 mm² in SKY130 (an OpenRAM 1 KB macro is ~0.2 mm²), ~2 k LUTs on the FPGA.
-  - `PQSE_PUF_BFLY` (FPGA prototype without spending LUTs on the PUF): the same 30 × 32 array, row excitation, settle time and synchronizer, but each cell is a **butterfly cell** (`pqse_bflycell`, Kumar et al., HOST 2008): two always-transparent latches built from the logic cells' flip-flops (Gowin `DLC` / `DLP`), each one's D fed by the other's Q, one with an asynchronous clear and one with an asynchronous preset driven by the row's excite. Excited, the pair is forced to 0/1, which a loop of two non-inverting stages cannot hold; released, it falls to 0/0 or 1/1 as the mismatch of the two paths decides, the same metastable resolution as an SRAM cell. Each cell takes the row's excite through its own flip-flop: wired straight to the shared row net, the 32 cells of a row are logically identical and GowinSynthesis merged them as equivalent registers (990 latches instead of 1,920). Cost: 2 latches + 1 flip-flop and no LUT per bit, so ~1,920 LUT4s move to ~2,880 of the GW2AR-18's 15,552 flip-flops (`make se-gowin PUF=bfly`, `make se-gowin-eda PUF=bfly`). Place both latches in one CLS (or two neighbouring ones if a CLS cannot mix a clear and a preset register) with matched D routes. Butterfly cells on FPGAs are known for strong routing bias (low inter-device distance in published Spartan-3E measurements), so measure uniformity and uniqueness with PUFRAW as for the NAND cell. On Intel parts (DE10-Nano), whose ALM registers have no latch mode, Quartus would build the latches from LUTs: keep `PQSE_PUF_LATCH` there.
-  - `PQSE_PUF_SRAM` (a chip with a compact SRAM compiler): the power-up contents of a dedicated 32 × 32 SRAM that nothing writes (`pqse_puf_sram`, a black box mapped to the PDK's macro). One sample per power-up — natural for a card, which powers up at every tap — so repeated reads return the same bits and the retries add nothing; the code alone must cover the bit-error rate.
-  - default: the simulation model (fixed device pattern, read noise, drift and a noisy mode).
-- **Why not the FPGA's block RAM**: Gowin's BSRAM and shadow SRAM are initialized by the bitstream (zeros by default, UG285), and Gowin parts have no equivalent of the power-gating + partial-reconfiguration trick that enables block-RAM SRAM PUFs on Xilinx 7-series (Wild & Güneysu, FPL 2014). The latch cell (LUTs) or the butterfly cell (flip-flops) gives the same SRAM-cell physics in the fabric. On an FPGA the routing of the two gates dominates the mismatch, so expect more bias than on a chip: place each pair in one logic cell and measure with PUFRAW.
-- **Independence**: every cell belongs to exactly one response bit. (A source that reuses its elements is weaker: 32 ring oscillators compared in 960 pairs give at most log2(32!) ≈ 118 bits in total.)
-- **Code**: Reed–Muller RM(1,5) = [32, 6, 16]: 6 key bits per block of 32 response bits, minimum distance 16, corrects up to 7 errors per block. 30 blocks: 960 response bits, a 180-bit key, 960 bits (15 lanes, 120 bytes) of helper data.
-- **Entropy**: the helper data leaks up to 26 bits per block, so the key keeps 30 · (32h − 26) bits for a min-entropy h per response bit: 128 bits need h ≥ 0.946. `pqse_puf_stats.py` estimates h from the bias of PUFRAW dumps; one device's 960 bits cannot prove h ≥ 0.946 at 99% confidence (that takes about 4,500 bits, i.e. 5 devices), so measure several boards / chips, and raise PUF_NB if h is lower.
-- **Enroll** (TEST/PERSO): k from the TRNG (masked seed entry); each response bit read 5 times (majority: a clean reference); helper w = r ⊕ C(k), in two clocks per bit: (r ⊕ C(k₀)) is registered first, then C(k₁) is added, so no gate sees C(k₀) ⊕ C(k₁). Then the microcode stores the **check value** H(k ‖ "C") (first 8 bytes of SHA3-256, computed by the masked sponge) in the 16th helper lane.
-- **Reconstruct**: one read per bit. With a fresh random 6-bit R per block the decoder sees y = r′ ⊕ w ⊕ C(R) = C(k ⊕ R) ⊕ e and decodes k ⊕ R by maximum likelihood; the key comes out as shares (k ⊕ R, R): **the unmasked key never exists in the decoder.** The 32 bits of a block are read in a random order (bit x ⊕ xm, fresh xm per block), so the read schedule does not line up across reconstructions. The microcode hashes it (masked) and compares the check value; if it does not match, it reconstructs again with the **majority of 3 reads** per bit, then of **5 reads**; if that fails too, result 12 (PUF).
-- **Failure rates** (`pqse_model.py` check 7, Monte Carlo with the real decoder, printed for 5–20% bit errors per read): at 10% a single read loses the key in a large share of unwraps, the retries in none of the samples. `pqse_puf_stats.py` turns a measured bit-error rate into the same numbers.
-- **Drift**: majority voting removes read noise only; a bit that flips for good fools every read, and the code corrects it. The testbench flips 9.4% of the bits permanently (unwrap still works) and adds 20% read noise (the retry recovers the key).
-- **Measurement**: PUFRAW (TEST) dumps 960 single-read bits; `scripts/pqse_puf_stats.py` gives uniformity, bit-error rate, inter-device distance, failure rates with and without retries, and the entropy left after the helper data.
-
-## 8. Fault detection and response
-
-| Detector | Catches | Where |
-|---|---|---|
-| Two masked `ok` copies + OKCHK | a fault that forces "c′ = c" or skips part of the comparison (FO-transform bypass) | `pqse_masked.v` |
-| m′ decoded twice + IO_SEQ | a fault in one decoding of m′ (the attacks that disturb the decoder and watch the result) | `pqse_ucode.v`, `pqse_io.v` |
-| pc + ~pc shadow register | glitches of the program counter (skipped / repeated instructions) | `pqse_core.v` |
-| Instruction parity (computed at fetch, checked at execute) | corrupted instruction register | `pqse_core.v` |
+| Program counter with a complemented shadow | skipped or repeated instructions | `pqse_core.v` |
+| Complemented shadows of the sequencer state, the Keccak pass, round, column, plane and lane counters, and the sponge state and return state, written in the same statements and compared every clock | a flipped control bit: skipped Keccak rounds (a wrong hash that parity can't see), a sequencer stopped in idle mid-command, a jump between sponge states | `pqse_core.v`, `pqse_keccak.v`, `pqse_sponge.v` |
+| Instruction parity, computed at fetch and checked at execute | a corrupted instruction register | `pqse_core.v` |
 | Engine-ran check | an engine start that was suppressed (the engine never reported busy) | `pqse_core.v` |
-| Even parity on every polynomial-RAM and seed-RAM word (seed parity checked per share) | bit flips in stored keys and intermediates | `pqse_core.v` |
-| Even parity on every Keccak state word (65-bit RAM words, both shares) and on each theta column-parity register, checked on every read / use, per share | faults in the hashing of KeyGen, Encaps, KMAC and the PRF (without it they gave a wrong output silently; Decaps only had the re-encryption check) | `pqse_keccak.v` |
-| Complemented shadow copies of the lifecycle, the fault counter and the tampered flag | a flipped bit in the security state (KILLED back to USER / TEST, the fault count reset): handled like the tamper input | `pqse_host.v` |
-| Complemented shadow copies of the control registers: the sequencer state, the Keccak pass / round counter / column / plane / lane counters, the sponge state and return state (written in the same statements, compared every clock) | a flipped control bit: skipped Keccak rounds or passes (a weakened, wrong hash that the state parity cannot see), a sequencer stopped in idle mid-command, a jump between sponge states (in the fault campaign these gave wrong KeyGen outputs silently, or hangs) | `pqse_core.v`, `pqse_keccak.v`, `pqse_sponge.v` |
-| Command watchdog in the host: a command (or the internal wipe) still running after 2²² clocks (~84 ms at 50 MHz; the longest command, KeyGen with its PCT, needs ~0.5 M) | a hang that no other detector sees (the core stopped silently, an engine or a TRNG wait that never ends): handled like a detected fault; a hung wipe → KILLED. Kept in the host because a stopped core also stops its own cycle counter; the host stays busy until then | `pqse_host.v` |
-| PRNG freshness check in hardware: a random word taken before it is fully fresh again (two advances after the previous take; only a take_hi one clock after a take may use the fresh top half) | reused mask bits (a fault on the PRNG's freshness counter, a skipped wait): the masking would be weakened with no visible error | `pqse_rng.v` |
-| KeyGen pairwise consistency test (FIPS 140-3): before the key is marked valid, a masked Encaps of a fresh random m to the new ek (read back from the buffer, with its own H(ek)), then a Decaps of that ciphertext with the new s^ and h; K and K' compared share-wise (IO_SEQ). Its ciphertext stays in the output window (public: its K never leaves the chip) | a fault that made ek and dk disagree (a corrupted t, s or H(ek)): such a key would be published and fail every later Decaps. It cannot see a fault that changes the key pair consistently: that is the next row | `pqse_ucode.v` (608) |
-| KeyGen duplicate computation: every secret polynomial (s₀..s₂, e₀..e₂) is produced twice - PRF, masked CBD, NTT - the second copy with fresh masks and its own word orders; the two NTT-domain results are compared share-wise: SUB per share (share 0 in RAM 0, share 1 in RAM 1), then ZCHK (new `pqse_poly` op: FAULT unless the two differences sum to 0 mod q for every coefficient; equal copies leave (r, −r), r a difference of fresh masks, so nothing about the polynomial is combined). G(d ‖ 3) is run twice too (XORed into its output, which must be 0, IO_SEQ against a zero entry); ρ in the buffer compared with G's. Every key derivation (KEYGEN, KGWRAP, UNWRAP); ~+70 k clocks | a fault in G, a PRF, the masked CBD or an NTT of s / e: these change ek and dk consistently, so the pairwise test passes them - a coefficient off by a few, a polynomial forced to zero (a weak key), two secret polynomials made equal (PRF nonce / domain faults, a known key-recovery attack on ML-KEM KeyGen); with KGWRAP, a published ek that a later UNWRAP of d would not reproduce. What follows the comparison is covered by the pairwise test and the RAM parity: a fault in the PWM, unmasking or encoding of t̂, or in the stored ŝ, is an NTT-domain change, i.e. a dense, large error in the time domain, and the test's decoding fails | `pqse_ucode.v` (720), `pqse_poly.v` |
-| Persistent security state (`pqse_nvm`: lifecycle, fault count, tampered; set-only thermometer bits, two OR-combined copies), loaded at reset; a fault, kill or tamper event is programmed before the next command is accepted (write-ahead); a store ahead of the registers is handled like the tamper input | resetting the three-strike counter or KILLED by a reset / power cycle; rolling the lifecycle back | `pqse_host.v` |
+| Even parity on every polynomial, seed and Keccak-state RAM word and on each θ column-parity register, checked per share on every read | bit flips in stored keys, intermediates and hash state | `pqse_core.v`, `pqse_keccak.v` |
+| Two masked `ok` copies and OKCHK | a fault that forces "c′ = c" or skips part of the comparison | `pqse_masked.v` |
+| m′ decoded twice (fresh masks, fresh order), compared with IO_SEQ | a fault in one decoding of m′ | `pqse_ucode.v`, `pqse_io.v` |
+| PRNG freshness check | a mask word used twice, which would weaken the masking with no visible error | `pqse_rng.v` |
+| Host watchdog: a command or wipe still running after 2²² clocks | a hang that nothing else sees | `pqse_host.v` |
+| KeyGen duplicate computation (microcode 720) | a fault that changes ek and dk consistently | `pqse_ucode.v`, `pqse_poly.v` |
+| KeyGen pairwise consistency test (microcode 608) | a fault that makes ek and dk disagree | `pqse_ucode.v` |
+| Complemented shadows of the lifecycle, fault counter and tampered flag; a persistent store written ahead of every change | a flipped security-state bit; resetting the fault count or KILLED by a power cycle; a lifecycle rolled back | `pqse_host.v` |
 
-Response: the command ends with result 8 (FAULT); the host resets every engine, runs ZEROIZE, increments the fault counter (STATUS[18:17]); the third fault moves the lifecycle to KILLED. The keys must be unwrapped or re-imported afterwards. Faults whose effect is only a wrong value inside the masked re-encryption end as an implicit rejection (a random-looking K̄), and the kill after three detected faults bounds what statistical fault attacks can collect.
+**PRNG freshness.** Trivium runs 32 rounds per clock into a 64-bit word, so a word is completely fresh two clocks after the previous take. Consumers that take on consecutive clocks (B2A, SEL, the adder's AND clock, the ok copies) use only the top half, which is always fresh. The hardware check (`ferr`) raises FAULT if any other word is taken early.
+
+**Watchdog.** 2²² clocks is about 84 ms at 50 MHz and 1.2 s at 3.39 MHz; the longest command, KGWRAP, needs about 0.59 M clocks. The watchdog sits in the host because a stopped core also stops its own cycle counter. A hung command is handled like a detected fault; a hung wipe moves the chip to KILLED.
+
+**KeyGen duplicate computation.** Every secret polynomial s₀..s₂, e₀..e₂ is produced twice (PRF, masked CBD, NTT), the second time with fresh masks and its own word orders. The NTT-domain copies are compared without unmasking: SUB per share, then ZCHK, a poly-unit operation that raises FAULT unless the two share differences sum to 0 mod q for every coefficient. Equal copies leave (r, −r), where r is a difference of fresh masks, so nothing about the polynomial is combined. G(d‖3) also runs twice: the second result is XORed into the first, which must give zero (IO_SEQ against the zero entry E_KB), and ρ in the buffer is compared with G's. This runs on every key derivation (KEYGEN, KGWRAP, UNWRAP). It catches what the pairwise test can't: faults in G, a PRF, the CBD or an NTT of s or e change ek and dk together. Examples are a coefficient off by a few, a polynomial forced to zero (a weak key), and two secret polynomials made equal by a PRF nonce fault (a known key-recovery attack on ML-KEM KeyGen).
+
+**KeyGen pairwise consistency test** (FIPS 140-3). Before the key is marked valid, the microcode runs a masked Encaps of a fresh random m to the new ek (read back from the buffer, with its own H(ek)), then decapsulates that ciphertext with the new ŝ and h, and compares K and K′ share-wise with IO_SEQ. Its ciphertext stays in the output window; that is harmless because its K never leaves the chip. It catches faults that make ek and dk disagree (a corrupted t̂, ŝ or H(ek)). Faults after the duplicate comparison, in the PWM, the unmasking or encoding of t̂, or in the stored ŝ, are NTT-domain changes, which become a dense, large error in the time domain, so the test's decoding fails.
+
+**Persistent store** (`pqse_nvm` in `pqse_host.v`). Lifecycle, fault count and tampered flag as set-only thermometer bits in two OR-combined copies, loaded at reset. A fault, kill or tamper event is programmed before the next command is accepted. A store that is ahead of the registers (a rollback) is handled like the tamper input.
+
+**Response.** The command ends with result 8 (FAULT). The host resets every engine, runs ZEROIZE and increments the fault counter (STATUS[18:17]); the third fault moves the lifecycle to KILLED. Keys must then be unwrapped or re-imported. A fault whose only effect is a wrong value inside the masked re-encryption ends as an implicit rejection (a random-looking K̄), and the kill after three detected faults limits what a statistical fault attack can collect.
+
+## 8. PUF and key wrapping (`pqse_puf.v`)
+
+**Cells.** The response comes from 960 SRAM-type cells in 30 rows of 32. An SRAM cell's power-up value is decided by the mismatch of its two cross-coupled inverters, the best-studied PUF in smart cards. Each cell belongs to exactly one response bit. The source module `pqse_puf_raw` has four builds:
+
+- `PQSE_PUF_LATCH`, for the FPGA prototype and an open-PDK chip. Each cell is two cross-coupled NAND gates (`pqse_pufcell`). A read forces both nodes of a row high, releases them, waits 8 clocks for the cells to settle and samples through a synchronizer. Every read repeats the power-up race, so majority voting over 3 or 5 reads works. Cost: 2 gates per bit, about 0.01 mm² in SKY130 (an OpenRAM 1 KB macro is about 0.2 mm²), about 2 k LUTs on the FPGA.
+- `PQSE_PUF_BFLY`, a butterfly cell (`pqse_bflycell`, Kumar et al., HOST 2008) built from two transparent latches in the logic cells' flip-flops, one with an asynchronous clear and one with a preset. It uses about 2,880 flip-flops and no LUTs on the GW2AR-18 (`make se-gowin PUF=bfly`). Each cell takes the row's excite through its own flip-flop, because GowinSynthesis otherwise merges the 32 identical cells of a row. Butterfly cells are known for routing bias, so measure them with PUFRAW. Intel parts have no latch mode in their registers; keep `PQSE_PUF_LATCH` on the DE10-Nano.
+- `PQSE_PUF_SRAM`, the power-up contents of a dedicated 32 x 32 SRAM macro that nothing writes (`pqse_puf_sram`, a black box). It gives one sample per power-up, so the retries add nothing and the code alone must cover the bit-error rate.
+- Default: a simulation model with a fixed device pattern, read noise, drift and a noisy mode.
+
+FPGA block RAM can't serve as the PUF on Gowin parts because the bitstream initializes it.
+
+**Code.** Reed–Muller RM(1,5) = [32, 6, 16] in a code-offset fuzzy extractor: 6 key bits per 32 response bits, correcting up to 7 errors per block. 30 blocks give a 180-bit key and 120 bytes of helper data. The helper data leaks up to 26 bits per block, so the key keeps 30 · (32h − 26) bits for a min-entropy of h per response bit, and 128 bits need h ≥ 0.946. One device's 960 bits can't show that at 99 % confidence (that takes about 4,500 bits, about 5 devices), so measure several boards or chips and raise `PUF_NB` if h is lower.
+
+**Enroll** (TEST or PERSO). A key k comes from the TRNG into a masked seed entry. Each response bit is read 5 times and majority-voted for a clean reference r. Helper data w = r ⊕ C(k) is built in two clocks per bit: r ⊕ C(k₀) is registered first and C(k₁) added after, so no gate sees C(k₀) ⊕ C(k₁). The microcode then stores the check value H(k‖"C") (the first 8 bytes of SHA3-256, from the masked sponge) in the 16th helper lane.
+
+**Reconstruct.** One read per bit. With a fresh random 6-bit R per block the decoder sees y = r′ ⊕ w ⊕ C(R) = C(k ⊕ R) ⊕ e and decodes k ⊕ R by maximum likelihood, so the key comes out as the shares (k ⊕ R, R) and is never unmasked in the decoder. The 32 bits of a block are read in a random order. The microcode hashes the key (masked) and compares the check value. On a mismatch it reconstructs again with the majority of 3 reads per bit, then 5; if that also fails, the result is 12.
+
+**Wrapping.** KEK = SHA3-256(k_PUF ‖ "K"). The 64-byte seed d‖z is stored as blob = nonce ‖ (d‖z ⊕ SHAKE256(KEK‖nonce)) ‖ SHA3-256(KEK‖nonce‖ct), 112 bytes.
+
+**Failure rates and drift.** `pqse_model.py` check 7 runs a Monte Carlo of the real decoder at 5 to 20 % bit errors per read. At 10 %, single reads lose the key in a large share of unwraps and the retries lose it in none of the samples. Majority voting only removes read noise; bits that flip for good are left to the code. The testbench flips 9.4 % of the bits permanently (unwrap still works) and adds 20 % read noise (the retry recovers the key). PUFRAW dumps 960 single-read bits; `scripts/pqse_puf_stats.py` reports uniformity, bit-error rate, inter-device distance, failure rates with and without retries, and the entropy left after the helper data.
 
 ## 9. Session key and secure messaging
 
-ENCAPS (initiator) and DECAPS (responder) keep the shared secret K, masked, as the **session key** SK (seed entry E_SK; STATUS[16] = loaded). In TEST/PERSO they also copy K to the buffer for known-answer tests; in USER K never leaves.
+ENCAPS (initiator) and DECAPS (responder) keep the shared secret K, masked, as the session key SK in seed entry E_SK (STATUS[16] = loaded). In TEST and PERSO they also copy K to the buffer for known-answer tests; in USER K never leaves.
 
 | Command | Buffer in | Buffer out |
 |---|---|---|
-| SEAL | message M at `B_SM_MSG`, its length L (1–128) in header lane 1 | header H (32 B) = counter (8 B LE) ‖ L (8 B LE) ‖ 16 zero bytes; C = (M[0..L−1] ⊕ KMACXOF256(SK, H, 1024, "E"d)) ‖ zero bytes; T = KMAC256(SK, H ‖ C, 256, "T"d). Result 1 if L is not 1–128 (no counter used) |
-| OPEN | H ‖ C ‖ T | M (bytes from L on are 0); result 11 (REPLAY) for a counter already accepted or more than 63 behind the newest; result 9 (BADTAG) for a bad length or tag, C left encrypted |
+| SEAL | message M at `B_SM_MSG`, its length L (1 to 128) in header lane 1 | header H (32 bytes) = counter (8 bytes LE) ‖ L (8 bytes LE) ‖ 16 zero bytes; C = (M[0..L−1] ⊕ KMACXOF256(SK, H, 1024, "E"d)) padded with zeros; T = KMAC256(SK, H ‖ C, 256, "T"d). Result 1 if L is out of range; no counter is used. |
+| OPEN | H ‖ C ‖ T | M (bytes from L on are 0). Result 11 (REPLAY) for a counter already accepted or more than 63 behind the newest; result 9 (BADTAG) for a bad length or tag, with C left encrypted. |
 
-d = "1" for initiator → responder and "2" for responder → initiator, so a message reflected back to its sender fails. The keystream and tag come from the masked sponge (KMAC with the masked SK as the key); only C (or M) and T are unmasked, from registers that only the keystream sink loads.
+d is "1" from initiator to responder and "2" the other way, so a message reflected back to its sender fails. The keystream and tag come from the masked sponge with the masked SK as key; only C (or M) and T are unmasked, from registers that only the keystream sink loads.
 
-**Replay protection.** Each side keeps the counter of its next sent message, and a 64-message window of accepted counters: the newest accepted counter and one bit per each of the 63 before it. A new session key resets both. SEAL counts up *before* computing the keystream, so a counter is never used twice even if the command is aborted. OPEN rejects a counter that was already accepted or is older than the window (result 11), then checks the length and the tag, and only for an authentic message marks the counter, so a forgery cannot burn a counter. Lost messages and reordering inside the window are fine; replays are not. `scripts/pqse_sm_check.py` recomputes C and T for every sealed message with its own KMAC (checked against hashlib's SHA3/SHAKE and the NIST SP 800-185 examples).
+**Replay protection.** Each side keeps the counter of its next outgoing message and a 64-message window of accepted counters: the newest accepted counter plus one bit for each of the 63 before it. A new session key resets both. SEAL increments the counter before computing the keystream, so an aborted command never reuses a counter. OPEN rejects a counter that was already accepted or is older than the window, then checks the length and the tag, and marks the counter only for an authentic message, so a forgery can't burn a counter. Lost and reordered messages inside the window are accepted once. `scripts/pqse_sm_check.py` recomputes C and T for every sealed message with its own KMAC, which is itself checked against hashlib and the SP 800-185 examples.
 
 ## 10. Interface
 
 **Registers** (32-bit words, `pqse_host.v`):
 
-| Address | Register | |
+| Address | Register | Contents |
 |---|---|---|
 | `0x400` | ID | "PQSE" = `0x50515345` |
 | `0x401` | VERSION | `0x00040000` |
-| `0x402` | CTRL | [7:0] command, [8] injected seeds (TEST only); starts the command |
+| `0x402` | CTRL | [7:0] command, [8] use injected seeds (TEST only). Writing starts the command. |
 | `0x403` | STATUS | [0] busy, [1] done (write 1 to clear), [2] key loaded, [3] TRNG ok, [4] TRNG failed, [5] tampered, [7:6] lifecycle, [15:8] result, [16] session key loaded, [18:17] faults detected |
-| `0x404` | CYCLES | clocks of the last command |
-| `0x405` | LIFECYCLE | write a later state to move forward (0 TEST → 1 PERSO → 2 USER → 3 KILLED) |
+| `0x404` | CYCLES | clocks taken by the last command |
+| `0x405` | LIFECYCLE | write a later state to move forward (0 TEST, 1 PERSO, 2 USER, 3 KILLED) |
 | `0x406` | CONFIG | [0] hiding on (default 1) |
 
-After reset the device is busy for ~3 k clocks (power-on wipe); wait for STATUS[0] = 0.
+After reset the device is busy for about 3 k clocks while the power-on wipe runs; wait for STATUS[0] = 0.
 
-**Pins**: SPI (4), IRQ, tamper in, **trig** out: high during the masked comparison window (OKINI to OKCHK: in DECAPS everything secret, in OPEN / UNWRAP the tag check), in lifecycle TEST only (0 otherwise, so a deployed device gives no timing reference). On the DE10-Nano: GPIO_0[0] and LED1.
+**Pins.** SPI (4), IRQ, tamper input, and `trig`. The trigger output is high during the masked comparison window (OKINI to OKCHK: in DECAPS the whole secret part, in OPEN and UNWRAP the tag check), only in lifecycle TEST, so a deployed device gives no timing reference. On the DE10-Nano it is GPIO_0[0] and LED1.
 
-**Buffer** (words `0x000–0x3FF`, word w = half w&1 of lane w>>1):
+**Buffer.** Words `0x000` to `0x3FF`; word w is half (w & 1) of 64-bit lane (w >> 1).
 
-| Lanes | Name | Host access |
+| Lanes | Contents | Host access |
 |---|---|---|
-| 0–147 | own ek | R; W in TEST/PERSO |
-| 148–163 | PUF helper (120 B) + key check value (8 B) | R W |
-| 164–311 | peer ek / ciphertext / ŝ bytes in | W |
-| 312–447 | ciphertext out, raw dumps | R |
-| 448–451 | K | R in TEST/PERSO |
-| 452–467 | injected d (TEST), z, m (TEST), H(ek) | W in TEST/PERSO |
-| 468–481 | wrapped-key blob (112 B): nonce 2 \| ct 8 \| tag 4 | R W |
-| 484–507 | secure message (192 B): header 4 (counter, length, 0, 0) \| M or C 16 \| T 4 | R W |
+| 0 to 147 | own ek | read; write in TEST and PERSO |
+| 148 to 163 | PUF helper data (120 bytes) and key check value (8 bytes) | read, write |
+| 164 to 311 | input: peer ek, ciphertext, ŝ bytes | write |
+| 312 to 447 | output: ciphertext, raw dumps | read |
+| 448 to 451 | K | read in TEST and PERSO |
+| 452 to 467 | injected d (TEST), z, m (TEST), H(ek) | write in TEST and PERSO |
+| 468 to 481 | wrapped-key blob (112 bytes): nonce 2 lanes, ciphertext 8, tag 4 | read, write |
+| 484 to 507 | secure message (192 bytes): header 4 lanes (counter, length, 0, 0), M or C 16, T 4 | read, write |
 
 **Commands** (CTRL[7:0]):
 
-| # | Command | Inputs | Outputs | Lifecycle |
+| # | Command | Inputs | Outputs | Allowed in |
 |---|---|---|---|---|
-| 1 | KEYGEN | (TEST: d, z) | own ek | any but KILLED |
-| 2 | ENCAPS | peer ek (+ TEST: m) | c (+ K in TEST/PERSO); session key (initiator) | any but KILLED |
-| 3 | DECAPS | c | (K in TEST/PERSO); session key (responder) | any but KILLED, needs a key |
-| 4 | IMPORT | ŝ bytes, ek, H(ek), z | — | TEST, PERSO |
-| 5 | ENROLL | — | PUF helper + check value (128 B) | TEST, PERSO |
-| 6 | KGWRAP | PUF helper | own ek, blob (112 B) | any but KILLED |
-| 7 | UNWRAP | blob, helper | own ek (regenerated) | any but KILLED |
-| 8 | ZEROIZE | — | — | any but KILLED |
-| 9 | SEAL | message, length | H, C, T | any but KILLED, needs a session key |
-| 10 | OPEN | H, C, T | message | any but KILLED, needs a session key |
-| 11 | PUFRAW | — | 960 PUF bits (lanes 312–326) | TEST |
-| 12 | TRNGRAW | — | 136 TRNG words (lanes 312–447) | TEST |
+| 1 | KEYGEN | (TEST: d, z) | own ek | all but KILLED |
+| 2 | ENCAPS | peer ek (TEST: m) | c, session key (initiator); K in TEST/PERSO | all but KILLED |
+| 3 | DECAPS | c | session key (responder); K in TEST/PERSO | all but KILLED, needs a key |
+| 4 | IMPORT | ŝ bytes, ek, H(ek), z | none | TEST, PERSO |
+| 5 | ENROLL | none | PUF helper data and check value (128 bytes) | TEST, PERSO |
+| 6 | KGWRAP | PUF helper data | own ek, blob (112 bytes) | all but KILLED |
+| 7 | UNWRAP | blob, helper data | own ek (regenerated) | all but KILLED |
+| 8 | ZEROIZE | none | none | all but KILLED |
+| 9 | SEAL | message, length | H, C, T | all but KILLED, needs a session key |
+| 10 | OPEN | H, C, T | message | all but KILLED, needs a session key |
+| 11 | PUFRAW | none | 960 PUF bits (lanes 312 to 326) | TEST |
+| 12 | TRNGRAW | none | 136 TRNG words (lanes 312 to 447) | TEST |
 
-**Result codes** (STATUS[15:8]): 0 OK, 1 bad input (ek modulus / dk hash check / message length), 2 denied (lifecycle), 3 no key, 4 bad blob, 5 TRNG failure, 6 unknown command, 7 KILLED, 8 FAULT, 9 bad tag or length (OPEN), 10 no session key, 11 replay (OPEN), 12 PUF key not reconstructed.
+**Result codes** (STATUS[15:8]): 0 OK, 1 bad input (ek modulus check, dk hash check, message length), 2 denied by the lifecycle, 3 no key, 4 bad blob, 5 TRNG failure, 6 unknown command, 7 KILLED, 8 FAULT, 9 bad tag or length (OPEN), 10 no session key, 11 replay (OPEN), 12 PUF key not reconstructed.
 
-**SPI** (mode 0, SCK ≤ clk/4): write `02 aH aL` then 4 bytes per word, least significant byte first; read `03 aH aL xx` then 4 bytes per word.
+**SPI** (mode 0, SCK at most clk/4). Write: `02 aH aL`, then 4 bytes per word, least significant byte first. Read: `03 aH aL xx`, then 4 bytes per word.
 
-## 11. Files
+## 11. Microcode map
+
+The ROM holds 1024 instructions of 96 bits. Instruction classes: END, BR (branch on a flag), SET (status flags, reseed), HASH (a whole sponge job: sources, padding, rate, masked or not, sink), POLY, IO, MASK, PUF.
+
+| Address | Program |
+|---|---|
+| 0 to 8 | failure exits (8: a KeyGen check failed, result FAULT) |
+| 16 | KEYGEN / KGWRAP: seeds from the TRNG (or injected in TEST); KGWRAP first reconstructs the PUF key |
+| 32 | UNWRAP: PUF key, KEK, tag check, decrypt d‖z |
+| 48 | PUF key with check value and retries, then KEK (shared by KGWRAP and UNWRAP) |
+| 80 | KeyGen core, masked (s and e at 720) |
+| 144 | wrap (KGWRAP only) |
+| 156 | KeyGen end: wipe temporaries |
+| 192 | ENCAPS |
+| 320 | DECAPS (m′ decoded twice and compared at 341, ok copies compared) |
+| 448, 480 | SEAL, OPEN |
+| 512, 528 | IMPORT, ENROLL |
+| 544, 548 | PUFRAW, TRNGRAW |
+| 560 | ZEROIZE (also the power-on wipe, 560 to 602) |
+| 608 | KeyGen pairwise consistency test (K compared at 698) |
+| 720 | KeyGen s and e computed twice and compared (ZCHK at 733, 744, 755, 766, 777, 788); G check at 790 and 791 |
+
+## 12. Files
 
 | File | Contents |
 |---|---|
 | `pqse_top.v` | `pqse_top` (chip: SPI, IRQ, tamper, trigger), `pqse_avalon` (FPGA), `pqse_sys` |
-| `pqse_host.v` | CSRs, lifecycle, access windows, command and K-export policy, fault counter, power-on / fault / tamper ZEROIZE |
+| `pqse_host.v` | registers, lifecycle, access windows, command and K-export policy, fault counter, watchdog, wipes; `pqse_nvm` persistent store |
 | `pqse_spi.v` | SPI slave |
-| `pqse_core.v` | sequencer (10-bit pc) with fault detection and RAM-port precharge, share-domain RAMs with parity, TRNG/PRNG, measurement trigger, port multiplexing |
-| `pqse_ucode.v` | microcode: masked KeyGen / Encaps / Decaps, Import, Enroll, PUF key + retries, Wrap / Unwrap, SEAL / OPEN, raw dumps, Zeroize |
-| `pqse_keccak.v` | masked lane-serial Keccak-f[1600], state in two RAMs (one per share) |
-| `pqse_sponge.v` | sponge controller: sources, padding, KMAC, sinks (incl. the message keystream) |
-| `pqse_sample.v` | SampleNTT (and the unmasked CBD sampler, not instantiated) |
-| `pqse_poly.v` | NTT/INTT/PWM/ADD/SUB/MSPLIT/ZERO/ZCHK with shuffling, per-layer orders |
-| `pqse_perm.v` | Fisher–Yates permutation in a 128 × 7 register file |
-| `pqse_io.v` | encode/decode, seed-register ops (incl. SEQ), message header, length and replay window, raw TRNG dump |
-| `pqse_mcomp.v` | masked Compress_d: m′, compare, ciphertext output |
-| `pqse_masked.v` | masked CBD (B2A), μ, select, two ok accumulators, tag check |
-| `pqse_puf.v` | SRAM-cell PUF (cross-coupled NAND pairs) or SRAM-macro PUF (+ simulation model with noise, drift and a noisy mode), RM(1,5) fuzzy extractor with masked decoding, raw dump |
-| `pqse_rng.v` | ring-oscillator TRNG + health tests, Trivium PRNG |
-| `pqse_arith.v`, `pqse_mem.v`, `pqse_defs.vh`, `pqse_func.vh` | arithmetic, RAMs, constants |
+| `pqse_core.v` | sequencer (10-bit pc) with fault checks and RAM-port precharge, share-domain RAMs with parity, TRNG and PRNG, trigger, port multiplexing |
+| `pqse_ucode.v` | microcode for every command |
+| `pqse_keccak.v` | masked lane-serial Keccak-f[1600], state in two RAMs |
+| `pqse_sponge.v` | sponge controller: sources, padding, KMAC, sinks (including the message keystream) |
+| `pqse_sample.v` | SampleNTT (`pqse_parse`) and an unmasked CBD sampler that is not instantiated |
+| `pqse_poly.v` | NTT, INTT, PWM, ADD, SUB, MSPLIT, ZERO, ZCHK with shuffling |
+| `pqse_perm.v` | Fisher–Yates permutation in a 128 x 7 register file |
+| `pqse_io.v` | encode, decode, seed-register operations (including SEQ), message header, length and replay window, raw TRNG dump |
+| `pqse_mcomp.v` | masked Compress_d: m′, compare and ciphertext modes |
+| `pqse_masked.v` | masked CBD (B2A), μ, select, the two ok accumulators, tag check |
+| `pqse_puf.v` | PUF cell arrays, simulation model, RM(1,5) fuzzy extractor with masked decoding, raw dump |
+| `pqse_rng.v` | ring-oscillator TRNG with health tests, Trivium PRNG with freshness check |
+| `pqse_arith.v`, `pqse_mem.v`, `pqse_defs.vh`, `pqse_func.vh` | modular arithmetic, RAM models, constants |
 | `pqse_avalon_hw.tcl` | Platform Designer component |
-| `../sim/tb_pqse.sv` | functional testbench (15 groups) |
-| `../sim/tb_pqse_tvla.sv`, `../../scripts/pqse_tvla.py` | TVLA testbench, ciphertext generator (Python ML-KEM, self-checked), report, and the board mode for oscilloscope traces |
-| `../../scripts/pqse_probe_verify.py` | exhaustive robust-probing check of the masked gadgets |
-| `../../scripts/pqse_model.py` | gadget, fuzzy-extractor, retry and shuffle math |
-| `../../scripts/pqse_sm_check.py` | independent KMAC check of the sealed messages |
-| `../../scripts/pqse_puf_stats.py` | PUF / TRNG statistics, failure rates from a measured bit-error rate |
-| `../../scripts/pqse_power.tcl` | OpenSTA power / timing script (`make se-power`, `make se-power-vcd`) |
-| `../../scripts/pqse_lib2v.py`, `../sim/tb_pqse_gate.sv` | cell models from the Liberty file (incl. clock gates) and the pin-level testbench of the gate-level power run |
-| `../../scripts/power/` | SRAM macro wrapper, Liberty stubs and counting models (`RAM_MACRO=1`), energy per command (`pqse_energy.py`) |
-| `../../scripts/pqse_fit.py` | Tang Nano 20K fit report from Yosys `synth_gowin` (`make se-gowin`), with the largest modules |
-| `../../quartus/jtag/de10_nano_pqse.v`, `pqse_test.tcl`, `pqse_tvla_capture.tcl` | DE10-Nano top (KEY1 = tamper, GPIO_0[0] = trigger), System Console demo + raw dumps, TVLA capture runs |
+| `../sim/tb_pqse.sv` | functional testbench (17 groups) |
+| `../sim/tb_pqse_fault.sv`, `../../scripts/pqse_fault_report.py` | fault campaign and its report |
+| `../sim/tb_pqse_tvla.sv`, `../../scripts/pqse_tvla.py` | TVLA testbench; ciphertext generator, report, two-run confirmation, board mode |
+| `../sim/tb_pqse_gate.sv`, `../../scripts/pqse_lib2v.py` | gate-level power testbench; cell models from the Liberty file |
+| `../../scripts/pqse_probe_verify.py` | probing check of the masked gadgets |
+| `../../scripts/pqse_model.py` | gadget, fuzzy-extractor, retry and shuffle arithmetic |
+| `../../scripts/pqse_sm_check.py` | independent KMAC check of sealed messages |
+| `../../scripts/pqse_puf_stats.py` | PUF and TRNG statistics, failure rates from a measured bit-error rate |
+| `../../scripts/pqse_power.tcl` | OpenSTA power and timing script |
+| `../../scripts/power/` | SRAM macro wrapper and counting models (`RAM_MACRO=1`), OpenRAM configs, SRAM table, energy and flip-flop reports |
+| `../../scripts/pqse_fit.py` | Tang Nano 20K fit report from Yosys `synth_gowin` |
+| `../../quartus/jtag/` | DE10-Nano top (KEY1 = tamper, GPIO_0[0] = trigger), System Console demo, TVLA capture |
 
-## 12. Commands
+## 13. Make targets
 
 ```bash
-make sim-se                      # model + probing checks, RTL testbench, KMAC check, PUF/TRNG stats
-make sim-se TRACE=1              # + every microcode instruction
-make se-probe                    # the robust-probing check alone (--full: larger widths)
-make sim-se-tvla MASKED=1 N=200  # TVLA of the masked Decaps on a power model (expect: no leak)
-make sim-se-tvla MASKED=0 N=200  # positive control (expect: leaks)
-make sim-se-fault FN=200          # fault-injection campaign (Decaps; FOP=keygen): expect no SILENT outcome
-make se-area                     # Yosys gate count; SKY130_LIB=<.lib> for SkyWater 130 nm
-make se-power SKY130_LIB=<.lib>  # SKY130 power (vectorless, ACT=0.1) and the slowest path; RAM_MACRO=1: logic only
-make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1   # energy per KeyGen from a gate-level run (whole command, SAIF; GL_CMD=2: Encaps)
-make se-power-sample SKY130_LIB=<.lib> RAM_MACRO=1 GL_FMT=vcd GL_CLOCKS=<n>   # the same from 8 sampled 2000-clock windows (fast with VCD; GL_PAR, GL_THREADS for speed)
-make se-gowin                    # fit on the Tang Nano 20K (GW2AR-18), largest modules; PUF=0: without the PUF cells, PUF=bfly: butterfly cells
-make se-gowin-eda                # the same with Gowin EDA (gw_sh: GowinSynthesis, area goal, + place & route): the real fit
+make sim-se                      # model and probing checks, RTL testbench, KMAC check, PUF/TRNG stats
+make sim-se TRACE=1              # also prints every microcode instruction
+make se-probe                    # probing check alone (--full: larger widths)
+make sim-se-tvla MASKED=1 N=200  # TVLA of masked Decaps on a power model (expect no leak)
+make sim-se-tvla MASKED=0 N=200  # positive control (expect leaks)
+make sim-se-fault FN=200         # fault campaign on Decaps (FOP=keygen for KeyGen); expect no SILENT
+make se-area                     # Yosys gate count; SKY130_LIB=<.lib> maps to SkyWater 130 nm
+make se-power SKY130_LIB=<.lib>  # vectorless power (activity 0.1) and the slowest path; RAM_MACRO=1: logic only
+make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1   # energy of one KeyGen from a gate-level run (GL_CMD=2: Encaps)
+make se-power-sample SKY130_LIB=<.lib> RAM_MACRO=1 GL_FMT=vcd GL_CLOCKS=<n>   # the same from 8 sampled 2000-clock windows
+make -j3 se-sram-char OPENRAM_DIR=<OpenRAM checkout>   # SPICE energy of the SRAM shapes (section 4)
+make se-gowin                    # Tang Nano 20K fit (GW2AR-18); PUF=0 without PUF cells, PUF=bfly butterfly cells
+make se-gowin-eda                # the same with Gowin EDA synthesis and place and route
 cd quartus/jtag && quartus_sh -t build.tcl se    # DE10-Nano, then source pqse_test.tcl
 ```
 
-**The testbench** (`tb_pqse.sv`) checks: the NIST KeyGen / Encaps known answers through the masked datapath; masked Decaps (valid and implicit rejection) on imported NIST keys, hiding on and off, one trigger pulse; a round trip; the ek / dk input checks; PUF enroll with check value, wrap / zeroize / unwrap, unwrap after 9.4% drift, a 20%-noise PUF recovered by the retry, a wrong check value (result 12), blob rejection; SEAL / OPEN between the two roles with lengths 128 / 100 / 1, bad lengths, out-of-order delivery inside the window, replays, a counter too old for the window, modified ciphertext / length / padding, reflection, no session key after ZEROIZE; raw PUF / TRNG dumps; injected faults (pc shadow, an ok copy, a double-bit error in m′ that only the second decoding catches, RAM parity after a power cycle, a Keccak state bit and a theta column-parity bit mid-permutation, the Keccak round counter, the sponge state, the sequencer state, a hung command caught by the watchdog, a stale PRNG word, a dk corrupted after ek was computed and caught by the pairwise consistency test, a parity-blind Keccak fault in G(d ‖ 3) caught by the recompute check, a small change of one coefficient of s₀ after the sampler caught by the duplicate compare) with wipe, count and KILLED; every KeyGen runs the pairwise consistency test; a flipped lifecycle bit (shadow mismatch → KILLED, tampered); persistence: KILLED, the fault count and tampered survive a power cycle, and a lifecycle register rolled back below the store is caught; the USER rules (no trigger, no K); SPI and tamper.
+## 14. Testbenches
 
-**Fault campaign** (`tb_pqse_fault.sv`, `scripts/pqse_fault_report.py`): every run a new chip (persistent store cleared) from a power cycle, one bit flipped in one of 38 targets (program counter and shadow, instruction register, engine state machines, the PRNG freshness counter, the lifecycle, the fault counter, the persistent store, Keccak control / datapath / column parities / state RAMs, the masked comparison copies and gadget registers, the compression, poly and I/O registers, the polynomial and seed RAMs, both shares) at a random clock of a NIST-vector Decaps or KeyGen. Outcomes: unchanged, detected (FAULT: wiped, counted), implicit rejection (Decaps returned K′ = J(z‖c): harmless), SILENT (a wrong output with result 0 - what fault attacks exploit), hang (past the host watchdog, which the campaign shortens to 2²¹ clocks: a hang means the watchdog failed). Single-bit flips in registers the RTL does not check (e.g. a Decaps datapath register whose effect the re-encryption check absorbs) can still be SILENT: the report names them.
+**Functional** (`tb_pqse.sv`, 17 groups). NIST KeyGen and Encaps known answers through the masked datapath. Masked Decaps, valid and implicit rejection, on imported NIST keys with hiding on and off. A round trip, the ek and dk input checks. PUF enroll, wrap, zeroize and unwrap, unwrap after 9.4 % drift, a 20 %-noise PUF recovered by the retry, a wrong check value (result 12), a modified blob. SEAL and OPEN between the two roles with lengths 128, 100 and 1, bad lengths, out-of-order delivery, replays, a counter older than the window, modified ciphertext, length or padding, reflection, and no session key after ZEROIZE. Raw dumps. The USER rules (no trigger, no K). Persistence of the lifecycle, fault count and tamper flag across power cycles. SPI and tamper. And 17 directed fault and tamper injections, each of which must end in FAULT or KILLED with the keys wiped:
 
-**TVLA** (`tb_pqse_tvla.sv`): fixed-vs-random m with random coins (only Decaps' secret intermediates differ between the classes), hiding off, lifecycle USER. Power model: per clock, the number of toggling bits in the RAM buses and the datapath, gadget, unmasking and Keccak registers. Welch t per clock; |t| > 4.5 marks a candidate leak, reported by microcode address, with the chance level and TVLA's two-run confirmation (`pqse_tvla.py confirm`).
+- program-counter shadow; one ok copy; a double-bit error in m′ that only the second decoding catches; RAM parity after a power cycle; tamper input;
+- a Keccak state bit and a θ column-parity bit mid-permutation; a flipped lifecycle bit; a lifecycle rolled back below the store;
+- the Keccak round counter; a sponge state bit; a sequencer state bit; a hung command (watchdog); a stale PRNG word;
+- a dk corrupted after ek was computed (pairwise test); a parity-blind Keccak fault during G(d‖3) (G check); a small change to one coefficient of s₀ after the sampler (duplicate compare).
 
-**On the board** (`quartus/jtag/pqse_tvla_capture.tcl`): `pqse_tvla.py gen` makes the ciphertext set; the script imports the NIST key and runs one Decaps per ciphertext with the trigger on GPIO_0[0]; an oscilloscope in segmented mode records one trace per run (EM probe over the FPGA or a shunt in the core supply); `pqse_tvla.py board traces.npy tvla_in.txt` computes t per sample (`--align` for jitter or hiding on), and `confirm` applies the two-set rule.
+**Fault campaign** (`tb_pqse_fault.sv`, `scripts/pqse_fault_report.py`). Each run starts a new chip from a power cycle with the persistent store cleared, then flips one bit in one of 38 targets at a random clock of a NIST-vector Decaps or KeyGen. Targets include the program counter and its shadow, the instruction register, the engine state machines, the PRNG freshness counter, the lifecycle, fault counter and persistent store, Keccak control, datapath, column parities and state RAMs, the comparison copies and gadget registers, the compression, poly and I/O registers, and the polynomial and seed RAMs, both shares. Outcomes are unchanged, detected (FAULT, wiped and counted), implicit rejection (Decaps returned K̄ = J(z‖c), which is harmless), SILENT (a wrong output with result 0, the outcome an attacker wants) and hang (past the watchdog, which the campaign shortens to 2²¹ clocks, so a hang means the watchdog failed). The report names the target of any silent outcome.
 
-## 13. Verification you run (in this order)
+| Campaign, 200 runs | unchanged | detected | implicit rejection | silent | hang |
+|---|---|---|---|---|---|
+| Decaps | 111 | 74 | 15 | 0 | 0 |
+| KeyGen | 127 | 73 | n/a | 0 | 0 |
 
-1. `make sim-se` — Python model and probing checks, then the RTL testbench: `TEST PASSED`, `SM CHECK PASSED`, `PROBING CHECK PASSED`, `MODEL CHECKS PASSED`.
-2. `make sim-se-tvla MASKED=1 N=200`, then with `SEED=2` and `pqse_tvla.py confirm`; `MASKED=0` must show leaks.
-3. `make se-gowin` (must say "fits"), `make se-area` and `make se-power SKY130_LIB=...` (MASKED=1 and 0) for the cost table of the proposal; `make se-power-vcd SKY130_LIB=... RAM_MACRO=1` for the energy per command (Verilator 5.036+ for SAIF; `pqse_energy.py` explains the SRAM energy assumptions).
-4. On the DE10-Nano: `build.tcl se`, `pqse_test.tcl` (all PASS), PUFRAW / TRNGRAW dumps through `pqse_puf_stats.py` on several boards, then a board TVLA with `pqse_tvla_capture.tcl`.
-5. Optional, for a tape-out: a netlist-level probing check of the synthesized gadgets (PROLEAD).
+**TVLA** (`tb_pqse_tvla.sv`). Fixed-versus-random m with random coins, so only Decaps' secret intermediates differ between the two classes; hiding off, lifecycle USER. The power model counts, per clock, the toggling bits in the RAM buses and in the datapath, gadget, unmasking and Keccak registers. Welch's t is computed per clock; |t| > 4.5 marks a candidate leak, reported by microcode address with the chance level. `pqse_tvla.py confirm` applies the two-run rule: a leak counts only if it appears at the same point in two independent runs.
 
-**When `make sim-se` fails** (bring-up order):
-1. **Compile errors**: `build/sesim/build.log`.
-2. **`pqse_model.py` / `pqse_probe_verify.py` fail**: the gadget in the named file must match its model (the probing check prints the probe and clock).
-3. **Stuck busy after reset**: the power-on ZEROIZE (`TRACE=1` shows pc 560–602).
-4. **FAULT (result 8) where none was injected**: `TRACE=1` prints which detector fired (ctl / engine / parity / keccak / okchk / decoder / prng / zchk). Decoder: the two CMPR1 runs disagree (check the share-wise SEQ and that both CMPR1 read the same ACC slots); in KeyGen at pc 733 / 744 / 755 / 766 / 777 / 788 the compare of the two copies of s₀..e₂ (zchk), at 790–791 the recompute check of G, at pc 698 the pairwise consistency test (K ≠ K': check the PCT's Encaps / Decaps against the plain ones at 192 / 320). Keccak: a parity or a control-shadow mismatch (a register assigned without its shadow). prng: a consumer took a word less than two advances after the previous take.
-5. **KeyGen ek wrong**: first the Keccak alone (`TRACE=1`: the first HASH is H(ek); a wrong SHA3 points at `pqse_keccak.v`: the pass transitions TH → RP → CHI, the `pdst` / `rho` tables, the χ write-back one clock after the AND, ι on lane 0), then the sponge's read latency (`H_SKX`, `H_STRV`), the masked CBD into two slots, `padd` of the t̂ shares, NTT → INTT round trip, PWM.
-6. **Encaps wrong, KeyGen right**: the compression output mode (`so0`/`so1` → WL/WH bit position, lane count) or the XOF byte order (ρ‖i‖j).
-7. **Decaps wrong**: run with `MASKED=0`; if that passes, the bug is in a gadget (B2A weights, `neg1`, reader bit order, the ok compress clock).
-8. **SEAL / OPEN**: `pqse_sm_check.py` names the wrong part (header, ciphertext, tag); its self-test checks the KMAC itself first. A KMAC mismatch: the constant lanes `KM_A0` / `KM_PRE` / customization in `pqse_sponge.v`.
-9. **UNWRAP result 12**: the check value lane (helper lane 15 = lane 163) or `h_kchk`; result 4: the tag.
-10. **Hangs** (TIMEOUT): `TRACE=1` shows the last instruction: a stream sink that never reports done, or the sponge waiting for TRNG words.
+**On the board** (`quartus/jtag/pqse_tvla_capture.tcl`). `pqse_tvla.py gen` makes the ciphertext set. The script imports the NIST key and runs one Decaps per ciphertext with the trigger on GPIO_0[0]; an oscilloscope in segmented mode records one trace per run (EM probe over the FPGA or a shunt in the core supply). `pqse_tvla.py board traces.npy tvla_in.txt` computes t per sample (`--align` for jitter or hiding on), and `confirm` applies the two-run rule.
 
-## 14. Scope
+## 15. Verification you run, in this order
 
-**Security level and model.** First-order masking (one probe), shown at the level of each gadget's registers and schedule in the robust probing model with glitches and transitions, plus hiding against higher-order and horizontal attacks. The register-level TVLA and the gadget-level probing check do not see what synthesis does to the netlist, or coupling inside an SRAM macro; the board TVLA and the optional netlist check cover that. The FPGA's latch PUF and ring-oscillator TRNG are demonstrators of the interfaces and the post-processing (FPGA routing makes the latch cells more biased than on silicon); a chip uses characterized cells or macros. The lifecycle, fault counter and tampered flag are kept in a persistent store (`pqse_nvm`: set-only bits, two OR-combined copies); its behavioural model survives a reset but, on the FPGA, not a power-off (a Gowin GW1NR / GW2AR could use its user flash); a chip replaces the module with its OTP / eFuse macro wrapper, same ports.
+1. `make sim-se`: expect `TEST PASSED`, `SM CHECK PASSED`, `PROBING CHECK PASSED`, `MODEL CHECKS PASSED`.
+2. `make sim-se-tvla MASKED=1 N=200`, again with `SEED=2`, then `pqse_tvla.py confirm`. `MASKED=0` must show leaks.
+3. `make sim-se-fault FN=200` and `FOP=keygen`: no SILENT, no hang.
+4. `make se-gowin` (must say "fits"), `make se-area`, `make se-power SKY130_LIB=...` with `MASKED=1` and `0` for the cost table; `make se-power-vcd SKY130_LIB=... RAM_MACRO=1` for energy (Verilator 5.036 or newer).
+5. On the DE10-Nano: `build.tcl se`, `pqse_test.tcl` (all PASS), PUFRAW and TRNGRAW dumps from several boards through `pqse_puf_stats.py`, then a board TVLA.
+6. Before a tape-out: a netlist-level probing check of the synthesized gadgets (PROLEAD).
 
-**Design alternatives** (other valid choices, not missing pieces):
-- **Higher-order masking** (d ≥ 2) of the Decaps path: the gadgets generalize (DOM with d + 1 shares, more random bits, ~3–4× area and time); this design keeps first order plus hiding, the usual trade-off for smart-card-class area and power.
-- **Ascon-AEAD128** (SP 800-232) instead of KMAC for secure messaging: smaller and faster per message, but a second permutation to mask; KMAC reuses the masked Keccak that ML-KEM needs anyway.
+## 16. When `make sim-se` fails
 
-**Possible extensions** (new features, not part of this design):
-- **ML-DSA** (FIPS 204) signatures on the same Keccak and polynomial datapath, for identity-document signing.
+1. **Compile errors:** `build/sesim/build.log`.
+2. **`pqse_model.py` or `pqse_probe_verify.py` fails:** the gadget in the named file no longer matches its model. The probing check prints the probe and clock.
+3. **Stuck busy after reset:** the power-on ZEROIZE (`TRACE=1` shows pc 560 to 602).
+4. **FAULT (result 8) with nothing injected:** `TRACE=1` prints which detector fired: ctl, engine, parity, keccak, okchk, decoder, prng or zchk.
+   - decoder: the two m′ decodings in Decaps disagree. Check the share-wise SEQ and that both Compress_1 runs read the same accumulator slots.
+   - zchk at pc 733, 744, 755, 766, 777 or 788: the two copies of s₀..s₂, e₀..e₂ differ. At 790 or 791: the G recompute check. At 698: the pairwise test (K ≠ K′; compare its Encaps and Decaps with the plain ones at 192 and 320).
+   - keccak: a parity error, or a control register assigned without its shadow.
+   - prng: a consumer took a word less than two advances after the previous take.
+5. **KeyGen ek wrong:** check Keccak alone first. With `TRACE=1` the first HASH is H(ek); a wrong SHA3 points at `pqse_keccak.v` (pass order TH, RP, CHI; the `pdst` and `rho` tables; the χ write-back one clock after the AND; ι on lane 0). Then the sponge's read latency (`H_SKX`, `H_STRV`), the masked CBD into two slots, `padd` of the t̂ shares, an NTT then INTT round trip, PWM.
+6. **Encaps wrong, KeyGen right:** the Compress output mode (`so0`/`so1` to WL/WH bit position, lane count) or the XOF byte order (ρ‖i‖j).
+7. **Decaps wrong:** run with `MASKED=0`. If that passes, the bug is in a gadget (B2A weights, `neg1`, reader bit order, the ok compress clock).
+8. **SEAL or OPEN:** `pqse_sm_check.py` names the wrong part (header, ciphertext or tag) after checking its own KMAC. For a KMAC mismatch, look at the constant lanes `KM_A0`, `KM_PRE` and the customization string in `pqse_sponge.v`.
+9. **UNWRAP result 12:** the check-value lane (helper lane 15, buffer lane 163) or `h_kchk`. Result 4: the tag.
+10. **Hang (TIMEOUT):** `TRACE=1` shows the last instruction, usually a sink that never reports done or the sponge waiting for TRNG words.
+
+## 17. Scope and limits
+
+The masking is first order, shown for each gadget's registers and schedule in the robust probing model with glitches and transitions. Hiding adds noise against higher-order and horizontal attacks. The simulated TVLA and the gadget-level probing check don't see what synthesis does to the netlist or coupling inside SRAM macros; the board TVLA and a netlist-level check cover that.
+
+On the FPGA, the latch PUF and the ring-oscillator TRNG demonstrate the interfaces and post-processing; FPGA routing makes the latch cells more biased than on silicon. The persistent store's behavioural model survives a reset but not an FPGA power-off (Gowin GW1NR and GW2AR parts could use their user flash). A chip replaces `pqse_nvm` with an OTP or eFuse macro wrapper with the same ports.
+
+Two alternatives were considered and not taken. Second-order masking of Decaps would generalize the same gadgets (DOM with three shares) at roughly 3 to 4 times the area and time. Ascon-AEAD128 (SP 800-232) would make secure messaging smaller and faster per message but needs a second masked permutation, while KMAC reuses the masked Keccak that ML-KEM needs anyway. ML-DSA (FIPS 204) signatures on the same Keccak and polynomial datapath would be a natural extension for document signing.
+
+## 18. Version history
+
+**v4 (this version)** targets a contactless card. v3 needed 44 k LUT4s on the Tang Nano 20K's GW2AR-18, twice the device. v4 moved the Keccak state from about 5,100 flip-flops into two RAMs, put the microcode in a ROM with a registered read, replaced the 1,920 ring-oscillator PUF with SRAM-type cells, made encode and decode bit-serial, and slowed Trivium from 64 to 32 rounds per clock. Later v4 work added the low-power RTL and clock gating and the fault hardening: control-register shadows, the watchdog, the PRNG check, the KeyGen duplicate computation and the pairwise test.
+
+**v3** moved the shuffle table into a register file and gave every NTT layer its own random order. It added the probing check, which found five leaks in v2's gadgets that v3 fixes: the adder carry and ok accumulators reused DOM results without a compress register, the adder's partial products held their value next to a carry share masked by the same random bit, unmasking XORs saw both shares all the time, the χ operands came from plane multiplexers holding both shares, and the read multiplexer could hold both shares of a coefficient. v3 also added the PUF check value and majority retry, the second decoding of m′, KMAC-based secure messaging with a replay window, the 1024-entry ROM, and the trigger pin and board TVLA flow.
+
+## 19. Names used in the RTL
+
+| Name | Meaning |
+|---|---|
+| share, share domain | one of the two random parts of a masked value; "domain 0" is all logic that handles share 0 |
+| DOM | domain-oriented masking (Groß et al. 2016): an AND of two shared values computed as four partial products, the two cross terms refreshed with a random bit, all registered before they are combined |
+| compress register | the register that combines a DOM AND's partial products back into two shares |
+| B2A | Boolean-to-arithmetic conversion: from shares with x = x₀ ⊕ x₁ to shares with x = x₀ + x₁ mod q |
+| CBD | centered binomial distribution, the sampler for ML-KEM's small secret and error polynomials |
+| PRF, G, H, J | the ML-KEM hash functions (SHAKE256, SHA3-512, SHA3-256, SHAKE256) |
+| NTT, INTT, PWM | number-theoretic transform, its inverse, and pointwise multiplication in the NTT domain |
+| BFU | butterfly unit: one add, one subtract and one multiply of the NTT |
+| MSPLIT | split an imported key into two arithmetic shares |
+| ZCHK | poly-unit check: FAULT unless two polynomials sum to 0 mod q in every coefficient |
+| SXOR, SEQ (IO_SEQ) | sponge sink that XORs output into a seed entry; the I/O-unit check that two masked seed entries are equal |
+| ok, OKINI, OKCHK, OKOUT | the masked ciphertext-comparison bit; set it to 1, check its two copies agree, unmask it (tag checks only) |
+| μ (mu) | Decompress_1(m), the message encoded as polynomial coefficients |
+| Compress_d | ML-KEM's rounding of a coefficient to d bits |
+| E_xx | a seed entry: 4 lanes of 64 bits per share (E_SK session key, E_KB the K̄ entry, E_CBD the CBD scratch) |
+| KEK | key-encryption key, derived from the PUF key |
+| PCT | pairwise consistency test (FIPS 140-3) |
+| FO transform, implicit rejection | the re-encryption check in Decaps; a bad ciphertext yields a pseudorandom K̄ instead of an error |
+| `MASKED`, `PQSE_LOWPOWER`, `LOWPOWER=1` | build options: masked datapath on or off; operand isolation on |
+| `CG_SRST`, `CLOCKGATE` | power-flow options: rewrite reset-over-enable registers for gating; insert clock gates |
+| SAIF | switching activity interchange format: per-net toggle counts that OpenSTA uses for power |
