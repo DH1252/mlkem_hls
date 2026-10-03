@@ -9,7 +9,7 @@ A compact, low-power secure-element chip for ML-KEM-768 (FIPS 203), designed sid
    - **hiding** (constant time, a fresh random word order for every shuffled instruction and every NTT layer, random dummy cycles);
    - **fault detection** (duplicated decoding and comparison, control-flow and RAM checks) with a wipe-and-count response.
 
-> **Status.** Version 1 passed all 21 checks of `make sim-se` in Verilator; version 3 ran through `make sim-se` with the fixes found there (probing check, KMAC constant, SPI read timing). **Version 4 (this one) re-architects for a contactless card (smallest area and energy, speed no longer a priority) and is desk-checked, not yet simulated**: run the checklist in section 13, starting with `make sim-se`, then `make se-gowin`. Section 5 lists what changed.
+> **Status.** Version 4 (this one: compact and low-power for a contactless card) passes `make sim-se` (also `LOWPOWER=1`), the robust-probing check, a two-run TVLA with no confirmed first-order leakage and the fault campaign with no silent fault or hang; gate-level energy in section 3. Not yet run with this version: the FPGA board builds. Section 5 lists what changed from version 3.
 
 ---
 
