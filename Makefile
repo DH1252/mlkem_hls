@@ -570,9 +570,10 @@ se-power-vcd-report:
 #   python3 -m pip install -r requirements.txt (into the Python OR_PYTHON names);
 #   make sky130-pdk; make sky130-install
 #   (and ngspice on PATH, or OR_NIX=1 to use OpenRAM's Nix environment)
-#   make -j3 se-sram-char OPENRAM_DIR=<OpenRAM checkout> [SRAM_SHAPES="a6_d65"]
+#   make se-sram-char OPENRAM_DIR=<OpenRAM checkout> [SRAM_SHAPES="a6_d65"]
 #        [OR_LAYOUT=1 [OR_PEX=1] [OR_DRC=1]] [OR_PORTS=1rw1r|1r1w] [OR_THREADS=4]
 #        [OR_TABLE=1: the full 3 x 3 load / slew table, several times slower]
+#        [OR_VERBOSE=1: OpenRAM's -v; see the memory note below]
 # OR_LAYOUT=0 (default) characterizes the schematic netlist (no wire
 # capacitance: energies somewhat low; minutes to hours per shape);
 # OR_LAYOUT=1 OR_PEX=1 the extracted layout (Magic; slowest, most accurate,
@@ -588,14 +589,22 @@ OR_SPICE    ?= ngspice
 OR_THREADS  ?= 4
 OR_TABLE    ?= 0
 OR_NIX      ?= 0
+# Memory: OpenRAM simulates the whole array once (leakage of the untrimmed
+# netlist; 1024 x 25 is ~150 k transistors), so each shape needs one ngspice
+# of a few GB. With -v (OR_VERBOSE=1) OpenRAM also writes .plot V(*) into every
+# stimulus: ngspice then keeps and prints every node at every time step, which
+# runs out of memory (and disk, in tmp_<shape>/timing.lis) on the large shapes.
+# Keep OR_VERBOSE=0 and run the shapes one at a time (no -j) unless the
+# machine has memory for several at once.
+OR_VERBOSE  ?= 0
 # the Python OpenRAM runs in: needs OpenRAM's requirements (numpy, scipy,
 # scikit-learn, ...). In an OSS CAD Suite shell python3 is the suite's own:
 # install them there (OR_PYTHON -m pip install -r <OpenRAM>/requirements.txt)
 # or point OR_PYTHON at another interpreter, e.g. OR_PYTHON=/usr/bin/python3
 OR_PYTHON   ?= $(PYTHON)
 SRAM_CHAR_D := $(BUILD)/sepower/openram
-# One target per shape, done once (a stamp): make -j3 se-sram-char runs the
-# shapes in parallel; a shape already characterized is not run again (delete
+# One target per shape, done once (a stamp): make -j2 se-sram-char runs two
+# shapes at once (memory permitting); a shape already characterized is not run again (delete
 # its stamp, $(SRAM_CHAR_D)/<shape>.ok, or make se-sram-char-clean to redo).
 # Shapes not characterized keep the assumed energy in the report.
 se-sram-char: $(foreach s,$(SRAM_SHAPES),$(SRAM_CHAR_D)/$(s).ok)
@@ -619,7 +628,7 @@ $(SRAM_CHAR_D)/%.ok: scripts/power/openram/pqse_sram_%.py | sram-char-check
 	    PQSE_OR_THREADS=$(OR_THREADS) PQSE_OR_TABLE=$(OR_TABLE) PQSE_OR_NIX=$(OR_NIX) \
 	    OPENRAM_HOME=$(OPENRAM_DIR)/compiler OPENRAM_TECH=$(OPENRAM_DIR)/technology \
 	    PDK_ROOT=$${PDK_ROOT:-$(OPENRAM_DIR)} OPENRAM_TMP=$(abspath $(SRAM_CHAR_D))/tmp_$* \
-	    $(OR_PYTHON) -u $(OPENRAM_DIR)/sram_compiler.py -v -c $(abspath $<) \
+	    $(OR_PYTHON) -u $(OPENRAM_DIR)/sram_compiler.py $(if $(filter 1,$(OR_VERBOSE)),-v) -c $(abspath $<) \
 	        > $(SRAM_CHAR_D)/openram_$*.log 2>&1 \
 	        || { tail -30 $(SRAM_CHAR_D)/openram_$*.log; exit 1; }
 	@touch $@

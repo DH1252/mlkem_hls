@@ -103,7 +103,8 @@ Before the last clock-gating changes, 1,152 flip-flops were clocked every cycle,
 
 **SRAM energy.** With `RAM_MACRO=1` the RAMs are macros charged per access, and by default the energy per access is an assumption documented in `pqse_energy.py`. The published sky130 OpenRAM macros don't help: their Liberty files come from OpenRAM's analytical model, which gives one number for read, write and idle, and the smallest macro (1 KB, 32 bits wide) is much larger than the 64 x 65 Keccak and seed RAMs. Instead, `make se-sram-char OPENRAM_DIR=<OpenRAM checkout>` generates PQSE's three shapes (1024 x 25, 64 x 65, 512 x 32) with OpenRAM and characterizes them in ngspice with the sky130 models. `scripts/power/pqse_sram_char.py` turns the Liberty files into `build/sepower/openram/sram_table.txt` with pJ per read, per write and per idle clock, and the leakage. OpenRAM reports average power in mW over one cycle at the minimum period, so energy is that power times the period. Then rerun the report with `make se-power-vcd-report ... SRAM_TABLE=build/sepower/openram/sram_table.txt`.
 
-- The shapes run in parallel with `make -j3`. A finished shape leaves a stamp and is not rerun; `make se-sram-char-clean` removes them.
+- Run the shapes one at a time (no `-j`) unless the machine has several GB free per shape: OpenRAM simulates the whole untrimmed array once for its leakage, about 150 k transistors for 1024 x 25. A finished shape leaves a stamp and is not rerun; `make se-sram-char-clean` deletes all results. After a failed run, delete `build/sepower/openram/tmp_<shape>` to free the disk space its ngspice output took.
+- Leave `OR_VERBOSE=0`. OpenRAM's `-v` adds `.plot V(*)` to every ngspice deck, so ngspice stores and prints every node at every time step, which runs out of memory and disk on the larger shapes.
 - By default OpenRAM characterizes the schematic netlist, which has no wire capacitance, at one load and slew point. `OR_LAYOUT=1 OR_PEX=1` uses the extracted layout and also reports the area; `OR_TABLE=1` runs the full 3 x 3 load and slew table. Both are much slower.
 - `OR_THREADS` sets ngspice threads, `OR_PYTHON` the interpreter with OpenRAM's requirements, `OR_NIX=1` OpenRAM's Nix environment.
 - `SRAM_IDLE_CLOCKED=1` also charges the clocks in which a macro is idle; by default an idle macro's clock counts as gated.
@@ -321,7 +322,7 @@ make se-area                     # Yosys gate count; SKY130_LIB=<.lib> maps to S
 make se-power SKY130_LIB=<.lib>  # vectorless power (activity 0.1) and the slowest path; RAM_MACRO=1: logic only
 make se-power-vcd SKY130_LIB=<.lib> RAM_MACRO=1   # energy of one KeyGen from a gate-level run (GL_CMD=2: Encaps)
 make se-power-sample SKY130_LIB=<.lib> RAM_MACRO=1 GL_FMT=vcd GL_CLOCKS=<n>   # the same from 8 sampled 2000-clock windows
-make -j3 se-sram-char OPENRAM_DIR=<OpenRAM checkout>   # SPICE energy of the SRAM shapes (section 4)
+make se-sram-char OPENRAM_DIR=<OpenRAM checkout>       # SPICE energy of the SRAM shapes (section 4)
 make se-gowin                    # Tang Nano 20K fit (GW2AR-18); PUF=0 without PUF cells, PUF=bfly butterfly cells
 make se-gowin-eda                # the same with Gowin EDA synthesis and place and route
 cd quartus/jtag && quartus_sh -t build.tcl se    # DE10-Nano, then source pqse_test.tcl
