@@ -613,6 +613,9 @@ OR_FULL_LEAK ?= 0
 # checkout on /mnt/<drive> is on the Windows file system, which is slow for
 # them: they then go to ~/.cache/pqse_openram (the results stay in build/).
 OR_TMP ?= $(if $(filter /mnt/%,$(CURDIR)),$(HOME)/.cache/pqse_openram,$(abspath $(SRAM_CHAR_D)))
+# OR_KEEP=1: keep OpenRAM's temp files after a successful run (sram_compiler -k),
+# e.g. for se-sram-qspice-test
+OR_KEEP ?= 0
 # Memory: with OR_FULL_LEAK=0 only the trimmed netlist is simulated, so make -j3
 # can run all three at once. With OR_FULL_LEAK=1, one at a time unless the machine
 # has a few GB per shape. Keep OR_VERBOSE=0: OpenRAM's -v writes .plot V(*) into
@@ -665,13 +668,24 @@ $(SRAM_CHAR_D)/%.ok: scripts/power/openram/pqse_sram_%.py scripts/power/openram/
 	    OPENRAM_HOME=$(abspath $(OPENRAM_DIR))/compiler OPENRAM_TECH=$(abspath $(OPENRAM_DIR))/technology \
 	    PDK_ROOT=$${PDK_ROOT:-$(abspath $(OPENRAM_DIR))} OPENRAM_TMP=$(OR_TMP)/tmp_$* \
 	    $(OR_PYTHON) -u $(abspath scripts/power/openram/pqse_openram_run.py) \
-	        $(if $(filter 1,$(OR_VERBOSE)),-v) $(if $(filter 1,$(OR_ANALYTICAL)),,-c) $(abspath $<) \
+	        $(if $(filter 1,$(OR_VERBOSE)),-v) $(if $(filter 1,$(OR_KEEP)),-k) $(if $(filter 1,$(OR_ANALYTICAL)),,-c) $(abspath $<) \
 	        > $(SRAM_CHAR_D)/openram_$*.log 2>&1 \
 	        || { tail -30 $(SRAM_CHAR_D)/openram_$*.log; exit 1; }
 	@touch $@
 se-sram-char-clean:
 	rm -rf $(SRAM_CHAR_D) $(OR_TMP)/tmp_*
-.PHONY: se-sram-char sram-char-check se-sram-char-clean
+# Feasibility test: can QSPICE (Windows) run OpenRAM's sky130 deck, and how fast
+# against ngspice? Needs a shape's temp files (make se-sram-char ... OR_KEEP=1);
+# copies the deck to QS_OUT on the Windows side, runs the ngspice baseline, and
+# QSPICE if QSPICE= names its simulator (see scripts/power/openram/pqse_qspice_test.py)
+#   make se-sram-qspice-test [QS_SHAPE=a6_d65] [QSPICE="/mnt/c/Program Files/QSPICE/QSPICE64.exe"]
+QS_SHAPE ?= a6_d65
+QS_OUT   ?= /mnt/c/pqse_qspice_test
+QSPICE   ?=
+se-sram-qspice-test:
+	$(PYTHON) scripts/power/openram/pqse_qspice_test.py --tmp $(OR_TMP)/tmp_$(QS_SHAPE) --out $(QS_OUT) \
+	    --ngspice --threads $(OR_THREADS) $(if $(QSPICE),--qspice "$(QSPICE)")
+.PHONY: se-sram-char sram-char-check se-sram-char-clean se-sram-qspice-test
 
 # Sampled energy per command, the fast way with VCD: GL_WINDOWS windows of
 # GL_WLEN clocks, one in the middle of each 1/GL_WINDOWS of the command
