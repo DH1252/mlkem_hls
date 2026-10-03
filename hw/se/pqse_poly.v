@@ -15,6 +15,14 @@
 //                        c := c - R, a := R (one word per 4 clocks; the two
 //                        share writes are separated by an idle clock)
 //   op ZERO   c          c := 0
+//   op ZCHK   c a        FAULT (zfail) unless c + a = 0 mod q for every
+//                        coefficient, one word per 2 clocks, nothing written.
+//                        The KeyGen duplicate check: with x = (x0, x1) and
+//                        y = (y0, y1) two sharings of one polynomial, c holds
+//                        y0 - x0 (share 0 only, SUB) and a holds y1 - x1
+//                        (share 1 only); if x = y these are r and -r, r = x1 - y1
+//                        a difference of fresh masks, so c, a and their sum
+//                        carry nothing about the polynomial
 //
 // Hiding (shuf = 1): the order of the words in PWM / ADD / SUB / MSPLIT is a
 // fresh uniformly random permutation T (Fisher-Yates, pqse_perm.v, drawn by
@@ -53,7 +61,8 @@ module pqse_poly (
   output wire [6:0]  pq_idx,
   input  wire [6:0]  pq_val,
   output wire        pq_next,   // NTT layer done: switch to the next layer's order
-  input  wire        pq_ready   // the next layer's order is complete
+  input  wire        pq_ready,  // the next layer's order is complete
+  output reg         zfail      // ZCHK: a word whose sum is not 0 (registered pulse)
 );
   `include "pqse_defs.vh"
   `include "pqse_func.vh"
@@ -142,7 +151,7 @@ module pqse_poly (
   wire [11:0] gam   = kh1[0] ? negq(gz) : gz;
 
   wire [2:0] ph_last = (op == P_PWM) ? 3'd5 : (op == P_MSPLIT) ? 3'd3 :
-                       ((op == P_ADD) || (op == P_SUB)) ? 3'd1 : 3'd0;
+                       ((op == P_ADD) || (op == P_SUB) || (op == P_ZCHK)) ? 3'd1 : 3'd0;
   wire [7:0] cur_last = (op == P_PWM) ? 8'd129 : (op == P_ZERO) ? 8'd127 : 8'd128;
   wire       ntt_last = intt ? (p == 3'd6) : (p == 3'd0);
   // end of a layer: flip to the next layer's order (pqse_perm.v); hold at
@@ -218,6 +227,10 @@ module pqse_poly (
           end
         end
         P_ZERO: if (cur_v) begin we = 1'b1; waddr = {cs, cur[6:0]}; wdata = 24'd0; end
+        P_ZCHK: begin                    // c word, then a word (the sum one clock later)
+          if (ph == 3'd0 && cur_v) begin re = 1'b1; raddr = {cs, kcur}; end
+          if (ph == 3'd1 && cur_v) begin re = 1'b1; raddr = {as_, kcur}; end
+        end
         default: ;
       endcase
     end
@@ -277,6 +290,17 @@ module pqse_poly (
   // Low power: cleared at a start and once when the unit goes idle (or in
   // reset), then held at 0 - not reloaded every idle clock, so the clock of the
   // idle unit can be gated (nothing loads them while idle).
+  // ZCHK: c word (cq) + a word (on rdata, read the clock before) of the previous
+  // item; operands 0 outside ZCHK (no adder activity in the other operations)
+  wire        zon  = busy_r && (op == P_ZCHK);
+  wire [23:0] zc   = cq & {24{zon}};
+  wire [23:0] za   = rdata & {24{zon}};
+  wire        zne  = (addq(zc[11:0], za[11:0]) != 12'd0) || (addq(zc[23:12], za[23:12]) != 12'd0);
+  always @(posedge clk) begin
+    if (rst) zfail <= 1'b0;
+    else     zfail <= zon && (ph == 3'd0) && prv_v && zne;
+  end
+
   reg        busy_q;
   always @(posedge clk) busy_q <= busy_r;
   wire       clr_v = start || rst || (!busy_r && busy_q);
@@ -338,6 +362,7 @@ module pqse_poly (
         rsh <= (op == P_SUB) ? {subq(cq[23:12], rdata[23:12]), subq(cq[11:0], rdata[11:0])}
                              : {addq(cq[23:12], rdata[23:12]), addq(cq[11:0], rdata[11:0])};
     end
+    if (busy_r && op == P_ZCHK && ph == 3'd1 && cur_v) cq <= rdata;    // c word
     if (busy_r && op == P_MSPLIT) begin
       if (ph == 3'd1 && cur_v) begin
         cq <= rdata;

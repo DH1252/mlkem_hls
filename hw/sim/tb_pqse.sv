@@ -53,8 +53,10 @@
 //      shadow both forced idle: the host watchdog), a PRNG word taken stale
 //      (masks reused) and a dk corrupted after KeyGen computed ek (2 bits,
 //      parity-blind: the pairwise consistency test), a parity-blind fault in
-//      the Keccak state during G(d || 3) (the recompute check of G) - each
-//      aborts with R_FAULT
+//      the Keccak state during G(d || 3) (the recompute check of G), a small
+//      change of one coefficient of s_0 after the sampler (2 bits, parity-
+//      blind; the pairwise test would pass this key: the duplicate s_0 and
+//      the ZCHK compare catch it) - each aborts with R_FAULT
 // Every KeyGen also runs the pairwise consistency test (sections 2, 8, 16).
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -78,9 +80,12 @@ module tb_pqse;
   // KeyGen pairwise consistency test (KEYGEN at 16, PCT at 608)
   localparam logic [9:0] PC_PCT     = 10'd608,   // PCT start: ek computed, s^ final
                          PC_PCT_SEQ = 10'd698;   // the share-wise compare of K and K'
-  // KeyGen recompute checks (720): G(d || 3) at 80, its check (rho share-wise vs 0) at 778
+  // KeyGen checks (720): G(d || 3) at 80, its check (rho share-wise vs 0) at 790;
+  // s_0: copy 1 sampled into S0 / S1, its NTT at 727, the copies compared at 733
   localparam logic [9:0] PC_KG_G    = 10'd80,
-                         PC_KG_GCHK = 10'd778;
+                         PC_KG_GCHK = 10'd790,
+                         PC_KG_NTT0 = 10'd727,
+                         PC_KG_ZCH0 = 10'd733;
 `ifdef PQSE_WD_LOG2
   localparam int WD_LOG2 = `PQSE_WD_LOG2;        // host command watchdog (pqse_host.v)
 `else
@@ -832,6 +837,19 @@ module tb_pqse;
     rd(STATUS, st);
     report("fault: G(d || 3) wrong (parity-blind Keccak fault) -> recompute check, R_FAULT, key not valid",
            bad + int'(res != R_FAULT) + int'(st[18:17] != 2'd1) + int'(st[2] != 1'b0));
+    // (h) s_0 share 0 (RAM 0, slot 0, word 3), 2 low bits flipped after the sampler
+    // wrote it, before its NTT: one coefficient off by a few - a valid-looking,
+    // consistent key the pairwise test would accept; the second copy disagrees
+    start(KEYGEN, 0);
+    wait (dut.u_sys.u_core.pc == PC_KG_NTT0);
+    @(negedge clk);
+    dut.u_sys.u_core.u_pmem0.g_def.mem[3] = dut.u_sys.u_core.u_pmem0.g_def.mem[3] ^ 25'h3;
+    wait (dut.u_sys.u_core.done);
+    bad = int'(dut.u_sys.u_core.pc != PC_KG_ZCH0);    // aborted by the compare of the two s_0
+    finish(res, cyc);
+    rd(STATUS, st);
+    report("fault: s_0 coefficient changed after the sampler -> duplicate compare (ZCHK), R_FAULT, key not valid",
+           bad + int'(res != R_FAULT) + int'(st[18:17] != 2'd2) + int'(st[2] != 1'b0));
 
     // 15 SPI + tamper (second instance) ----------------------------------------------------------
     // consecutive reads of different registers and a write/read of both CONFIG

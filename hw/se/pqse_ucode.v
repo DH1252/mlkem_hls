@@ -50,10 +50,12 @@
 //            compared share-wise (IO_SEQ): a mismatch aborts with FAULT before
 //            the key is marked valid (FIPS 140-3 pairwise consistency test, and
 //            a check against a fault that corrupted the key pair)
-//   720      KeyGen s, e: G(d || 3) and the six PRF calls each computed twice,
-//            the second run XORed into the first output, which must be 0
-//            (IO_SEQ against a zero entry, FAULT otherwise); rho in the buffer
-//            compared with G's (any key derivation: KEYGEN, KGWRAP, UNWRAP)
+//   720      KeyGen s, e: every secret polynomial produced twice (PRF, masked
+//            CBD, NTT; fresh masks) and compared share-wise (SUB per share,
+//            then ZCHK: FAULT unless the differences cancel); G(d || 3)
+//            computed twice (XOR, IO_SEQ against a zero entry); rho in the
+//            buffer compared with G's (every key derivation: KEYGEN, KGWRAP,
+//            UNWRAP)
 //
 // PUF key reconstruction (48): the helper data's last lane holds the 64-bit
 // check value H(k || "C") (first 8 bytes of SHA3-256, written by ENROLL). The
@@ -168,12 +170,6 @@ module pqse_ucode (
     h_prf = u_hash(RATE_136, 1'b1, 1'b1, SRC_SEED, sa(e), 8'd4, SRC_NONE, 9'd0, 8'd0,
                    2'd1, {8'd0, n}, SNK_SEED, E_CBD, E_CBD + 4'd1, 8'd16, 4'd0, 4'd0, 1'b0);
   endfunction
-  // the same PRF again, XORed into E_CBD..E_CBD+3 (SXOR): all four entries are 0
-  // exactly when both computations agree (share-wise: no share meets the other)
-  function [95:0] h_prfx(input [3:0] e, input [7:0] n);
-    h_prfx = u_hash(RATE_136, 1'b1, 1'b1, SRC_SEED, sa(e), 8'd4, SRC_NONE, 9'd0, 8'd0,
-                    2'd1, {8'd0, n}, SNK_SXOR, E_CBD, E_CBD + 4'd1, 8'd16, 4'd0, 4'd0, 1'b0);
-  endfunction
   // masked SamplePolyCBD_2 of the PRF output in E_CBD -> slots os (share 0), os2
   // (share 1), random word order; acc: add to the slots
   function [95:0] cbd(input [3:0] os, input [3:0] os2, input acc);
@@ -245,6 +241,14 @@ module pqse_ucode (
   endfunction
   function [95:0] padd(input [3:0] c, input [3:0] a);
     padd = u_poly(P_ADD, 1'b0, c, a, 4'd0);
+  endfunction
+  function [95:0] psub(input [3:0] c, input [3:0] a);
+    psub = u_poly(P_SUB, 1'b0, c, a, 4'd0);
+  endfunction
+  // FAULT unless c + a = 0 mod q everywhere (pqse_poly ZCHK); not shuffled (no
+  // secret: see the KeyGen duplicate check at 720)
+  function [95:0] pzchk(input [3:0] c, input [3:0] a);
+    pzchk = {C_POLY, P_ZCHK, 1'b0, c, a, 4'd0, 1'b0, 74'd0};
   endfunction
   function [95:0] msplit(input [3:0] c, input [3:0] a);
     msplit = u_poly(P_MSPLIT, 1'b0, c, a, 4'd0);
@@ -888,75 +892,89 @@ module pqse_ucode (
       10'd704: ins = pzero(S_ACC1);
       10'd705: ins = u_br(BC_ALWAYS, L_KGV);                   // the rest is wiped at L_KGEND
 
-      // ---------------- KeyGen s, e with recompute checks (720), every key derivation ----------------
-      // Each hash whose output becomes secret key material is computed twice: G(d || 3)
-      // and the six PRF calls. The second run is XORed into the first one's output
-      // (SXOR, after the CBD has used it), which must then be 0, checked share-wise
-      // against the all-zero entry E_KB (IO_SEQ: FAULT otherwise). Catches a fault in
-      // one computation that would change ek and dk consistently (the pairwise test
-      // passes such a key) and faults that make two secret polynomials equal
-      // (PRF nonce / domain faults, a known key-recovery attack on KeyGen)
-      10'd720: ins = szero(E_KB);                              // L_KGSE; the all-zero reference entry
+      // ---------------- KeyGen s, e computed twice and compared (720), every key derivation ----------------
+      // Every secret polynomial (s_0..s_2, e_0..e_2) is produced twice, PRF -> masked CBD
+      // -> NTT, the second copy with fresh masks and its own word orders into S_ACC0 /
+      // S_ACC1, and the two NTT-domain results compared: per share y_i := y_i - x_i (SUB,
+      // share 0 in RAM 0, share 1 in RAM 1), then ZCHK: y_0 + y_1 = 0 everywhere, else
+      // FAULT. Equal copies leave (r, -r), r a difference of fresh masks: nothing about
+      // the polynomial. A fault in one PRF, CBD or NTT run - including a small change of
+      // one coefficient, or a polynomial forced to zero, which the pairwise consistency
+      // test cannot see - makes the copies differ. G(d || 3) is computed twice too (XOR,
+      // must be 0); rho in the buffer is compared with G's
+      10'd720: ins = szero(E_KB);                              // L_KGSE; all-zero reference entry (G check)
       10'd721: ins = scmpn(E_RHO, RHO_OWN, 4'd0);              // rho in the buffer = rho of G (public)
       10'd722: ins = u_br(BC_BAD, X_KGF);
-      10'd723: ins = h_prf(E_R, 8'd0);                         // s_0 (shares)
-      10'd724: ins = cbd(S0, S1, 1'b0);
-      10'd725: ins = h_prfx(E_R, 8'd0);                        // the same PRF again, XORed in
-      10'd726: ins = seq(E_CBD, E_KB);                         // = 0?
-      10'd727: ins = seq(E_CBD + 4'd1, E_KB);
-      10'd728: ins = seq(E_CBD + 4'd2, E_KB);
-      10'd729: ins = seq(E_CBD + 4'd3, E_KB);
-      10'd730: ins = ntt(S0);
-      10'd731: ins = ntt(S1);
-      10'd732: ins = h_prf(E_R, 8'd1);                         // s_1 (shares)
-      10'd733: ins = cbd(S2, S3, 1'b0);
-      10'd734: ins = h_prfx(E_R, 8'd1);                        // the same PRF again, XORed in
-      10'd735: ins = seq(E_CBD, E_KB);                         // = 0?
-      10'd736: ins = seq(E_CBD + 4'd1, E_KB);
-      10'd737: ins = seq(E_CBD + 4'd2, E_KB);
-      10'd738: ins = seq(E_CBD + 4'd3, E_KB);
-      10'd739: ins = ntt(S2);
-      10'd740: ins = ntt(S3);
-      10'd741: ins = h_prf(E_R, 8'd2);                         // s_2 (shares)
-      10'd742: ins = cbd(S4, S5, 1'b0);
-      10'd743: ins = h_prfx(E_R, 8'd2);                        // the same PRF again, XORed in
-      10'd744: ins = seq(E_CBD, E_KB);                         // = 0?
-      10'd745: ins = seq(E_CBD + 4'd1, E_KB);
-      10'd746: ins = seq(E_CBD + 4'd2, E_KB);
-      10'd747: ins = seq(E_CBD + 4'd3, E_KB);
-      10'd748: ins = ntt(S4);
-      10'd749: ins = ntt(S5);
-      10'd750: ins = h_prf(E_R, 8'd3);                         // e_0 (shares)
-      10'd751: ins = cbd(Y0, Y0B, 1'b0);
-      10'd752: ins = h_prfx(E_R, 8'd3);                        // the same PRF again, XORed in
-      10'd753: ins = seq(E_CBD, E_KB);                         // = 0?
-      10'd754: ins = seq(E_CBD + 4'd1, E_KB);
-      10'd755: ins = seq(E_CBD + 4'd2, E_KB);
-      10'd756: ins = seq(E_CBD + 4'd3, E_KB);
-      10'd757: ins = ntt(Y0);
-      10'd758: ins = ntt(Y0B);
-      10'd759: ins = h_prf(E_R, 8'd4);                         // e_1 (shares)
-      10'd760: ins = cbd(Y1, Y1B, 1'b0);
-      10'd761: ins = h_prfx(E_R, 8'd4);                        // the same PRF again, XORed in
-      10'd762: ins = seq(E_CBD, E_KB);                         // = 0?
-      10'd763: ins = seq(E_CBD + 4'd1, E_KB);
-      10'd764: ins = seq(E_CBD + 4'd2, E_KB);
-      10'd765: ins = seq(E_CBD + 4'd3, E_KB);
-      10'd766: ins = ntt(Y1);
-      10'd767: ins = ntt(Y1B);
-      10'd768: ins = h_prf(E_R, 8'd5);                         // e_2 (shares)
-      10'd769: ins = cbd(Y2, Y2B, 1'b0);
-      10'd770: ins = h_prfx(E_R, 8'd5);                        // the same PRF again, XORed in
-      10'd771: ins = seq(E_CBD, E_KB);                         // = 0?
-      10'd772: ins = seq(E_CBD + 4'd1, E_KB);
-      10'd773: ins = seq(E_CBD + 4'd2, E_KB);
-      10'd774: ins = seq(E_CBD + 4'd3, E_KB);
-      10'd775: ins = ntt(Y2);
-      10'd776: ins = ntt(Y2B);
-      10'd777: ins = h_gx(1'b0);                               // G(d || 3) again, XORed into rho, sigma
-      10'd778: ins = seq(E_RHO, E_KB);
-      10'd779: ins = seq(E_R, E_KB);                           // (sigma is not needed after the PRFs)
-      10'd780: ins = u_br(BC_ALWAYS, L_KGA);                   // on to t^ = A^ o s^ + e^
+      10'd723: ins = h_prf(E_R, 8'd0);                         // s_0
+      10'd724: ins = cbd(S0, S1, 1'b0);                        // copy 1 (shares)
+      10'd725: ins = h_prf(E_R, 8'd0);                         // the PRF again
+      10'd726: ins = cbd(S_ACC0, S_ACC1, 1'b0);                // copy 2: fresh masks, own order
+      10'd727: ins = ntt(S0);
+      10'd728: ins = ntt(S1);
+      10'd729: ins = ntt(S_ACC0);
+      10'd730: ins = ntt(S_ACC1);
+      10'd731: ins = psub(S_ACC0, S0);                         // share 0: y0 - x0
+      10'd732: ins = psub(S_ACC1, S1);                         // share 1: y1 - x1
+      10'd733: ins = pzchk(S_ACC0, S_ACC1);                    // sum 0 everywhere, else FAULT
+      10'd734: ins = h_prf(E_R, 8'd1);                         // s_1
+      10'd735: ins = cbd(S2, S3, 1'b0);                        // copy 1 (shares)
+      10'd736: ins = h_prf(E_R, 8'd1);                         // the PRF again
+      10'd737: ins = cbd(S_ACC0, S_ACC1, 1'b0);                // copy 2: fresh masks, own order
+      10'd738: ins = ntt(S2);
+      10'd739: ins = ntt(S3);
+      10'd740: ins = ntt(S_ACC0);
+      10'd741: ins = ntt(S_ACC1);
+      10'd742: ins = psub(S_ACC0, S2);                         // share 0: y0 - x0
+      10'd743: ins = psub(S_ACC1, S3);                         // share 1: y1 - x1
+      10'd744: ins = pzchk(S_ACC0, S_ACC1);                    // sum 0 everywhere, else FAULT
+      10'd745: ins = h_prf(E_R, 8'd2);                         // s_2
+      10'd746: ins = cbd(S4, S5, 1'b0);                        // copy 1 (shares)
+      10'd747: ins = h_prf(E_R, 8'd2);                         // the PRF again
+      10'd748: ins = cbd(S_ACC0, S_ACC1, 1'b0);                // copy 2: fresh masks, own order
+      10'd749: ins = ntt(S4);
+      10'd750: ins = ntt(S5);
+      10'd751: ins = ntt(S_ACC0);
+      10'd752: ins = ntt(S_ACC1);
+      10'd753: ins = psub(S_ACC0, S4);                         // share 0: y0 - x0
+      10'd754: ins = psub(S_ACC1, S5);                         // share 1: y1 - x1
+      10'd755: ins = pzchk(S_ACC0, S_ACC1);                    // sum 0 everywhere, else FAULT
+      10'd756: ins = h_prf(E_R, 8'd3);                         // e_0
+      10'd757: ins = cbd(Y0, Y0B, 1'b0);                       // copy 1 (shares)
+      10'd758: ins = h_prf(E_R, 8'd3);                         // the PRF again
+      10'd759: ins = cbd(S_ACC0, S_ACC1, 1'b0);                // copy 2: fresh masks, own order
+      10'd760: ins = ntt(Y0);
+      10'd761: ins = ntt(Y0B);
+      10'd762: ins = ntt(S_ACC0);
+      10'd763: ins = ntt(S_ACC1);
+      10'd764: ins = psub(S_ACC0, Y0);                         // share 0: y0 - x0
+      10'd765: ins = psub(S_ACC1, Y0B);                        // share 1: y1 - x1
+      10'd766: ins = pzchk(S_ACC0, S_ACC1);                    // sum 0 everywhere, else FAULT
+      10'd767: ins = h_prf(E_R, 8'd4);                         // e_1
+      10'd768: ins = cbd(Y1, Y1B, 1'b0);                       // copy 1 (shares)
+      10'd769: ins = h_prf(E_R, 8'd4);                         // the PRF again
+      10'd770: ins = cbd(S_ACC0, S_ACC1, 1'b0);                // copy 2: fresh masks, own order
+      10'd771: ins = ntt(Y1);
+      10'd772: ins = ntt(Y1B);
+      10'd773: ins = ntt(S_ACC0);
+      10'd774: ins = ntt(S_ACC1);
+      10'd775: ins = psub(S_ACC0, Y1);                         // share 0: y0 - x0
+      10'd776: ins = psub(S_ACC1, Y1B);                        // share 1: y1 - x1
+      10'd777: ins = pzchk(S_ACC0, S_ACC1);                    // sum 0 everywhere, else FAULT
+      10'd778: ins = h_prf(E_R, 8'd5);                         // e_2
+      10'd779: ins = cbd(Y2, Y2B, 1'b0);                       // copy 1 (shares)
+      10'd780: ins = h_prf(E_R, 8'd5);                         // the PRF again
+      10'd781: ins = cbd(S_ACC0, S_ACC1, 1'b0);                // copy 2: fresh masks, own order
+      10'd782: ins = ntt(Y2);
+      10'd783: ins = ntt(Y2B);
+      10'd784: ins = ntt(S_ACC0);
+      10'd785: ins = ntt(S_ACC1);
+      10'd786: ins = psub(S_ACC0, Y2);                         // share 0: y0 - x0
+      10'd787: ins = psub(S_ACC1, Y2B);                        // share 1: y1 - x1
+      10'd788: ins = pzchk(S_ACC0, S_ACC1);                    // sum 0 everywhere, else FAULT
+      10'd789: ins = h_gx(1'b0);                               // G(d || 3) again, XORed into rho, sigma
+      10'd790: ins = seq(E_RHO, E_KB);
+      10'd791: ins = seq(E_R, E_KB);                           // (sigma is not needed after the PRFs)
+      10'd792: ins = u_br(BC_ALWAYS, L_KGA);                   // on to t^ = A^ o s^ + e^ (S_ACC0/1 hold r, -r)
 
       default: ins = u_end(R_UNKNOWN);
     endcase

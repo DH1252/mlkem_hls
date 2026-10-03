@@ -95,7 +95,8 @@ localparam [1:0] RATE_168 = 2'd0, RATE_136 = 2'd1, RATE_72 = 2'd2;
 
 // POLY ops
 localparam [3:0] P_NTT = 4'd0, P_INTT = 4'd1, P_PWM = 4'd2, P_ADD = 4'd3,
-                 P_SUB = 4'd4, P_MSPLIT = 4'd5, P_ZERO = 4'd6;
+                 P_SUB = 4'd4, P_MSPLIT = 4'd5, P_ZERO = 4'd6,
+                 P_ZCHK = 4'd7;     // FAULT unless c + a = 0 (mod q) for every coefficient
 
 // IO ops
 localparam [3:0] IO_DEC = 4'd0, IO_ENC = 4'd1, IO_S2B = 4'd2, IO_B2S = 4'd3,

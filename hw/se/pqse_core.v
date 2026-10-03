@@ -109,6 +109,7 @@ module pqse_core #(
   // ---- engine busy / start ----
   wire sp_busy, p_busy, io_busy, m_busy, pf_busy, pr_busy;
   wire pr_ferr;                                // PRNG word taken stale (pqse_prng)
+  wire p_zfail;                                // ZCHK: two copies of a polynomial differ (pqse_poly)
   wire io_bad, m_bad, m_fault, io_fault;
   wire any_busy = sp_busy | p_busy | io_busy | m_busy | pf_busy;
 
@@ -129,7 +130,7 @@ module pqse_core #(
   // ---- shuffling: a fresh random permutation before every shuffled instruction ----
   wire [3:0] iop      = ins_r[91:88];
   wire       pg_need  = hide_en && (
-                          ((cls == C_POLY) && (iop != P_ZERO)) ||
+                          ((cls == C_POLY) && (iop != P_ZERO) && (iop != P_ZCHK)) ||
                           ((cls == C_MASK) && ((iop == M_CMPR1) || (iop == M_CMPRC) ||
                                                (iop == M_CMPRO) || (iop == M_MU) || (iop == M_CBD))));
   wire       pg_n64   = (cls == C_POLY) && ((iop == P_NTT) || (iop == P_INTT));
@@ -228,7 +229,7 @@ module pqse_core #(
   wire perr_k;                                 // Keccak state parity error (pqse_sponge / pqse_keccak)
   wire f_ctl = (q != ~q_n) || (run && ((pcn != ~pc) || ((q == Q_EXEC) && (^ins_r != ins_p))));
   wire f_eng = (q == Q_WAIT) && wfirst && is_eng && !one_clk && !any_busy;
-  wire f_any = f_ctl | f_eng | perr | perr_k | m_fault | io_fault | pr_ferr;
+  wire f_any = f_ctl | f_eng | perr | perr_k | m_fault | io_fault | pr_ferr | p_zfail;
 
   always @(posedge clk) begin
     if (rst) begin
@@ -523,7 +524,7 @@ module pqse_core #(
     .shuf_in(ins_r[74] & hide_en), .busy(p_busy),
     .re(p_re), .raddr(p_ra), .rdata(pm_rd_p), .we(p_we), .waddr(p_wa), .wdata(p_wd),
     .rnd(rnd_p), .rnd_take(p_rt), .pq_idx(p_pq), .pq_val(pq_val),
-    .pq_next(pg_next), .pq_ready(pg_ready));
+    .pq_next(pg_next), .pq_ready(pg_ready), .zfail(p_zfail));
 
   // ---- I/O unit ----
   wire        io_re, io_we, io_bre, io_bwe, io_sre, io_swe;
@@ -630,8 +631,8 @@ module pqse_core #(
   always @(posedge clk) begin
     if (exec) $display("[%0t] pc %0d class %0d ins %h", $time, pc, cls, ins_r);
     if (f_any && (run || (q != ~q_n)))
-      $display("[%0t] FAULT detected: ctl %b engine %b parity %b keccak %b okchk %b decoder %b prng %b",
-               $time, f_ctl, f_eng, perr, perr_k, m_fault, io_fault, pr_ferr);
+      $display("[%0t] FAULT detected: ctl %b engine %b parity %b keccak %b okchk %b decoder %b prng %b zchk %b",
+               $time, f_ctl, f_eng, perr, perr_k, m_fault, io_fault, pr_ferr, p_zfail);
     if (done) $display("[%0t] command done: result %0d, %0d cycles", $time, result, cycles);
   end
 `endif
