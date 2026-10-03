@@ -32,6 +32,9 @@
 #   make sim-se-v1.5 / se-area-v1.5 / se-gowin-v1.5   the same for the secure
 #                  element v1.5 (hw/se_v1_5: ML-KEM-512/768/1024 per command,
 #                  Karatsuba PWM, multiplier-free mod-q reduction)
+#   make sim-se-v1.6 / se-area-v1.6 / se-gowin-v1.6   the same for v1.6
+#                  (hw/se_v1_6: v1.5 plus Keccak in flip-flops, a 320-bit PRNG,
+#                  two-coefficient Compress, one-coefficient-per-clock codec)
 #   make ip        package the Platform Designer component (quartus/ip)
 #   make sw-emu    build + run the ARM program against a software model
 #   make sw-arm    cross-compile the ARM program for the DE10-Nano
@@ -73,7 +76,7 @@ BAMBU_SIM   := --generate-tb=../../hls/tb_accel.c --simulate --simulator=VERILAT
 VERILATOR_ROOT_DIR := $(shell $(VERILATOR) --getenv VERILATOR_ROOT 2>/dev/null)
 HLS_ENV := CPATH="$(VERILATOR_ROOT_DIR)/include/vltstd$${CPATH:+:$$CPATH}"
 
-.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla sim-se-fault se-area sim-se-v1.5 se-area-v1.5 se-gowin-v1.5 se-power se-power-vcd se-power-gl-build se-power-sample se-power-vcd-report se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
+.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla sim-se-fault se-area sim-se-v1.5 se-area-v1.5 se-gowin-v1.5 sim-se-v1.6 se-area-v1.6 se-gowin-v1.6 se-power se-power-vcd se-power-gl-build se-power-sample se-power-vcd-report se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
 
 all: test
 
@@ -282,7 +285,7 @@ sim-se-fault: | $(BUILD)
 # Gate-level area estimate with Yosys (generic cells; with SKY130_LIB=<path to
 # sky130_fd_sc_hd__tt_025C_1v80.lib> it maps to the SkyWater 130 nm library).
 # MASKED=0 gives the unprotected reference build for comparison.
-# SE_DIR picks the source directory (hw/se, or hw/se_v1_5 via se-area-v1.5).
+# SE_DIR picks the source directory (hw/se, or hw/se_v1_5 / hw/se_v1_6 via se-area-v1.5 / -v1.6).
 MASKED ?= 1
 SE_DIR ?= hw/se
 SE_AREA_SRC = $(wildcard $(SE_DIR)/*.v)
@@ -386,6 +389,33 @@ se-area-v1.5:
 	$(MAKE) se-area SE_DIR=$(SE15_DIR)
 se-gowin-v1.5:
 	$(MAKE) se-gowin SE_DIR=$(SE15_DIR)
+
+# ---- the secure element v1.6 (hw/se_v1_6) ----------------------------------------------------
+# v1.5 with speed and energy before area: Keccak state in flip-flops (masked
+# permutation 168 clocks, unmasked 24), a 320-bit-per-clock PRNG, Compress on
+# two coefficients at once, ByteEncode / ByteDecode one coefficient per clock;
+# see hw/se_v1_6/README.md. Same microcode and vectors as v1.5
+# (hw/sim/tb_pqse_v16.sv: tb_pqse_v15.sv with v1.6's Keccak fault targets).
+SE16_DIR := hw/se_v1_6
+SE16_SRC := $(wildcard $(SE16_DIR)/*.v)
+sim-se-v1.6: | $(BUILD)
+	$(PYTHON) scripts/pqse_model.py
+	rm -rf $(BUILD)/sesim16 && mkdir -p $(BUILD)/sesim16
+	cp -r hw/sim/vectors $(BUILD)/sesim16/
+	cd $(BUILD)/sesim16 && $(VERILATOR) --binary --timing -j 2 -Wno-fatal -Wno-lint -Wno-style \
+	    --top-module tb_pqse_v16 -Mdir obj -o ../vtb16 -I../../$(SE16_DIR) \
+	    +define+PQSE_SIM_INIT $(if $(TRACE),+define+PQSE_TRACE) $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
+	    ../../hw/sim/tb_pqse_v16.sv $(addprefix ../../,$(SE16_SRC)) > build.log 2>&1 \
+	    || { tail -30 build.log; exit 1; }
+	cd $(BUILD)/sesim16 && ./vtb16 | tee sim.log
+	$(PYTHON) scripts/pqse_sm_check.py $(BUILD)/sesim16/sm_vec.txt
+	$(PYTHON) scripts/pqse_puf_stats.py --puf $(BUILD)/sesim16/puf_raw.txt \
+	    --trng $(BUILD)/sesim16/trng_raw.txt --out $(BUILD)/sesim16
+	@grep -q "TEST PASSED" $(BUILD)/sesim16/sim.log
+se-area-v1.6:
+	$(MAKE) se-area SE_DIR=$(SE16_DIR)
+se-gowin-v1.6:
+	$(MAKE) se-gowin SE_DIR=$(SE16_DIR)
 se-gowin-bisect:
 	@mkdir -p $(BUILD)/gowin/bisect
 	@for m in $(SE_MODULES); do \
