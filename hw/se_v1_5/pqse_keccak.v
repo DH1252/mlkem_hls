@@ -12,7 +12,8 @@
 // Both shares run in lockstep through the same addresses, each with its own
 // data path; they meet only in the registered DOM cross terms of chi.
 //
-// One round = two or three passes (a permutation ~3,050 clocks):
+// One round = two or three passes (a masked permutation ~3,050 clocks, an
+// unmasked one ~1,520):
 //   TH   26 clocks  round 0 only: C[x] = A[x] ^ A[x+5] ^ ... ^ A[x+20]  -> C registers
 //                   (rounds 1..23: the chi write-back of the round before
 //                   accumulates C of the lanes it writes - low power: no
@@ -29,6 +30,19 @@
 //                     c0' A[x + 5y] <= B[x] ^ d00 ^ d01 (^ iota)  (share 0)
 //                                      B[x] ^ d11 ^ d10           (share 1)
 //                     and C[x] ^= the written lane (= it, in plane 0), per share
+//   CHU  36 clocks  unmasked jobs only (v1.5), instead of CHI: a plane at a
+//                   time, 7 clocks per plane (+1 at the end of the round):
+//                     cj 0..4  read B[cj]                (arrives a clock later)
+//                     cj 1..4  B0 -> X0r, B1 -> Y0r, B2 -> X1r, B3 -> Y1r
+//                     cj 3..6  write A[x + 5y] = B[x] ^ (~B[x+1] & B[x+2]) (^ iota),
+//                              x = 0..3, the newest B straight from the RAM
+//                     cj 0 of the next plane (cj 7 after plane 4): x = 4,
+//                              B4 still on the RAM output
+//                   The DOM registers are free in an unmasked job (no AND, no
+//                   share 1), so they hold the plane; nothing is added but the
+//                   control. The data is public (matrix A, H(ek)): no masking
+//                   rule applies, and masked jobs never enter CHU. The
+//                   registers are cleared when the permutation ends.
 // DOM AND (Gross et al., "Domain-Oriented Masking", TIS 2016):
 //   d00 = X0&Y0   d01 = X0&Y1 ^ r   d10 = X1&Y0 ^ r   d11 = X1&Y1   (registered)
 // Robust-probing details (first order, glitches + transitions; checked by
@@ -51,7 +65,8 @@
 // them. Per share, registered separately (the shares never meet in a check
 // gate). A mismatch raises perr: the command aborts with FAULT.
 //
-// msk = 0 (unmasked job): share 1 stays zero, its RAM is not clocked, r = 0.
+// msk = 0 (unmasked job): share 1 stays zero, its RAM is not clocked, r = 0,
+// and chi runs as CHU (3 times fewer chi clocks and RAM reads).
 // MASKED = 0: the share-1 RAM and data path are not built.
 //
 // UNTESTED FIRST VERSION - see hw/se/README.md.
@@ -155,7 +170,8 @@ module pqse_keccak #(
   endfunction
 
   // ---- state -----------------------------------------------------------------------
-  localparam [2:0] K_IDLE = 3'd0, K_WIPE = 3'd1, K_TH = 3'd2, K_RP = 3'd3, K_CHI = 3'd4;
+  localparam [2:0] K_IDLE = 3'd0, K_WIPE = 3'd1, K_TH = 3'd2, K_RP = 3'd3, K_CHI = 3'd4,
+                   K_CHU = 3'd5;
   reg  [2:0]  ks;
   reg  [4:0]  rnd_i;      // round 0..23
   reg         mj;         // latched msk of the running permutation
@@ -163,7 +179,7 @@ module pqse_keccak #(
   reg  [5:0]  wcnt;       // wipe address
   // pass counters (issue stage)
   reg  [2:0]  cx, cy, cj;
-  reg  [1:0]  cs;         // chi: clock within the lane slot
+  reg  [1:0]  cs;         // chi: clock within the lane slot (CHU: cj is the clock within the plane)
   // fault protection of the control: complemented shadow copies written in the
   // same statements (a flipped bit - e.g. in the round counter, which would cut
   // rounds - shows as a mismatch the next clock: perr, the command aborts)
@@ -243,6 +259,19 @@ module pqse_keccak #(
   wire [63:0] rp1  = rol(q1 ^ T1, rot);
   wire [63:0] iota = (wbv && wbi == 5'd0) ? rc_of(rnd_i) : 64'd0;
   wire        rp_w = (ks == K_RP) && dv && (dj >= 3'd2);
+  // unmasked chi (CHU): plane B0..B4 in X0r, Y0r, X1r, Y1r and the RAM output
+  wire        chu   = (ks == K_CHU);
+  wire        cu_p4 = chu && (((cj == 3'd0) && (cy != 3'd0)) || (cj == 3'd7));  // lane x = 4 of the plane before
+  wire        cu_w  = chu && (((cj >= 3'd3) && (cj <= 3'd6)) || cu_p4);
+  wire [2:0]  cu_x  = cu_p4 ? 3'd4 : (cj - 3'd3);
+  wire [2:0]  cu_y  = (cj == 3'd0) ? (cy - 3'd1) : cy;
+  wire [63:0] cu_d  = (cj == 3'd3) ? (X0r ^ (~Y0r & q0)) :        // B0 ^ ~B1 & B2
+                      (cj == 3'd4) ? (Y0r ^ (~X1r & q0)) :        // B1 ^ ~B2 & B3
+                      (cj == 3'd5) ? (X1r ^ (~Y1r & q0)) :        // B2 ^ ~B3 & B4
+                      (cj == 3'd6) ? (Y1r ^ (~q0 & X0r)) :        // B3 ^ ~B4 & B0
+                                     (q0  ^ (~X0r & Y0r));        // B4 ^ ~B0 & B1
+  wire [63:0] cu_io = ((cj == 3'd3) && (cy == 3'd0)) ? rc_of(rnd_i) : 64'd0;
+  wire        cu_end = chu && (cj == 3'd7) && (rnd_i == 5'd23);   // last clock of the permutation
   wire [2:0]  cxm1 = m5({1'b0, cx} + 4'd4);           // RP: column x - 1
   wire [2:0]  cxp1 = m5({1'b0, cx} + 4'd1);           // RP: column x + 1
   wire [63:0] dd0  = C0v[{cxm1, 6'd0} +: 64] ^ rol(C0v[{cxp1, 6'd0} +: 64], 6'd1);  // RP: D of column cx, per share
@@ -260,7 +289,8 @@ module pqse_keccak #(
     // ---- write data: every source is "q ^ x" with the x's 0 when unused
     // (absorb apv, chi products + iota, theta parity T), except the rho/pi
     // lane (rotated) and the wipe (0) ----
-    wd0 = (ks == K_WIPE) ? 64'd0 : rp_w ? rp0 : (q0 ^ apv0 ^ d00 ^ d01 ^ iota ^ T0);
+    wd0 = (ks == K_WIPE) ? 64'd0 : rp_w ? rp0 : cu_w ? (cu_d ^ cu_io) :
+          (q0 ^ apv0 ^ d00 ^ d01 ^ iota ^ T0);
     wd1 = (ks == K_WIPE) ? 64'd0 : rp_w ? rp1 : (q1 ^ apv1 ^ d11 ^ d10 ^ T1);
     // ---- write enable / address (one source per clock) ----
     if (ap) begin                                       // absorb: lane ^ v
@@ -271,6 +301,8 @@ module pqse_keccak #(
       we = 1'b1; wa = wcnt;
     end else if (rp_w) begin
       we = 1'b1; wa = 6'd32 + {1'b0, pdst(rpi)};
+    end else if (cu_w) begin                            // CHU: A[x + 5y] (share 0 only)
+      we = 1'b1; wa = {1'b0, lidx(cu_x, cu_y)};
     end
     // ---- the read port ----
     case (ks)
@@ -291,6 +323,8 @@ module pqse_keccak #(
           re = 1'b1;
           ra = 6'd32 + {1'b0, lidx((cs == 2'd0) ? chx1 : (cs == 2'd1) ? chx2 : chx, cy)};
         end
+      K_CHU:
+        if (cj <= 3'd4) begin re = 1'b1; ra = 6'd32 + {1'b0, lidx(cj, cy)}; end
       default: ;
     endcase
   end
@@ -304,15 +338,19 @@ module pqse_keccak #(
   // schedule make se-probe checks), but their clock is gated in the other
   // clocks - also in theta / rho-pi and between permutations (low power: 384
   // flip-flops, clocked in 2 of the 4 clocks of a chi lane slot)
+  // CHU (unmasked jobs) uses Y0r / Y1r for B1 / B3 of the plane, cleared at
+  // the end of the permutation
   reg         dom_q;               // the AND was last clock
   wire        y_ld = (ks == K_CHI) && (cs == 2'd2);
   wire        y_en = (ks == K_CHI) && cs[1];          // cs 2: load, cs 3: clear
+  wire        yu0  = chu && (cj == 3'd2);             // CHU: B1
+  wire        yu1  = chu && (cj == 3'd4);             // CHU: B3
   always @(posedge clk) begin
     dom_q <= !rst && dom_now;
-    if (rst || y_en) begin
-      Y0r <= (!rst && y_ld) ? q0 : 64'd0;
-      Y1r <= (!rst && y_ld && use1) ? q1 : 64'd0;
-    end
+    if (rst || y_en || yu0 || cu_end)
+      Y0r <= (!rst && (y_ld || yu0)) ? q0 : 64'd0;
+    if (rst || y_en || yu1 || cu_end)
+      Y1r <= (!rst && y_ld && use1) ? q1 : (!rst && yu1) ? q0 : 64'd0;
     if (rst || dom_now || dom_q) begin
       d00 <= (!rst && dom_now) ? (X0r & Y0r)        : 64'd0;
       d01 <= (!rst && dom_now) ? ((X0r & Y1r) ^ rr) : 64'd0;
@@ -331,24 +369,30 @@ module pqse_keccak #(
   //   theta pass: C[dx] = T ^ A[x + 20] at dy = 4
   //   write-back (rounds 0..22): the first lane of a column (plane 0) replaces
   //   the old parity, the others accumulate into it
+  //   (CHU writes the same way, plane 0 first; its last lane is written in
+  //   CHU's last clock, before the next round's RP takes D)
   wire c_clr = rst || ((ks == K_WIPE) && (wcnt == 6'd0)) ||
-               ((ks == K_CHI) && (cs == 2'd3) && (cj == 3'd4) && (cy == 3'd4) && (rnd_i == 5'd23));
+               ((ks == K_CHI) && (cs == 2'd3) && (cj == 3'd4) && (cy == 3'd4) && (rnd_i == 5'd23)) ||
+               cu_end;
   wire c_th  = (ks == K_TH) && dv && (dy == 3'd4);
-  wire c_wb  = wbv && wbacc;
+  wire c_wu  = cu_w && (rnd_i != 5'd23);
+  wire c_wb  = (wbv && wbacc) || c_wu;
+  wire [2:0] c_wx = c_wu ? cu_x : wbx;
+  wire       c_y0 = c_wu ? (cu_y == 3'd0) : wby0;
   integer gx;
   always @(posedge clk) begin
     for (gx = 0; gx < 5; gx = gx + 1) begin
-      if (c_clr || (c_th && (dx == gx)) || (c_wb && (wbx == gx))) begin
+      if (c_clr || (c_th && (dx == gx)) || (c_wb && (c_wx == gx))) begin
         C0v[gx*64 +: 64] <= c_clr ? 64'd0 : c_th ? th0 :
-                            wby0 ? wd0 : (C0v[gx*64 +: 64] ^ wd0);
+                            c_y0 ? wd0 : (C0v[gx*64 +: 64] ^ wd0);
         Cp0[gx]          <= c_clr ? 1'b0 : c_th ? ^th0 :
-                            wby0 ? wp0 : (Cp0[gx] ^ wp0);
+                            c_y0 ? wp0 : (Cp0[gx] ^ wp0);
       end
-      if (c_clr || (use1 && ((c_th && (dx == gx)) || (c_wb && (wbx == gx))))) begin
+      if (c_clr || (use1 && ((c_th && (dx == gx)) || (c_wb && (c_wx == gx))))) begin
         C1v[gx*64 +: 64] <= c_clr ? 64'd0 : c_th ? th1 :
-                            wby0 ? wd1 : (C1v[gx*64 +: 64] ^ wd1);
+                            c_y0 ? wd1 : (C1v[gx*64 +: 64] ^ wd1);
         Cp1[gx]          <= c_clr ? 1'b0 : c_th ? ^th1 :
-                            wby0 ? wp1 : (Cp1[gx] ^ wp1);
+                            c_y0 ? wp1 : (Cp1[gx] ^ wp1);
       end
     end
   end
@@ -467,7 +511,8 @@ module pqse_keccak #(
           dv <= iss; dx <= cx; dj <= cj;
           if (dv) begin
             if (dx == 3'd4 && dj == 3'd6) begin          // the last B lane written this clock
-              begin ks <= K_CHI; ks_n <= ~(K_CHI); end
+              if (use1) begin ks <= K_CHI; ks_n <= ~(K_CHI); end
+              else      begin ks <= K_CHU; ks_n <= ~(K_CHU); end
               begin cy <= 3'd0; cy_n <= ~(3'd0); end
               begin cj <= 3'd0; cj_n <= ~(3'd0); end
               begin cs <= 2'd0; cs_n <= ~(2'd0); end
@@ -524,6 +569,33 @@ module pqse_keccak #(
               end
             end
           endcase
+        end
+
+        // ---- chi + iota, unmasked job: 7 clocks per plane (write and loads above) ----
+        K_CHU: begin
+          if (cj == 3'd1) X0r <= q0;                     // B0
+          if (cj == 3'd3) X1r <= q0;                     // B2
+          if ((cj == 3'd6) && (cy != 3'd4)) begin        // next plane (lane 4 of this one: its cj 0)
+            begin cj <= 3'd0; cj_n <= ~(3'd0); end
+            begin cy <= cy + 3'd1; cy_n <= ~(cy + 3'd1); end
+          end else if (cj == 3'd7) begin                 // lane 4 of plane 4 written: round complete
+            begin cy <= 3'd0; cy_n <= ~(3'd0); end
+            if (rnd_i == 5'd23) begin
+              begin ks <= K_IDLE; ks_n <= ~(K_IDLE); end
+              begin cj <= 3'd0; cj_n <= ~(3'd0); end
+              X0r <= 64'd0;                              // (Y0r / Y1r and C: cu_end)
+              X1r <= 64'd0;
+            end else begin
+              begin rnd_i <= rnd_i + 5'd1; rnd_i_n <= ~(rnd_i + 5'd1); end
+              begin ks    <= K_RP; ks_n <= ~(K_RP); end
+              begin cx    <= 3'd0; cx_n <= ~(3'd0); end
+              begin cj    <= 3'd2; cj_n <= ~(3'd2); end
+              iss   <= 1'b1;
+              dv    <= 1'b0;
+            end
+          end else begin
+            begin cj <= cj + 3'd1; cj_n <= ~(cj + 3'd1); end
+          end
         end
 
         default: begin ks <= K_IDLE; ks_n <= ~(K_IDLE); end

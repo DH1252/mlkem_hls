@@ -1,10 +1,13 @@
 # PQSE secure element v1.5
 
-v1.5 is the v4 secure element (`hw/se`) with three changes:
+v1.5 is the v4 secure element (`hw/se`) with four changes:
 
 1. The host chooses ML-KEM-512, ML-KEM-768 or ML-KEM-1024 for each command.
 2. Pointwise multiplication (PWM) uses Karatsuba: 4 clocks per coefficient pair instead of 6.
 3. Reduction mod q needs no multiplier.
+4. Keccak permutations on public data (the matrix A and H(ek)) take about 1,510 clocks instead of 3,050.
+
+The timing target is a whole card tap under 0.3 s at the 3.39 MHz contactless clock, for every key size (see "Estimated cycles").
 
 Everything else is unchanged: masking, hiding, fault detection, PUF key wrapping and secure messaging. `hw/se/README.md` describes those, and this file only covers what differs.
 
@@ -118,6 +121,8 @@ c0' = c0 + m1 + m5          c1' = c1 + m3 − m1 − m2
 
 That is 4 multiplications instead of 5, so the one shared multiplier is busy every clock. A PWM takes about 524 clocks instead of 780. Each pair reads a, b and c and writes its result three passes later; the comment at the PWM case shows the schedule.
 
+**Faster Keccak for public data** (`pqse_keccak.v`). The masked χ step takes 4 clocks per lane: three lane reads and a DOM AND. Jobs on public data (`msk` = 0: the XOF that generates the matrix A, and H(ek)) have no shares and no AND to protect, so χ now handles a whole plane at a time. It reads the plane's 5 lanes once and writes each result as soon as its three inputs are in, 7 clocks per plane. A round drops from 126 to 62 clocks and a permutation from about 3,050 to about 1,510. The plane is held in the four DOM operand registers, which an unmasked job leaves idle, so the only new logic is the control (state `K_CHU`). Masked jobs never enter it, so the masked schedule and its probing check are unchanged. An ML-KEM-1024 tap runs about 100 of these public permutations: the matrix A in UNWRAP and again in DECAPS, plus H(ek). That is about 150 k clocks, or 45 ms. It also saves energy: χ reads each lane once instead of three times, so a public permutation makes a third fewer state-RAM accesses.
+
 **Masked Compress for d = 5 and 11** (`pqse_mcomp.v`). For d = 11 the scaled shares would need 25 bits, so d = 11 uses 13 guard bits instead of 14 and stays at 24 bits. The worst-case error, 1.05 units, is still below the 1.23 margin. d = 1, 4, 5, 10 and 11 were checked exhaustively in Python: every coefficient, every split into two shares.
 
 **Masked CBD for eta = 3** (`pqse_masked.v`). Six bits per coefficient with weights +1, +1, +1, −1, −1, −1. A 12-bit word of the PRF output can straddle two lanes (words 5 and 10 of every 16), so the B2A conversion loads the next lane mid-word from a bit-position register.
@@ -128,11 +133,24 @@ From a cost model of the microcode that reproduces v4's measured ML-KEM-768 cloc
 
 | Command | ML-KEM-512 | ML-KEM-768 (v4 measured) | ML-KEM-1024 |
 |---|---|---|---|
-| KeyGen with fault checks and PCT | ~370 k | ~534 k (545 k) | ~780 k |
-| Encaps | ~170 k | ~263 k (268 k) | ~384 k |
-| Decaps | ~200 k | ~295 k (298 to 305 k) | ~420 k |
+| KeyGen with fault checks and PCT | ~315 k | ~420 k (545 k) | ~595 k |
+| Encaps | ~145 k | ~210 k (268 k) | ~290 k |
+| Decaps | ~185 k | ~255 k (298 to 305 k) | ~345 k |
+| UNWRAP | ~175 k | ~210 k (272 k) | ~295 k |
 
-At 3.39 MHz, the contactless clock, ML-KEM-1024 Encaps takes about 115 ms and Decaps about 125 ms. ML-KEM-768 gets about 2 % faster than v4 from the Karatsuba PWM. The command watchdog (2^22 clocks) leaves room for ML-KEM-1024 KGWRAP (about 0.83 M clocks).
+At 3.39 MHz every single command finishes in under 0.2 s; the longest is ML-KEM-1024 KGWRAP, about 0.63 M clocks or 185 ms. Without the faster public Keccak, the ML-KEM-1024 figures would be about 780 k, 384 k, 419 k and 387 k. The command watchdog (2^22 clocks) leaves plenty of room.
+
+### One card tap
+
+A tap on a battery-less card is: power-up and selection, UNWRAP (rebuild the key from the PUF), receive the ciphertext, DECAPS, then SEAL a short reply. At 3.39 MHz:
+
+| | ML-KEM-512 | ML-KEM-768 | ML-KEM-1024 |
+|---|---|---|---|
+| UNWRAP + DECAPS on the chip | 106 ms | 137 ms | 188 ms |
+| Whole tap, in sequence, radio at 424 kbit/s | ~145 ms | ~180 ms | ~245 ms |
+| Whole tap, radio at 106 kbit/s, ciphertext received during UNWRAP | ~150 ms | ~200 ms | ~270 ms |
+
+These assume 15 ms for power-up and selection, 4 to 5 ms for SEAL and the reply, and 25 % radio framing overhead. At 106 kbit/s the 1,568-byte ML-KEM-1024 ciphertext alone takes about 150 ms on the radio, so the card controller has to receive it into its own RAM while PQSE runs UNWRAP. The buffer is locked while a command runs, so the controller copies the ciphertext in after UNWRAP, which takes about 1 ms over SPI. Doing it in sequence at 106 kbit/s would take about 0.36 s.
 
 ## Area and power compared with v4
 
@@ -144,8 +162,9 @@ At 3.39 MHz, the contactless clock, ML-KEM-1024 Encaps takes about 115 ms and De
 | Multiplier and mask reduction | adder trees instead of two constant multipliers each |
 | Polynomial unit | 4 registers (48 bits) for the Karatsuba sums |
 | Sequencer | the translation adders and the loop counters |
+| Keccak | control for the unmasked χ (state `K_CHU`); the plane reuses the DOM operand registers |
 
-The multiplier is active in roughly 25,000 clocks of an ML-KEM-768 Encaps (NTTs, INTTs and PWMs), so a smaller, shallower reduction saves energy in each of them. Area and energy still have to be measured with `make se-area-v1.5` and a power run.
+The multiplier is active in roughly 25,000 clocks of an ML-KEM-768 Encaps (NTTs, INTTs and PWMs), so a smaller, shallower reduction saves energy in each of them. The Keccak state RAM uses most of the SRAM energy in v4. The unmasked χ reads each B lane once instead of three times, so the public permutations make a third fewer state-RAM accesses. Area and energy still have to be measured with `make se-area-v1.5` and a power run.
 
 ## Make targets
 
@@ -161,5 +180,5 @@ make se-gowin-v1.5     # fit on the Tang Nano 20K
 
 1. **Vectors for ML-KEM-512 and -1024.** Generate NIST ACVP vectors with `scripts/acvp_to_txt.py` and `scripts/make_tb_vectors.py`. Then add sections to `tb_pqse_v15.sv` that set CONFIG[2:1] and use per-set sizes for EK, DK and CT.
 2. **The other testbenches.** `tb_pqse_tvla.sv`, `tb_pqse_fault.sv` and `tb_pqse_gate.sv` still target v4's map and addresses.
-3. **Probing check.** `scripts/pqse_probe_verify.py` models v4's gadget schedules. Two schedules are new and need to be added: the eta = 3 CBD with its mid-word lane reload, and Compress with 13 guard bits.
+3. **Probing check.** `scripts/pqse_probe_verify.py` models v4's gadget schedules. Two schedules are new and need to be added: the eta = 3 CBD with its mid-word lane reload, and Compress with 13 guard bits. The unmasked χ is not a gadget (it only ever handles public data), but the check should confirm that a masked job cannot enter `K_CHU`.
 4. **Power flow.** `se-power*` still builds `hw/se`.
