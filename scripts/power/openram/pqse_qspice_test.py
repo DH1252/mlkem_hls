@@ -31,6 +31,12 @@ What it does:
   5. with --ngspice runs <deck>_ngspice.sp in ngspice afterwards (threads from
      --threads via a .spiceinit), timed, as the baseline.
 
+Result (QSPICE, sky130 from open_pdks via OpenRAM's ciel): with the X -> M
+rewrite QSPICE runs, but finds none of the sky130 models ("Didn't find a
+model for SKY130_FD_PR__SPECIAL_NFET_LATCH... -- defaults assumed") and
+simulates level-1 default MOSFETs: not usable without converting the model
+library. The script reports this as its verdict.
+
 What to look for: whether QSPICE gets through the sky130 model library (the
 models are written for ngspice: .option scale, nested .lib sections, binned
 BSIM4 models in subcircuits), whether the transient finishes, whether the
@@ -232,6 +238,14 @@ def main():
         rc, dt = run(cmd, out, os.path.join(out, "qspice.out"))
         print("QSPICE: exit %d, %.1f s; output:" % (rc, dt))
         print(tail(os.path.join(out, "qspice.out"), 30))
+        try:
+            qtext = open(os.path.join(out, "qspice.out"), errors="replace").read()
+        except OSError:
+            qtext = ""
+        if "Didn't find a model" in qtext:
+            print("VERDICT: QSPICE did not load the sky130 models and fell back to level-1 default\n"
+                  "MOSFETs: its results mean nothing for sky130 (this PDK's models are binned\n"
+                  ".model cards, <name>.0 .. <name>.N, selected by W / L).")
         new = [p for p in glob.glob(os.path.join(out, "*")) if os.path.getmtime(p) >= t_start - 1
                and not p.endswith("qspice.out")]
         print("files QSPICE wrote: %s" % (", ".join(os.path.basename(p) for p in new) or "none"))
