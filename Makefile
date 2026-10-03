@@ -676,15 +676,17 @@ se-sram-char-clean:
 	rm -rf $(SRAM_CHAR_D) $(OR_TMP)/tmp_*
 # Feasibility test: can QSPICE (Windows) run OpenRAM's sky130 deck, and how fast
 # against ngspice? Needs a shape's temp files (make se-sram-char ... OR_KEEP=1);
-# copies the deck to QS_OUT on the Windows side, runs the ngspice baseline, and
-# QSPICE if QSPICE= names its simulator (see scripts/power/openram/pqse_qspice_test.py)
+# copies the deck to QS_OUT on the Windows side, runs QSPICE if QSPICE= names its
+# simulator, then the ngspice baseline with QS_NGSPICE=1 (see pqse_qspice_test.py)
 #   make se-sram-qspice-test [QS_SHAPE=a6_d65] [QSPICE="/mnt/c/Program Files/QSPICE/QSPICE64.exe"]
 QS_SHAPE ?= a6_d65
 QS_OUT   ?= /mnt/c/pqse_qspice_test
 QSPICE   ?=
+# QS_NGSPICE=1: also time ngspice on the same deck (after QSPICE)
+QS_NGSPICE ?= 0
 se-sram-qspice-test:
 	$(PYTHON) scripts/power/openram/pqse_qspice_test.py --tmp $(OR_TMP)/tmp_$(QS_SHAPE) --out $(QS_OUT) \
-	    --ngspice --threads $(OR_THREADS) $(if $(QSPICE),--qspice "$(QSPICE)")
+	    --threads $(OR_THREADS) $(if $(QSPICE),--qspice "$(QSPICE)") $(if $(filter 1,$(QS_NGSPICE)),--ngspice)
 .PHONY: se-sram-char sram-char-check se-sram-char-clean se-sram-qspice-test
 
 # Sampled energy per command, the fast way with VCD: GL_WINDOWS windows of

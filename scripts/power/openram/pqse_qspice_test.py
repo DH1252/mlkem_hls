@@ -19,13 +19,13 @@ What it does:
      C:\\...; the sky130 models stay in WSL and are referenced as
      \\\\wsl.localhost\\<distro>\\...), ngspice-only .OPTIONS tokens (KLU, ACCT,
      PROBE, POST) removed;
-  3. writes <deck>_ngspice.sp: the same deck with Linux paths, and with
-     --ngspice runs it in ngspice (threads from --threads via a .spiceinit),
-     timed, as the baseline;
+  3. writes <deck>_ngspice.sp: the same deck with Linux paths;
   4. with --qspice <exe> runs QSPICE on <deck>_qspice.cir from WSL, timed, and
      shows the end of its output and the files it wrote. QSPICE's command
      line is not documented here: if it needs other options, give them with
-     --qspice-args, or open the .cir in QSPICE's GUI (QUX) instead.
+     --qspice-args, or open the .cir in QSPICE's GUI (QUX) instead;
+  5. with --ngspice runs <deck>_ngspice.sp in ngspice afterwards (threads from
+     --threads via a .spiceinit), timed, as the baseline.
 
 What to look for: whether QSPICE gets through the sky130 model library (the
 models are written for ngspice: .option scale, nested .lib sections, binned
@@ -191,20 +191,13 @@ def main():
         if parse_inc(ln):
             print("    " + ln.rstrip())
 
-    if a.ngspice:
-        with open(os.path.join(out, ".spiceinit"), "w") as f:
-            f.write("set num_threads=%d\n" % a.threads)
-        log = os.path.join(out, "ngspice.lis")
-        rc, dt = run(["ngspice", "-b", "-o", log, ng], out, os.path.join(out, "ngspice.out"))
-        print("\nngspice (%d threads): exit %d, %.1f s" % (a.threads, rc, dt))
-        m = meas_lines(log)
-        print("\n".join("    " + x for x in m[:30]) if m else tail(log))
-
     if a.qspice:
         t_start = time.time()
         cmd = [a.qspice] + a.qspice_args.split() + [winpath(qs)]
+        print("\nrunning QSPICE: %s\n  (output: %s)" % (" ".join(cmd), os.path.join(out, "qspice.out")),
+              flush=True)
         rc, dt = run(cmd, out, os.path.join(out, "qspice.out"))
-        print("\nQSPICE: %s\nexit %d, %.1f s; output:" % (" ".join(cmd), rc, dt))
+        print("QSPICE: exit %d, %.1f s; output:" % (rc, dt))
         print(tail(os.path.join(out, "qspice.out"), 30))
         new = [p for p in glob.glob(os.path.join(out, "*")) if os.path.getmtime(p) >= t_start - 1
                and not p.endswith("qspice.out")]
@@ -214,10 +207,25 @@ def main():
                 m = meas_lines(p)
                 print("  %s:\n%s" % (os.path.basename(p),
                                      "\n".join("    " + x for x in m[:30]) if m else tail(p)))
-    elif not a.ngspice:
-        print("\nnext: --ngspice for the baseline, --qspice <QSPICE64.exe> to run QSPICE from WSL,\n"
-              "or open %s in QSPICE's GUI" % winpath(qs))
+        if dt < 2 and not new:
+            print("QSPICE returned at once and wrote nothing: it probably did not take the netlist\n"
+                  "from the command line. Open %s in QSPICE's GUI instead, or find its\n"
+                  "command-line options (QSPICE help) and pass them with --qspice-args." % winpath(qs))
 
+    if a.ngspice:
+        with open(os.path.join(out, ".spiceinit"), "w") as f:
+            f.write("set num_threads=%d\n" % a.threads)
+        log = os.path.join(out, "ngspice.lis")
+        print("\nrunning the ngspice baseline (%d threads; can take minutes)\n  (log: %s)"
+              % (a.threads, log), flush=True)
+        rc, dt = run(["ngspice", "-b", "-o", log, ng], out, os.path.join(out, "ngspice.out"))
+        print("ngspice: exit %d, %.1f s" % (rc, dt))
+        m = meas_lines(log)
+        print("\n".join("    " + x for x in m[:30]) if m else tail(log))
+
+    if not a.qspice and not a.ngspice:
+        print("\nnext: --qspice <QSPICE64.exe> to run QSPICE from WSL, --ngspice for the baseline,\n"
+              "or open %s in QSPICE's GUI" % winpath(qs))
 
 if __name__ == "__main__":
     main()
