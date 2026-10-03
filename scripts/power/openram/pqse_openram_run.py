@@ -37,10 +37,18 @@ and the ngspice runs themselves are made faster:
      PQSE_OR_THREADS and (PQSE_OR_NGFAST=1, default) the two settings the
      sky130 / ngspice guides give for faster model loading, ng_nomodcheck
      (no model-parameter checks) and skywaterpdk (skips checks while
-     reading the PDK's .lib). Not ngbehavior=hsa (OpenRAM's, and the third
-     setting of those guides): with it ngspice-42 no longer finds the sky130
-     transistors in OpenRAM's netlists, which instantiate the PDK's .model
-     cards with X ("unknown subckt: ... sky130_fd_pr__special_nfet_01v8"). With
+     reading the PDK's .lib), and (PQSE_OR_HSA=1, default) ngbehavior=hsa,
+     the third setting of those guides (HSPICE-compatible reading of the PDK
+     libraries, the largest part of their speed-up). With hsa, ngspice no
+     longer turns an X instance of a .model card into a MOSFET, and OpenRAM
+     instantiates every sky130 transistor with X; some of them (the SRAM
+     cell devices, e.g. sky130_fd_pr__special_nfet_01v8 / _latch) are .model
+     cards in this PDK, others are .subckt wrappers. So every netlist a
+     stimulus includes is first copied to the temp directory with the X
+     instances of sky130 FET models that are NOT a .subckt (in the PDK or the
+     netlist) written as M devices, and the stimulus includes that copy. The
+     PDK's .subckt names come from a scan of its libs.tech/ngspice and
+     libs.ref/sky130_fd_pr. PQSE_OR_HSA=0 goes back to plain mode. With
      PQSE_OR_NIX=1 the run stays in the OpenRAM checkout instead (nix
      develop needs its flake.nix there).
   7. Xyce raw file. OpenRAM starts Xyce with -r timing.raw: every node at
@@ -105,7 +113,8 @@ def run_dir(root):
         if env("PQSE_OR_NGFAST", "1") == "1":
             f.write("set ng_nomodcheck\n")     # no model-parameter checks
             f.write("set skywaterpdk\n")       # skip checks while reading the PDK libs
-        # no ngbehavior=hsa (OpenRAM's): X instances of the sky130 FET models fail with it
+        if env("PQSE_OR_HSA", "1") == "1":
+            f.write("set ngbehavior=hsa\n")   # needs the X -> M netlist copies (patch)
     os.chdir(d)
     return d
 
@@ -126,6 +135,66 @@ def spice_errors(temp):
             if any(k in ln for k in FATAL) and ln.strip()[:300] not in out:
                 out.append(ln.strip()[:300])
     return "\n".join(out[:10])
+
+
+FETNAME = re.compile(r"^sky130_fd_pr__\S*fet\S*$", re.IGNORECASE)
+
+
+def pdk_subckts(lib):
+    """lower-case names of the sky130_fd_pr .subckt definitions in the PDK that
+    holds lib (<pdk>/libs.tech/ngspice/sky130.lib.spice)"""
+    ngdir = os.path.dirname(os.path.abspath(lib))
+    root = os.path.dirname(os.path.dirname(ngdir))
+    dirs = [d for d in (ngdir, os.path.join(root, "libs.ref", "sky130_fd_pr")) if os.path.isdir(d)]
+    pat = r"^[[:space:]]*\.subckt[[:space:]]+sky130_fd_pr__[^[:space:]]+"
+    names = set()
+    try:
+        r = subprocess.run(["grep", "-rhoiE", pat] + dirs, capture_output=True, text=True)
+        text = r.stdout
+    except OSError:
+        text = ""
+        for d in dirs:
+            for dp, _, fs in os.walk(d):
+                for fn in fs:
+                    try:
+                        for ln in open(os.path.join(dp, fn), errors="replace"):
+                            if ln.lstrip()[:7].lower() == ".subckt":
+                                text += ln.strip() + "\n"
+                    except OSError:
+                        pass
+    for ln in text.splitlines():
+        p = ln.split()
+        if len(p) > 1:
+            names.add(p[1].lower())
+    return names, dirs
+
+
+def x_to_m(src, dst, subckts):
+    """copy netlist src to dst with X instances of sky130 FET .model cards as M
+    devices (the cell is the last token before the name=value parameters;
+    continuation lines are followed); returns the number changed"""
+    lines = open(src, errors="replace").read().splitlines()
+    local = {ln.split()[1].lower() for ln in lines
+             if ln.lstrip()[:7].lower() == ".subckt" and len(ln.split()) > 1}
+    out, n, i = [], 0, 0
+    while i < len(lines):
+        j = i + 1
+        while j < len(lines) and lines[j].startswith("+"):
+            j += 1
+        first = lines[i]
+        if first[:1] in "xX":
+            toks = " ".join([first] + [c[1:] for c in lines[i + 1:j]]).split()
+            plain = [t for t in toks[1:] if "=" not in t]
+            cell = plain[-1] if plain else ""
+            if FETNAME.match(cell) and cell.lower() not in subckts and cell.lower() not in local:
+                first = "M" + first[1:]
+                n += 1
+        out.append(first)
+        out.extend(lines[i + 1:j])
+        i = j
+    with open(dst, "w") as f:
+        f.write("\n".join(out) + "\n")
+    return n
 
 
 def patch(OPTS, debug):
@@ -190,6 +259,29 @@ def patch(OPTS, debug):
 
         smod.subprocess = _NoRaw()
         notes.append("Xyce without the raw file")
+
+    if OPTS.spice_name == "ngspice" and env("PQSE_OR_HSA", "1") == "1":
+        libs = [v[0][0] for v in dmod.tech.spice["fet_libraries"].values() if v]
+        subckts, dirs = pdk_subckts(libs[0]) if libs else (set(), [])
+        if not subckts:
+            debug.warning("PQSE: no sky130_fd_pr .subckt found in {0}: every X instance of a "
+                          "sky130 FET becomes an M device".format(dirs))
+        write_include = stimuli.write_include
+        converted = {}
+
+        def write_include_m(self, circuit):
+            if os.path.isfile(circuit):
+                dst = os.path.join(OPTS.openram_temp, "pqse_m_" + os.path.basename(circuit))
+                n = x_to_m(circuit, dst, subckts)
+                if converted.get(circuit) != n:
+                    converted[circuit] = n
+                    debug.info(1, "PQSE: {0}: {1} sky130 FET instances X -> M".format(circuit, n))
+                circuit = dst
+            return write_include(self, circuit)
+
+        stimuli.write_include = write_include_m
+        notes.append("ngbehavior=hsa (netlists with sky130 FET models as M devices; "
+                     "%d PDK subcircuits kept as X)" % len(subckts))
 
     tmax = float(env("PQSE_OR_TMAX_PS", "50"))
     # KLU: ngspice only (OpenRAM sets LINSOL type=klu for Xyce itself; its
