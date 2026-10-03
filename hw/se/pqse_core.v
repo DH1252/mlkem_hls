@@ -231,10 +231,16 @@ module pqse_core #(
   wire f_eng = (q == Q_WAIT) && wfirst && is_eng && !one_clk && !any_busy;
   wire f_any = f_ctl | f_eng | perr | perr_k | m_fault | io_fault | pr_ferr | p_zfail;
 
+  // clocks of the command: counts while it runs, cleared when the next one starts
+  // (its own block with a plain enable: clock-gated while idle)
+  wire cyc_clr = rst || (!run && cmd_start && !fault);
+  always @(posedge clk)
+    if (cyc_clr || run) cycles <= cyc_clr ? 32'd0 : cycles + 32'd1;
+
   always @(posedge clk) begin
     if (rst) begin
       begin q <= Q_IDLE; q_n <= ~(Q_IDLE); end done <= 1'b0; key_valid <= 1'b0; sk_valid <= 1'b0; result <= 8'd0;
-      cycles <= 32'd0; dly <= 4'd0; bad <= 1'b0; wrap <= 1'b0; inj <= 1'b0; kx <= 1'b0;
+      dly <= 4'd0; bad <= 1'b0; wrap <= 1'b0; inj <= 1'b0; kx <= 1'b0;
       zc <= 1'b0; kgc <= 1'b0; role <= 1'b0; ctr_tx <= 64'd0;
       rx_any <= 1'b0; rx_max <= 64'd0; rx_bits <= 64'd0;
       pc <= 10'd0; pcn <= 10'h3FF; rw <= 2'd0; wfirst <= 1'b0; fault <= 1'b0; ins_p <= 1'b0;
@@ -242,7 +248,6 @@ module pqse_core #(
     end else begin
       done <= 1'b0;
       if (q != Q_FETCH) fr <= 1'b0;          // a fetch always starts with the ROM read
-      if (run) cycles <= cycles + 32'd1;
       if (f_any && (run || (q != ~q_n))) fault <= 1'b1;
       if (fault) begin                         // abort the command
         result <= R_FAULT;
@@ -258,7 +263,6 @@ module pqse_core #(
             kx     <= kexp;
             zc     <= (cmd == CMD_ZEROIZE);
             kgc    <= (cmd == CMD_KEYGEN) || (cmd == CMD_KGWRAP);
-            cycles <= 32'd0;
             if (ep_ok) begin
               pc  <= ep;
               pcn <= ~ep;

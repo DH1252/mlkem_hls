@@ -303,7 +303,28 @@ module pqse_poly (
 
   reg        busy_q;
   always @(posedge clk) busy_q <= busy_r;
+
   wire       clr_v = start || rst || (!busy_r && busy_q);
+
+  // cq (the c word: PWM accumulator input, ADD / SUB / MSPLIT / ZCHK operand) and
+  // rsh (the word ADD / SUB / MSPLIT write) in their own blocks, each with one
+  // load condition: plain enable flip-flops, clock-gated in every other clock
+  // (low power; the same values as before, clock by clock)
+  wire        cq_ld = busy_r && cur_v &&
+                      (((op == P_PWM) && (ph == 3'd3)) ||
+                       (((op == P_ADD) || (op == P_SUB) || (op == P_MSPLIT) || (op == P_ZCHK)) &&
+                        (ph == 3'd1)));
+  wire        rs_as = busy_r && ((op == P_ADD) || (op == P_SUB)) && (ph == 3'd0) && prv_v;
+  wire        rs_ms = busy_r && (op == P_MSPLIT) && (ph == 3'd2) && cur_v;
+  always @(posedge clk) begin
+    if (clr_v || cq_ld)
+      cq <= (clr_v || ((op == P_PWM) && !acc)) ? 24'd0 : rdata;
+    if (clr_v || rs_as || rs_ms)                       // ADD / SUB: rdata = a word of the previous item
+      rsh <= clr_v ? 24'd0 :
+             rs_ms ? {R1, R0} :
+             (op == P_SUB) ? {subq(cq[23:12], rdata[23:12]), subq(cq[11:0], rdata[11:0])}
+                           : {addq(cq[23:12], rdata[23:12]), addq(cq[11:0], rdata[11:0])};
+  end
   always @(posedge clk) begin
     if (clr_v) begin
       wq  <= 24'd0;  a0r <= 12'd0; a1r <= 12'd0; b0r <= 12'd0; b1r <= 12'd0; zr <= 12'd0;
@@ -311,8 +332,8 @@ module pqse_poly (
       s1  <= 12'd0;  s2  <= 12'd0; s3  <= 12'd0; s4  <= 12'd0; s5 <= 12'd0;
       d1  <= 12'd0;  z1  <= 12'd0; o_add <= 12'd0; o_sub <= 12'd0;
       o0a <= 12'd0;  o0b <= 12'd0; o1b <= 12'd0;
-      aq  <= 24'd0;  bq  <= 24'd0; cq  <= 24'd0; e1 <= 12'd0; o1 <= 12'd0; o2 <= 12'd0;
-      rsh <= 24'd0;  R0  <= 12'd0; R1  <= 12'd0;
+      aq  <= 24'd0;  bq  <= 24'd0; e1 <= 12'd0; o1 <= 12'd0; o2 <= 12'd0;
+      R0  <= 12'd0;  R1  <= 12'd0;                       // (cq, rsh: above)
     end else begin
     if (busy_r && is_ntt && !hold) begin
       gd1 <= g_rd; gd2 <= gd1; gd3 <= gd2; gd4 <= gd3; gd5 <= gd4;
@@ -350,26 +371,14 @@ module pqse_poly (
         3'd2: if (cur_v) bq <= rdata;
         3'd3: begin
           if (prv_v) o1 <= addq(cq[23:12], mr);          // c1 + m3 (previous pair's cq)
-          if (cur_v) cq <= acc ? rdata : 24'd0;
         end
         3'd4: if (prv_v) o2 <= addq(o1, mr);             // + m4
         default: ;
       endcase
     end
-    if (busy_r && (op == P_ADD || op == P_SUB)) begin
-      if (ph == 3'd1 && cur_v) cq <= rdata;              // c word
-      if (ph == 3'd0 && prv_v)                          // rdata = a word of the previous item
-        rsh <= (op == P_SUB) ? {subq(cq[23:12], rdata[23:12]), subq(cq[11:0], rdata[11:0])}
-                             : {addq(cq[23:12], rdata[23:12]), addq(cq[11:0], rdata[11:0])};
-    end
-    if (busy_r && op == P_ZCHK && ph == 3'd1 && cur_v) cq <= rdata;    // c word
-    if (busy_r && op == P_MSPLIT) begin
-      if (ph == 3'd1 && cur_v) begin
-        cq <= rdata;
-        R0 <= rq0;
-        R1 <= rq1;
-      end
-      if (ph == 3'd2 && cur_v) rsh <= {R1, R0};
+    if (busy_r && op == P_MSPLIT && ph == 3'd1 && cur_v) begin
+      R0 <= rq0;
+      R1 <= rq1;
     end
     end
   end

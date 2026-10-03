@@ -89,8 +89,8 @@ module pqse_parse (
       if (can || take)
         sbuf <= (can ? (sbuf >> 24) : sbuf)
               | (take ? ins : 128'd0);
-      bcnt <= bc_a + (take ? 5'd8 : 5'd0);
-      n    <= nn;
+      if (can || take) bcnt <= bc_a + (take ? 5'd8 : 5'd0);   // else unchanged (bc_a = bcnt)
+      if (can)         n    <= nn;                            // else nn = n
       if (nn == 9'd256) fin <= 1'b1;
       if (wr) widx <= widx + 7'd1;
       case (kk)

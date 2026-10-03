@@ -295,13 +295,38 @@ module pqse_keccak #(
     endcase
   end
 
+  // ---- chi: Y operands and DOM products -----------------------------------------------------
+  // Y holds B[x+2] only in the clock of the AND (loaded at cs 2, back to 0 at
+  // cs 3); the products hold their value only in the clock after the AND
+  // (loaded at cs 3, back to 0 the next clock). Every other clock they are 0,
+  // so they are written only in these two clocks each: the same register
+  // values clock by clock as loading them every clock of a permutation (the
+  // schedule make se-probe checks), but their clock is gated in the other
+  // clocks - also in theta / rho-pi and between permutations (low power: 384
+  // flip-flops, clocked in 2 of the 4 clocks of a chi lane slot)
+  reg         dom_q;               // the AND was last clock
+  wire        y_ld = (ks == K_CHI) && (cs == 2'd2);
+  wire        y_en = (ks == K_CHI) && cs[1];          // cs 2: load, cs 3: clear
+  always @(posedge clk) begin
+    dom_q <= !rst && dom_now;
+    if (rst || y_en) begin
+      Y0r <= (!rst && y_ld) ? q0 : 64'd0;
+      Y1r <= (!rst && y_ld && use1) ? q1 : 64'd0;
+    end
+    if (rst || dom_now || dom_q) begin
+      d00 <= (!rst && dom_now) ? (X0r & Y0r)        : 64'd0;
+      d01 <= (!rst && dom_now) ? ((X0r & Y1r) ^ rr) : 64'd0;
+      d10 <= (!rst && dom_now) ? ((X1r & Y0r) ^ rr) : 64'd0;
+      d11 <= (!rst && dom_now) ? (X1r & Y1r)        : 64'd0;
+    end
+  end
+
   // ---- control and registers --------------------------------------------------------------
   always @(posedge clk) begin
     if (rst) begin
       begin ks <= K_IDLE; ks_n <= ~(K_IDLE); end mj <= 1'b0; clean <= 1'b0; ap <= 1'b0; wbv <= 1'b0; dv <= 1'b0; iss <= 1'b0;
       apn <= 1'b0; apv0 <= 64'd0; apv1 <= 64'd0; T0 <= 64'd0; T1 <= 64'd0;
-      X0r <= 64'd0; X1r <= 64'd0; Y0r <= 64'd0; Y1r <= 64'd0;
-      d00 <= 64'd0; d01 <= 64'd0; d10 <= 64'd0; d11 <= 64'd0;
+      X0r <= 64'd0; X1r <= 64'd0;
       begin C0v <= 320'd0; C1v <= 320'd0; end
       Cp0 <= 5'd0; Cp1 <= 5'd0; pchk <= 1'b0;
       begin rnd_i <= 5'd0; rnd_i_n <= ~(5'd0); end
@@ -329,20 +354,6 @@ module pqse_keccak #(
         apa  <= ax_idx;
         apv0 <= ax_en ? ax_v0 : 64'd0;
         apv1 <= (ax_en && M1) ? ax_v1 : 64'd0;
-      end
-      // chi: Y and the products load every clock while a permutation runs
-      // (their value in their clock, else 0), up to the last write-back clock;
-      // then they are 0 and hold, so an idle Keccak's clock can be gated
-      // (low power: 384 flip-flops) without a hold path in use
-      if ((ks != K_IDLE) || wbv) begin
-        Y0r <= 64'd0; Y1r <= 64'd0;
-        d00 <= 64'd0; d01 <= 64'd0; d10 <= 64'd0; d11 <= 64'd0;
-        if (dom_now) begin
-          d00 <= X0r & Y0r;
-          d01 <= (X0r & Y1r) ^ rr;
-          d10 <= (X1r & Y0r) ^ rr;
-          d11 <= X1r & Y1r;
-        end
       end
       wbv <= 1'b0;
       // theta of the next round: the written lane into its column parity (the
@@ -460,9 +471,7 @@ module pqse_keccak #(
               X1r <= use1 ? q1 : 64'd0;
               begin cs  <= 2'd2; cs_n <= ~(2'd2); end
             end
-            2'd2: begin                                  // Y = B[x+2]
-              Y0r <= q0;
-              Y1r <= use1 ? q1 : 64'd0;
+            2'd2: begin                                  // Y = B[x+2] (below)
               begin cs  <= 2'd3; cs_n <= ~(2'd3); end
             end
             default: begin                               // the AND (above); write-back next clock

@@ -306,16 +306,17 @@ module pqse_host #(
   always @(posedge clk) begin
     rd_buf <= bus_re && is_buf;
     rd_ok  <= h_re;
-    case (bus_addr)
-      12'h400: csr_q <= 32'h50515345;
-      12'h401: csr_q <= 32'h00040000;
-      12'h403: csr_q <= {13'd0, fcnt, sk_valid, res, lc, tampered, trng_fail, trng_ok,
-                         key_valid, done_s, busy_s};
-      12'h404: csr_q <= cycles;
-      12'h405: csr_q <= {30'd0, lc};
-      12'h406: csr_q <= {31'd0, hide_en};
-      default: csr_q <= 32'd0;
-    endcase
+    if (bus_re)                     // only on a read (low power: held otherwise, clock gated)
+      case (bus_addr)
+        12'h400: csr_q <= 32'h50515345;
+        12'h401: csr_q <= 32'h00040000;
+        12'h403: csr_q <= {13'd0, fcnt, sk_valid, res, lc, tampered, trng_fail, trng_ok,
+                           key_valid, done_s, busy_s};
+        12'h404: csr_q <= cycles;
+        12'h405: csr_q <= {30'd0, lc};
+        12'h406: csr_q <= {31'd0, hide_en};
+        default: csr_q <= 32'd0;
+      endcase
   end
   always @* bus_rdata = rd_buf ? (rd_ok ? h_rdata : 32'd0) : csr_q;
 endmodule
