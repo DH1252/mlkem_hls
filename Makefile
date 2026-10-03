@@ -604,6 +604,9 @@ OR_VERBOSE  ?= 0
 # power / 100 MHz, no idle energy. Rough, but per shape. Results go to their
 # own directory (build/sepower/openram_analytical) so they never mix with
 # SPICE results.
+# (sram_compiler.py's -c means --characterize, i.e. analytical_delay = False,
+# and command-line options override the config file: it is passed only for
+# SPICE; the config file is the positional argument)
 OR_ANALYTICAL ?= 0
 # the Python OpenRAM runs in: needs OpenRAM's requirements (numpy, scipy,
 # scikit-learn, ...). In an OSS CAD Suite shell python3 is the suite's own:
@@ -637,7 +640,7 @@ $(SRAM_CHAR_D)/%.ok: scripts/power/openram/pqse_sram_%.py | sram-char-check
 	    PQSE_OR_ANALYTICAL=$(OR_ANALYTICAL) \
 	    OPENRAM_HOME=$(OPENRAM_DIR)/compiler OPENRAM_TECH=$(OPENRAM_DIR)/technology \
 	    PDK_ROOT=$${PDK_ROOT:-$(OPENRAM_DIR)} OPENRAM_TMP=$(abspath $(SRAM_CHAR_D))/tmp_$* \
-	    $(OR_PYTHON) -u $(OPENRAM_DIR)/sram_compiler.py $(if $(filter 1,$(OR_VERBOSE)),-v) -c $(abspath $<) \
+	    $(OR_PYTHON) -u $(OPENRAM_DIR)/sram_compiler.py $(if $(filter 1,$(OR_VERBOSE)),-v) $(if $(filter 1,$(OR_ANALYTICAL)),,-c) $(abspath $<) \
 	        > $(SRAM_CHAR_D)/openram_$*.log 2>&1 \
 	        || { tail -30 $(SRAM_CHAR_D)/openram_$*.log; exit 1; }
 	@touch $@
