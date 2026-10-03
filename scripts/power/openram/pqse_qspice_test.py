@@ -17,8 +17,12 @@ What it does:
      into --out (on the Windows side, default /mnt/c/pqse_qspice_test);
   2. writes <deck>_qspice.cir: include paths as Windows paths (copies:
      C:\\...; the sky130 models stay in WSL and are referenced as
-     \\\\wsl.localhost\\<distro>\\...), ngspice-only .OPTIONS tokens (KLU, ACCT,
-     PROBE, POST) removed;
+     \\\\wsl.localhost\\<distro>\\..., or --models-win names a copy on C:),
+     ngspice-only .OPTIONS tokens (KLU, ACCT, PROBE, POST) removed, and the
+     netlist copies with their transistors as M devices (<name>_qspice.sp):
+     OpenRAM instantiates the sky130 FETs with X (subcircuit syntax), but this
+     PDK defines them as .model cards; ngspice turns such an X line into a
+     MOSFET, QSPICE stops with "No such subcircuit: SKY130_FD_PR__..._FET...";
   3. writes <deck>_ngspice.sp: the same deck with Linux paths;
   4. with --qspice <exe> runs QSPICE on <deck>_qspice.cir from WSL, timed, and
      shows the end of its output and the files it wrote. QSPICE's command
@@ -43,6 +47,18 @@ import time
 
 INC = re.compile(r'^(\s*)\.(include|inc|lib)\s+(.*)$', re.IGNORECASE)
 NG_ONLY = ("KLU", "ACCT", "PROBE", "POST=1")
+FET = re.compile(r"^sky130_fd_pr__\S*fet\S*$", re.IGNORECASE)
+
+
+def x_to_m(text):
+    """X instances of sky130 FET models -> M devices; returns (text, count)"""
+    out, n = [], 0
+    for ln in text.splitlines():
+        if ln[:1] in "xX" and any(FET.match(t) for t in ln.split()[1:]):
+            ln = "M" + ln[1:]
+            n += 1
+        out.append(ln)
+    return "\n".join(out) + "\n", n
 
 
 def parse_inc(ln):
@@ -104,8 +120,9 @@ def copy_tree(path, tmp, out, done):
                 copy_tree(inc, tmp, out, done)
 
 
-def rewrite(path, tmp, out, windows):
-    """the deck with include paths pointing at the copies (or the models in place)"""
+def rewrite(path, tmp, out, windows, models_win=None):
+    """the deck with include paths pointing at the copies (or the models in place);
+    windows: the QSPICE deck (Windows paths, the _qspice netlist copies)"""
     lines = []
     for ln in open(path, errors="replace").read().splitlines():
         m = parse_inc(ln)
@@ -113,7 +130,13 @@ def rewrite(path, tmp, out, windows):
             ind, kw, inc, rest = m
             if os.path.dirname(os.path.abspath(inc)) == os.path.abspath(tmp):
                 inc = os.path.join(os.path.abspath(out), os.path.basename(inc))
-            p = winpath(inc) if windows else inc
+                if windows:
+                    base, ext = os.path.splitext(inc)
+                    if os.path.isfile(base + "_qspice" + ext):
+                        inc = base + "_qspice" + ext
+            elif windows and models_win and kw.lower() == "lib":
+                inc = models_win
+            p = (inc if inc == models_win else winpath(inc)) if windows else inc
             tail = rest
             extra = ""
             if rest.lstrip().startswith("."):          # OpenRAM writes ".include x" without a newline
@@ -165,6 +188,8 @@ def main():
     ap.add_argument("--qspice", help="QSPICE simulator executable, e.g. "
                     "'/mnt/c/Program Files/QSPICE/QSPICE64.exe'")
     ap.add_argument("--qspice-args", default="", help="extra QSPICE arguments before the netlist")
+    ap.add_argument("--models-win", help="Windows path of sky130.lib.spice for the QSPICE deck "
+                    "(a copy on C:, e.g. C:\\sky130A\\libs.tech\\ngspice\\sky130.lib.spice)")
     a = ap.parse_args()
 
     tmp = os.path.abspath(a.tmp or default_tmp(a.shape))
@@ -179,9 +204,17 @@ def main():
     done = set()
     copy_tree(deck, tmp, out, done)
     stem = os.path.splitext(a.deck)[0]
+    for name in sorted(done):
+        if name == os.path.basename(deck):
+            continue
+        text, n = x_to_m(open(os.path.join(out, name), errors="replace").read())
+        if n:
+            b, e = os.path.splitext(name)
+            open(os.path.join(out, b + "_qspice" + e), "w").write(text)
+            print("%s: %d sky130 FET instances X -> M in %s_qspice%s" % (name, n, b, e))
     qs = os.path.join(out, stem + "_qspice.cir")
     ng = os.path.join(out, stem + "_ngspice.sp")
-    open(qs, "w").write(rewrite(deck, tmp, out, windows=True))
+    open(qs, "w").write(rewrite(deck, tmp, out, windows=True, models_win=a.models_win))
     open(ng, "w").write(rewrite(deck, tmp, out, windows=False))
     print("copied from %s: %s" % (tmp, ", ".join(sorted(done))))
     print("QSPICE deck:  %s  (%s)" % (qs, winpath(qs)))

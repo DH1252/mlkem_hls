@@ -684,9 +684,13 @@ QS_OUT   ?= /mnt/c/pqse_qspice_test
 QSPICE   ?=
 # QS_NGSPICE=1: also time ngspice on the same deck (after QSPICE)
 QS_NGSPICE ?= 0
+# QS_MODELS: Windows path of a copy of sky130.lib.spice on C: (default: the PDK in
+# WSL through \\wsl.localhost)
+QS_MODELS ?=
 se-sram-qspice-test:
 	$(PYTHON) scripts/power/openram/pqse_qspice_test.py --tmp $(OR_TMP)/tmp_$(QS_SHAPE) --out $(QS_OUT) \
-	    --threads $(OR_THREADS) $(if $(QSPICE),--qspice "$(QSPICE)") $(if $(filter 1,$(QS_NGSPICE)),--ngspice)
+	    --threads $(OR_THREADS) $(if $(QSPICE),--qspice "$(QSPICE)") $(if $(filter 1,$(QS_NGSPICE)),--ngspice) \
+	    $(if $(QS_MODELS),--models-win '$(QS_MODELS)')
 .PHONY: se-sram-char sram-char-check se-sram-char-clean se-sram-qspice-test
 
 # Sampled energy per command, the fast way with VCD: GL_WINDOWS windows of
