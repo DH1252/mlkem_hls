@@ -601,8 +601,9 @@ OR_NIX      ?= 0
 # ngspice step ceiling OR_TMAX_PS ps instead of OpenRAM's 10; the KLU solver
 # (OR_KLU=0 without); ngspice started in build/.../run_<shape>, where it reads a
 # .spiceinit with OR_THREADS threads (started from the repository, it never
-# read OpenRAM's). OR_MINPERIOD=1 OR_FULL_LEAK=1 OR_TMAX_PS=10 OR_KLU=0 is
-# OpenRAM's own characterization.
+# read OpenRAM's); a run stops at the first ngspice error instead of retrying
+# at longer periods. OR_MINPERIOD=1 OR_FULL_LEAK=1 OR_TMAX_PS=10 OR_KLU=0 is
+# OpenRAM's own characterization. OR_THREADS is per shape: with -j3, 3 x that.
 OR_PERIOD    ?= 10
 OR_TMAX_PS   ?= 50
 OR_KLU       ?= 1

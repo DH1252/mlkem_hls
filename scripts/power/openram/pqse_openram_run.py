@@ -32,10 +32,16 @@ and the ngspice runs themselves are made faster:
      without it warns and uses its default solver).
   5. working directory. OpenRAM writes ngspice's .spiceinit (threads,
      ngbehavior=hsa) into its temp directory, but starts ngspice in the
-     current directory, where ngspice looks for it. The run goes to
-     PQSE_OR_RUNDIR, with a .spiceinit there: num_threads = PQSE_OR_THREADS,
-     ngbehavior=hsa, ng_nomodcheck. With PQSE_OR_NIX=1 the run stays in the
-     OpenRAM checkout instead (nix develop needs its flake.nix there).
+     current directory, where ngspice looks for it, so it was never read.
+     The run goes to PQSE_OR_RUNDIR, with a .spiceinit there that sets only
+     num_threads = PQSE_OR_THREADS: with OpenRAM's ngbehavior=hsa, ngspice-42
+     no longer finds the sky130 device subcircuits in OpenRAM's netlists
+     ("unknown subckt: ... sky130_fd_pr__special_nfet_01v8"). With
+     PQSE_OR_NIX=1 the run stays in the OpenRAM checkout instead (nix
+     develop needs its flake.nix there).
+  6. fail fast. A simulation that fails is retried by OpenRAM at twice the
+     period, up to 8 times; when ngspice itself stopped with an error (not a
+     timing failure) the run ends at once with ngspice's message.
 
 PQSE_OR_MINPERIOD=1 PQSE_OR_FULL_LEAK=1 PQSE_OR_TMAX_PS=10 PQSE_OR_KLU=0 give
 OpenRAM's own characterization. The analytical model (analytical_delay = True)
@@ -84,10 +90,27 @@ def run_dir(root):
     with open(os.path.join(d, ".spiceinit"), "w") as f:
         f.write("* written by scripts/power/openram/pqse_openram_run.py\n")
         f.write("set num_threads=%d\n" % int(env("PQSE_OR_THREADS", "4")))
-        f.write("set ngbehavior=hsa\n")
-        f.write("set ng_nomodcheck\n")
+        # no ngbehavior=hsa (OpenRAM's): sky130 subcircuits not found with it
     os.chdir(d)
     return d
+
+
+FATAL = ("Simulation interrupted due to error", "unknown subckt", "Could not find",
+         "Timestep too small", "Error on line", "fatal")
+
+
+def spice_errors(temp):
+    """ngspice's fatal messages from the last run (spice_stdout.log, timing.lis)"""
+    out = []
+    for name in ("spice_stdout.log", "spice_stderr.log", "timing.lis"):
+        try:
+            lines = open(os.path.join(temp, name), errors="replace").read().splitlines()
+        except OSError:
+            continue
+        for ln in lines:
+            if any(k in ln for k in FATAL) and ln.strip()[:300] not in out:
+                out.append(ln.strip()[:300])
+    return "\n".join(out[:10])
 
 
 def patch(OPTS, debug):
@@ -122,6 +145,21 @@ def patch(OPTS, debug):
 
         delay.run_power_simulation = run_power_simulation
         notes.append("leakage of the trimmed netlist (no full-array run)")
+
+    # fail fast: ngspice errors are not timing failures, a longer period won't help
+    run_delay_simulation = delay.run_delay_simulation
+
+    def run_delay_simulation_checked(self):
+        result = run_delay_simulation(self)
+        if not result[0]:
+            fatal = spice_errors(OPTS.openram_temp)
+            if fatal:
+                debug.error("ngspice stopped with an error at period {0}ns (not a timing "
+                            "failure):\n{1}\n(logs in {2})".format(self.period, fatal,
+                                                                 OPTS.openram_temp), 1)
+        return result
+
+    delay.run_delay_simulation = run_delay_simulation_checked
 
     tmax = float(env("PQSE_OR_TMAX_PS", "50"))
     klu = env("PQSE_OR_KLU", "1") == "1"
