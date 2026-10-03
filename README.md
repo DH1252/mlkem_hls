@@ -20,7 +20,7 @@ Version 4, branch `claude/v4-tooling`, checked with Verilator 5, Yosys and OpenS
 | Probing check of every masked gadget (`make se-probe`) | pass |
 | TVLA leakage test on masked Decaps, two independent runs | no confirmed first-order leakage |
 | Fault campaign: 200 random single-bit flips per command over 38 targets | Decaps and KeyGen: 0 silent faults, 0 hangs |
-| Gate-level energy of one KeyGen, SkyWater 130 nm | 73.5 µJ, 0.45 mW average at 3.39 MHz |
+| Gate-level energy of one KeyGen, SkyWater 130 nm | 74 to 90 µJ, 0.45 to 0.55 mW average at 3.39 MHz |
 
 The probing check simulates each masked circuit clock by clock and confirms that no single probed wire, even with glitches and the value it held one clock earlier, depends on a secret. TVLA (test vector leakage assessment) compares simulated power traces for a fixed input against traces for random inputs with a t-test. A silent fault is a flipped bit that changes the result without the chip noticing, which is what a fault attacker needs.
 
@@ -107,17 +107,22 @@ Clock cycles from `make sim-se LOWPOWER=1` with hiding on:
 
 KeyGen without its fault checks takes 242,129 clocks. The pairwise consistency test and the second computation of the secret polynomials and of G account for the rest.
 
-Energy comes from a gate-level simulation: Yosys maps the RTL to sky130_fd_sc_hd cells (typical corner, 25 °C, 1.8 V) with automatic clock gating, Verilator runs a whole masked KeyGen on that netlist and records every net's toggles, and OpenSTA turns the toggles into power. SRAM energy is the access count times an assumed energy per access. Clock tree, wires, pads and analog blocks are not included.
+Energy comes from a gate-level simulation: Yosys maps the RTL to sky130_fd_sc_hd cells (typical corner, 25 °C, 1.8 V) with automatic clock gating, Verilator runs a whole masked KeyGen on that netlist and records every net's toggles, and OpenSTA turns the toggles into power. SRAM energy is the access count times an energy per access, which is not yet SPICE-characterized, so the table gives two values: one assumed (a fixed cost plus a cost per bit) and one from OpenRAM's analytical model of each RAM shape. Clock tree, wires, pads and analog blocks are not included.
 
-| KeyGen, gate level | |
+| KeyGen, gate level | SRAM assumed | SRAM from OpenRAM analytical model |
+|---|---|---|
+| Energy | 73.5 µJ | 89.9 µJ |
+| of which logic | 52.0 µJ | 52.0 µJ |
+| of which SRAM | 21.5 µJ (29 %) | 37.9 µJ (42 %) |
+| Average power over the 162 ms run at 3.39 MHz | 0.45 mW | 0.55 mW |
+| Energy per clock | 133.8 pJ | 163.7 pJ |
+
+| Netlist | |
 |---|---|
-| Energy | 73.5 µJ: logic 52.0 µJ, SRAM 21.5 µJ |
-| Average power over the 162 ms run at 3.39 MHz | 0.45 mW |
-| Energy per clock | 133.8 pJ |
 | Flip-flops | 7,775, of which 7,526 (97 %) sit behind 285 clock gates |
 | Setup slack at 20 ns (50 MHz) | 7.2 ns |
 
-Giving the last ~900 flip-flops that were clocked every cycle a proper enable took KeyGen from 92.5 to 73.5 µJ. The SRAMs are now 29 % of the energy, 19.2 µJ of it in the Keccak-state and seed RAMs. To replace the assumed SRAM energy with SPICE numbers, `make se-sram-char` characterizes PQSE's RAM shapes with OpenRAM (see `hw/se/README.md`, section 4).
+Giving the last ~900 flip-flops that were clocked every cycle a proper enable took KeyGen from 92.5 to 73.5 µJ (with the assumed SRAM energy). The two SRAM estimates agree for the Keccak-state and seed RAMs (19.2 and 17.6 µJ) and disagree for the 1024 x 25 polynomial RAM: 2.2 µJ assumed against 19.8 µJ analytical, 162 pJ per access, because its long bitlines cost far more than the per-bit assumption. That RAM is the main uncertainty; a SPICE run of its shape (`make se-sram-char SRAM_SHAPES=a10_d25`, see `hw/se/README.md`, section 4) settles it. SRAM leakage is negligible at 25 °C (under 0.5 µJ per KeyGen by estimate).
 
 ## Install the tools
 

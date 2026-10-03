@@ -580,7 +580,8 @@ se-power-vcd-report:
 # OR_LAYOUT=1 OR_PEX=1 the extracted layout (Magic; slowest, most accurate,
 # also gives the area). Logs: build/sepower/openram/openram_<shape>.log.
 OPENRAM_DIR ?= $(HOME)/OpenRAM
-# the Keccak-state / seed RAM first: 19.2 of the 21.5 uJ of a KeyGen
+# per KeyGen, assumed / analytical: Keccak-state + seed RAM (a6_d65) 19.2 / 17.6 uJ,
+# polynomial RAM (a10_d25) 2.2 / 19.8 uJ (the main uncertainty), I/O (a9_d32) ~0.1 / 0.5 uJ
 SRAM_SHAPES ?= a6_d65 a9_d32 a10_d25
 OR_LAYOUT   ?= 0
 OR_PEX      ?= 0

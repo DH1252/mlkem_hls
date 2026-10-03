@@ -81,13 +81,16 @@ The protection costs time in several places. NTT, PWM and INTT run once per shar
 | KeyGen (`LOWPOWER`, `CG_SRST`, with fault checks) | |
 |---|---|
 | Clocks in the gate-level run | 549,032 (162 ms at 3.39 MHz) |
-| Energy | 73.5 µJ: logic 52.0 µJ, SRAM 21.5 µJ (Keccak-state and seed RAMs 19.2 µJ) |
-| Energy per clock | 133.8 pJ (203 pJ before the low-power RTL) |
-| Average power at 3.39 MHz | 0.45 mW |
+| Energy, SRAM assumed (default `pqse_energy.py` values) | 73.5 µJ: logic 52.0 µJ, SRAM 21.5 µJ (Keccak-state and seed RAMs 19.2 µJ, polynomial RAMs 2.2 µJ) |
+| Energy, SRAM from OpenRAM's analytical model (`OR_ANALYTICAL=1`) | 89.9 µJ: logic 52.0 µJ, SRAM 37.9 µJ (polynomial RAMs 19.8 µJ, Keccak-state and seed RAMs 17.6 µJ, I/O buffer 0.5 µJ) |
+| Energy per clock | 133.8 to 163.7 pJ (203 pJ before the low-power RTL) |
+| Average power at 3.39 MHz | 0.45 to 0.55 mW |
 | Flip-flops | 7,775, of which 7,526 behind 285 clock gates |
 | Setup slack at 20 ns | 7.2 ns |
 
 Before the last clock-gating changes, 1,152 flip-flops were clocked every cycle, about 40 % of the logic energy, and KeyGen took 92.5 µJ. Plain enables on the θ column parities, the χ operands, the CSR read register, the cycle counter and the SampleNTT counters left 249 such flip-flops (small state machines and synchronizers). `build/sepower/ffs_<tag>.txt` lists the remaining ones by RTL register.
+
+The analytical model gives 161.8 pJ per access for the 1024 x 25 polynomial RAM (assumed: 14.5 pJ per read, 22 pJ per write), 37.6 pJ for 64 x 65 (assumed: 34.5 and 54) and 103.5 pJ for 512 x 32. It uses one value for read and write and reports no leakage. An estimate of the leakage it leaves out: about 100,600 bitcells at a few pA each, under 2 µW, under 0.5 µJ per KeyGen at 3.39 MHz and 25 °C. The polynomial RAM is the figure to confirm with SPICE (`SRAM_SHAPES=a10_d25`); if it holds, splitting that RAM into smaller macros with shorter bitlines is the obvious saving.
 
 **Low-power techniques.** None of these changes the function or the masking schedule.
 

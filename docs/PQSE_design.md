@@ -47,7 +47,7 @@ It has a lifecycle. In the TEST state it is open for manufacturing tests; in PER
 - It reproduces NIST's official test vectors for ML-KEM.
 - A standard leakage test (TVLA) on simulated power traces finds no first-order leakage, and every masked circuit passes a mathematical check that includes glitches.
 - In 400 simulated fault injections, each flipping one random bit somewhere in the chip at a random moment, the chip never gave a wrong answer without noticing. Some faults ended in the designed safe outcome: a random-looking key instead of an error.
-- One key generation takes about 0.16 s at the 3.39 MHz clock a contactless reader provides, and about 73.5 µJ of energy, an average of 0.45 mW. A reader's field can supply that.
+- One key generation takes about 0.16 s at the 3.39 MHz clock a contactless reader provides, and 74 to 90 µJ of energy, an average of 0.45 to 0.55 mW; the range comes from the memories, whose energy is still an estimate. A reader's field can supply that.
 
 ---
 
@@ -195,17 +195,20 @@ The full maps are in `hw/se/README.md`, section 10.
 | UNWRAP (key restored from the blob) | 271,738 | 80 ms | 5.4 ms |
 | SEAL or OPEN, 128 bytes | 22,550 | 6.7 ms | 0.45 ms |
 
-**Gate level, SkyWater 130 nm.** Cells from sky130_fd_sc_hd at typical corner, 25 °C, 1.8 V. Yosys maps the design with automatic clock gating; Verilator simulates a whole KeyGen on the netlist; OpenSTA computes power from the recorded switching activity (a SAIF file). SRAMs are macros whose energy is the access count times an assumed energy per access. Clock tree and wires are not included.
+**Gate level, SkyWater 130 nm.** Cells from sky130_fd_sc_hd at typical corner, 25 °C, 1.8 V. Yosys maps the design with automatic clock gating; Verilator simulates a whole KeyGen on the netlist; OpenSTA computes power from the recorded switching activity (a SAIF file). SRAMs are macros whose energy is the access count times an energy per access, either assumed or from OpenRAM's analytical model of each shape (no SPICE characterization yet). Clock tree and wires are not included.
 
-| KeyGen | |
+| KeyGen | SRAM assumed | SRAM analytical |
+|---|---|---|
+| Energy | 73.5 µJ (logic 52.0, SRAM 21.5) | 89.9 µJ (logic 52.0, SRAM 37.9) |
+| Energy per clock | 133.8 pJ | 163.7 pJ |
+| Average power at 3.39 MHz | 0.45 mW | 0.55 mW |
+
+| Netlist | |
 |---|---|
-| Energy | 73.5 µJ (logic 52.0, SRAM 21.5) |
-| Energy per clock | 133.8 pJ |
-| Average power at 3.39 MHz | 0.45 mW |
 | Flip-flops | 7,775, of which 7,526 behind 285 integrated clock gates |
 | Worst setup slack at 20 ns | 7.2 ns (about 78 MHz for the logic alone, ideal clock) |
 
-Adding plain enables to the last ~900 flip-flops that were clocked every cycle (θ column parities, χ operands, the host's register-read latch, counters) took KeyGen from 92.5 to 73.5 µJ. The SRAMs are now 29 % of the energy, and their energy per access is still an assumption; `make se-sram-char` replaces it with OpenRAM SPICE characterization.
+Adding plain enables to the last ~900 flip-flops that were clocked every cycle (θ column parities, χ operands, the host's register-read latch, counters) took KeyGen from 92.5 to 73.5 µJ with the assumed SRAM energy. The SRAMs are 29 to 42 % of the energy. The two estimates agree for the Keccak-state and seed RAMs and differ for the 1024 x 25 polynomial RAM (2.2 µJ assumed, 19.8 µJ analytical, 162 pJ per access) because its long bitlines cost more than the per-bit assumption. A SPICE characterization of that shape (`make se-sram-char`) will settle it; if it holds, smaller polynomial-RAM macros with shorter bitlines are the next saving. SRAM leakage is under 0.5 µJ per KeyGen at 25 °C by estimate.
 
 **FPGA.** An earlier v4 build, before the fault hardening, on the Gowin GW2AR-18 (Tang Nano 20K) with Gowin EDA place and route: 15,881 logic units (77 %), 8,779 registers (56 %, including 1,920 PUF latches), 15 of 46 block RAMs, 14.75 of 24 DSP blocks. It fits, at 94 % of the logic cells.
 

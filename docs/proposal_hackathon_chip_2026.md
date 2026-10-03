@@ -38,7 +38,7 @@ Inti PQSE dipetakan ke fabric FPGA Cyclone V (5CSEBA6U23I7) sebagai slave Avalon
 **Kebaruan & Keunggulan:**
 - **Seluruh operasi terproteksi.** Akselerator ML-KEM di FPGA umumnya hanya mengejar kecepatan dan tidak terproteksi. PQSE melindungi KeyGen, Encaps dan Decaps dengan masking, hiding dan deteksi fault, dan setiap rangkaian masking diperiksa secara exhaustif terhadap semua kemungkinan probe orde-1.
 - **Hasil keamanan terukur.** TVLA (uji kebocoran statistik pada jejak daya simulasi, dua run independen) tidak menemukan kebocoran orde-1 yang terkonfirmasi. Dalam 400 run injeksi fault acak, **tidak ada satu pun hasil salah yang lolos tanpa terdeteksi**, dan tidak ada yang macet.
-- **Hemat energi untuk kartu nirkontak.** Sekitar **73,5 µJ per KeyGen**, rata-rata **0,45 mW** pada clock 3,39 MHz (analisis gate-level SkyWater 130 nm).
+- **Hemat energi untuk kartu nirkontak.** **74–90 µJ per KeyGen**, rata-rata **0,45–0,55 mW** pada clock 3,39 MHz (analisis gate-level SkyWater 130 nm; rentang ini berasal dari energi SRAM yang belum dikarakterisasi dengan SPICE).
 - **Kunci tidak pernah keluar dari chip.** Kunci bersama disimpan dalam bentuk termasking sebagai kunci sesi, dan kunci jangka panjang dibungkus dengan kunci turunan PUF.
 - **Waktu eksekusi konstan.** Tidak ada percabangan atau alamat memori yang bergantung pada rahasia, sehingga serangan timing dan cache yang mengancam perangkat lunak di mikrokontroler tidak berlaku.
 
@@ -152,7 +152,7 @@ Catatan estimasi:
 - **Pemeriksaan probing (`make se-probe`).** Setiap gadget disimulasikan per clock, dan untuk setiap kemungkinan probe orde-1 (termasuk glitch dan transisi) dihitung secara exhaustif apakah yang terlihat probe bergantung pada rahasia. Kontrol negatif, yaitu versi gadget yang diketahui bocor, harus terdeteksi bocor.
 - **TVLA.** Uji t Welch antara jejak daya input tetap dan input acak pada Decaps termasking, dua run independen: tidak ada kebocoran terkonfirmasi. Kontrol positif dengan masking dimatikan harus bocor.
 - **Kampanye fault (`make sim-se-fault`).** 200 bit-flip acak per perintah pada 38 target, setiap run dimulai dari chip yang baru dinyalakan. Decaps: 111 tidak berpengaruh, 74 terdeteksi, 15 implicit rejection, **0 lolos**, 0 macet. KeyGen: 127 tidak berpengaruh, 73 terdeteksi, **0 lolos**, 0 macet.
-- **Timing, latensi dan daya (gate-level).** Jumlah siklus per perintah tercatat otomatis. Analisis SkyWater 130 nm memberi slack setup 7,2 ns pada periode 20 ns dan energi KeyGen 73,5 µJ, turun dari 92,5 µJ setelah optimasi clock gating.
+- **Timing, latensi dan daya (gate-level).** Jumlah siklus per perintah tercatat otomatis. Analisis SkyWater 130 nm memberi slack setup 7,2 ns pada periode 20 ns dan energi KeyGen 74–90 µJ. Logika menyumbang 52,0 µJ; SRAM 21,5 µJ dengan energi per akses yang diasumsikan, atau 37,9 µJ menurut model analitis OpenRAM. Optimasi clock gating menurunkan energi KeyGen dari 92,5 ke 73,5 µJ (dengan asumsi SRAM yang sama).
 
 **[Uji Hardware Board FPGA DE10-Nano]:**
 1. **Sintesis dan bitstream.** `quartus_sh -t build.tcl se` (top `de10_nano_pqse`); periksa laporan fitter (ALM, M10K, DSP) dan TimeQuest (slack setup positif pada 50 MHz).
@@ -172,7 +172,7 @@ Catatan estimasi:
 | Pemakaian resource | ≤ 30 % ALM, ≤ 10 % M10K, ≤ 15 % DSP | estimasi pada tabel 3.1 |
 | Kebocoran side-channel | \|t\| < 4,5 (TVLA, dua run) | tercapai di simulasi; board: rencana |
 | Ketahanan fault | 0 hasil salah tak terdeteksi, 0 macet | tercapai (400 run) |
-| Energi (ASIC, SkyWater 130 nm) | ≤ 100 µJ per KeyGen, ≤ 1 mW @ 3,39 MHz | 73,5 µJ, 0,45 mW |
+| Energi (ASIC, SkyWater 130 nm) | ≤ 100 µJ per KeyGen, ≤ 1 mW @ 3,39 MHz | 74–90 µJ, 0,45–0,55 mW |
 
 ---
 
