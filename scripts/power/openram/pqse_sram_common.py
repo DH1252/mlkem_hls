@@ -17,7 +17,12 @@
 #                    (Magic; slowest, most accurate)
 #   PQSE_OR_DRC      1 (with LAYOUT=1): run DRC / LVS (Magic, Netgen)
 #   PQSE_OR_SPICE    ngspice (default), xa, hspice, spectre
-#   PQSE_OR_THREADS  simulator threads (default 4)
+#   PQSE_OR_THREADS  ngspice threads per simulation (default 4)
+#   PQSE_OR_TABLE    1: OpenRAM's full 3 x 3 load / slew table (9 timing and
+#                    power simulations at the minimum period). Default 0: one
+#                    point, the nominal load (one flip-flop input) and slew -
+#                    the energy per access hardly depends on them, and this
+#                    cuts the run time several-fold
 #   PQSE_OR_NIX      1: let OpenRAM set up its tools with Nix (`nix develop`,
 #                    OpenRAM's default; needs nix). Default 0: the tools on PATH
 #                    (netlist-only characterization needs only ngspice; layout,
@@ -40,7 +45,10 @@ temperatures = [25]
 # read, write and deselected alike)
 analytical_delay = False
 spice_name = _os.environ.get("PQSE_OR_SPICE", "ngspice")
-num_threads = int(_os.environ.get("PQSE_OR_THREADS", "4"))
+num_sim_threads = int(_os.environ.get("PQSE_OR_THREADS", "4"))
+if _os.environ.get("PQSE_OR_TABLE", "0") != "1":
+    # (load fF, input slew ns): sky130 tech.py dff_in_cap and rise_time
+    use_specified_load_slew = [(6.89, 0.005)]
 
 _layout = _os.environ.get("PQSE_OR_LAYOUT", "0") == "1"
 netlist_only = not _layout

@@ -570,20 +570,23 @@ se-power-vcd-report:
 #   python3 -m pip install -r requirements.txt (into the Python OR_PYTHON names);
 #   make sky130-pdk; make sky130-install
 #   (and ngspice on PATH, or OR_NIX=1 to use OpenRAM's Nix environment)
-#   make se-sram-char OPENRAM_DIR=<OpenRAM checkout> [SRAM_SHAPES="a6_d65"]
+#   make -j3 se-sram-char OPENRAM_DIR=<OpenRAM checkout> [SRAM_SHAPES="a6_d65"]
 #        [OR_LAYOUT=1 [OR_PEX=1] [OR_DRC=1]] [OR_PORTS=1rw1r|1r1w] [OR_THREADS=4]
+#        [OR_TABLE=1: the full 3 x 3 load / slew table, several times slower]
 # OR_LAYOUT=0 (default) characterizes the schematic netlist (no wire
 # capacitance: energies somewhat low; minutes to hours per shape);
 # OR_LAYOUT=1 OR_PEX=1 the extracted layout (Magic; slowest, most accurate,
 # also gives the area). Logs: build/sepower/openram/openram_<shape>.log.
 OPENRAM_DIR ?= $(HOME)/OpenRAM
-SRAM_SHAPES ?= a10_d25 a6_d65 a9_d32
+# the Keccak-state / seed RAM first: 19.2 of the 21.5 uJ of a KeyGen
+SRAM_SHAPES ?= a6_d65 a9_d32 a10_d25
 OR_LAYOUT   ?= 0
 OR_PEX      ?= 0
 OR_DRC      ?= 0
 OR_PORTS    ?= 1rw1r
 OR_SPICE    ?= ngspice
 OR_THREADS  ?= 4
+OR_TABLE    ?= 0
 OR_NIX      ?= 0
 # the Python OpenRAM runs in: needs OpenRAM's requirements (numpy, scipy,
 # scikit-learn, ...). In an OSS CAD Suite shell python3 is the suite's own:
@@ -591,7 +594,15 @@ OR_NIX      ?= 0
 # or point OR_PYTHON at another interpreter, e.g. OR_PYTHON=/usr/bin/python3
 OR_PYTHON   ?= $(PYTHON)
 SRAM_CHAR_D := $(BUILD)/sepower/openram
-se-sram-char: | $(BUILD)
+# One target per shape, done once (a stamp): make -j3 se-sram-char runs the
+# shapes in parallel; a shape already characterized is not run again (delete
+# its stamp, $(SRAM_CHAR_D)/<shape>.ok, or make se-sram-char-clean to redo).
+# Shapes not characterized keep the assumed energy in the report.
+se-sram-char: $(foreach s,$(SRAM_SHAPES),$(SRAM_CHAR_D)/$(s).ok)
+	$(PYTHON) scripts/power/pqse_sram_char.py \
+	    $$(find $(SRAM_CHAR_D) -name 'pqse_sram_a*_d*_TT_1p8V_25C.lib' -not -path '*/tmp_*') \
+	    -o $(SRAM_CHAR_D)/sram_table.txt
+sram-char-check:
 	@test -f $(OPENRAM_DIR)/sram_compiler.py || { echo "OpenRAM not found at OPENRAM_DIR=$(OPENRAM_DIR):"; \
 	    echo "  git clone https://github.com/VLSIDA/OpenRAM; then make sky130-pdk sky130-install there"; exit 1; }
 	@$(OR_PYTHON) -c "import numpy, scipy, sklearn" 2>/dev/null || { \
@@ -600,21 +611,21 @@ se-sram-char: | $(BUILD)
 	    echo "or use another interpreter that has them: make se-sram-char OR_PYTHON=/usr/bin/python3 ..."; exit 1; }
 	@command -v $(OR_SPICE) >/dev/null || [ "$(OR_NIX)" = 1 ] || { \
 	    echo "$(OR_SPICE) not found on PATH (sudo apt install ngspice), or OR_NIX=1 for OpenRAM's Nix tools"; exit 1; }
-	mkdir -p $(SRAM_CHAR_D)
-	for s in $(SRAM_SHAPES); do \
-	    echo "OpenRAM: $$s (log: $(SRAM_CHAR_D)/openram_$$s.log)"; \
-	    PQSE_OR_OUT=$(abspath $(SRAM_CHAR_D)) PQSE_OR_LAYOUT=$(OR_LAYOUT) PQSE_OR_PEX=$(OR_PEX) \
+$(SRAM_CHAR_D)/%.ok: scripts/power/openram/pqse_sram_%.py | sram-char-check
+	@mkdir -p $(SRAM_CHAR_D)
+	@echo "OpenRAM: $* (log: $(SRAM_CHAR_D)/openram_$*.log)"
+	@PQSE_OR_OUT=$(abspath $(SRAM_CHAR_D)) PQSE_OR_LAYOUT=$(OR_LAYOUT) PQSE_OR_PEX=$(OR_PEX) \
 	    PQSE_OR_DRC=$(OR_DRC) PQSE_OR_PORTS=$(OR_PORTS) PQSE_OR_SPICE=$(OR_SPICE) \
-	    PQSE_OR_THREADS=$(OR_THREADS) PQSE_OR_NIX=$(OR_NIX) \
+	    PQSE_OR_THREADS=$(OR_THREADS) PQSE_OR_TABLE=$(OR_TABLE) PQSE_OR_NIX=$(OR_NIX) \
 	    OPENRAM_HOME=$(OPENRAM_DIR)/compiler OPENRAM_TECH=$(OPENRAM_DIR)/technology \
-	    PDK_ROOT=$${PDK_ROOT:-$(OPENRAM_DIR)} OPENRAM_TMP=$(abspath $(SRAM_CHAR_D))/tmp_$$s \
-	    $(OR_PYTHON) -u $(OPENRAM_DIR)/sram_compiler.py -v -c $(abspath scripts/power/openram/pqse_sram_$$s.py) \
-	        > $(SRAM_CHAR_D)/openram_$$s.log 2>&1 \
-	        || { tail -30 $(SRAM_CHAR_D)/openram_$$s.log; exit 1; }; \
-	done
-	$(PYTHON) scripts/power/pqse_sram_char.py \
-	    $$(find $(SRAM_CHAR_D) -name 'pqse_sram_a*_d*_TT_1p8V_25C.lib' -not -path '*/tmp_*') \
-	    -o $(SRAM_CHAR_D)/sram_table.txt
+	    PDK_ROOT=$${PDK_ROOT:-$(OPENRAM_DIR)} OPENRAM_TMP=$(abspath $(SRAM_CHAR_D))/tmp_$* \
+	    $(OR_PYTHON) -u $(OPENRAM_DIR)/sram_compiler.py -v -c $(abspath $<) \
+	        > $(SRAM_CHAR_D)/openram_$*.log 2>&1 \
+	        || { tail -30 $(SRAM_CHAR_D)/openram_$*.log; exit 1; }
+	@touch $@
+se-sram-char-clean:
+	rm -rf $(SRAM_CHAR_D)
+.PHONY: se-sram-char sram-char-check se-sram-char-clean
 
 # Sampled energy per command, the fast way with VCD: GL_WINDOWS windows of
 # GL_WLEN clocks, one in the middle of each 1/GL_WINDOWS of the command
