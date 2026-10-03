@@ -29,6 +29,9 @@
 #   make se-gowin [PUF=0|bfly] [MASKED=0] [FLAT=0]  fit on the Tang Nano 20K (GW2AR-18)
 #   make se-gowin-eda [PUF=0|bfly] [MASKED=0]  the same with GowinSynthesis + Gowin P&R (gw_sh)
 #   make se-gowin-bisect           GowinSynthesis errors per module (diagnosis)
+#   make sim-se-v1.5 / se-area-v1.5 / se-gowin-v1.5   the same for the secure
+#                  element v1.5 (hw/se_v1_5: ML-KEM-512/768/1024 per command,
+#                  Karatsuba PWM, multiplier-free mod-q reduction)
 #   make ip        package the Platform Designer component (quartus/ip)
 #   make sw-emu    build + run the ARM program against a software model
 #   make sw-arm    cross-compile the ARM program for the DE10-Nano
@@ -70,7 +73,7 @@ BAMBU_SIM   := --generate-tb=../../hls/tb_accel.c --simulate --simulator=VERILAT
 VERILATOR_ROOT_DIR := $(shell $(VERILATOR) --getenv VERILATOR_ROOT 2>/dev/null)
 HLS_ENV := CPATH="$(VERILATOR_ROOT_DIR)/include/vltstd$${CPATH:+:$$CPATH}"
 
-.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla sim-se-fault se-area se-power se-power-vcd se-power-gl-build se-power-sample se-power-vcd-report se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
+.PHONY: all help check-env test hls hls-nosim sim-rtl sim-manual sim-v2 sim-v3 sim-se sim-se-tvla sim-se-fault se-area sim-se-v1.5 se-area-v1.5 se-gowin-v1.5 se-power se-power-vcd se-power-gl-build se-power-sample se-power-vcd-report se-gowin se-gowin-eda se-gowin-bisect se-probe ip sw-emu sw-arm vectors clean
 
 all: test
 
@@ -279,14 +282,18 @@ sim-se-fault: | $(BUILD)
 # Gate-level area estimate with Yosys (generic cells; with SKY130_LIB=<path to
 # sky130_fd_sc_hd__tt_025C_1v80.lib> it maps to the SkyWater 130 nm library).
 # MASKED=0 gives the unprotected reference build for comparison.
+# SE_DIR picks the source directory (hw/se, or hw/se_v1_5 via se-area-v1.5).
 MASKED ?= 1
+SE_DIR ?= hw/se
+SE_AREA_SRC = $(wildcard $(SE_DIR)/*.v)
+SE_TAG = $(if $(filter hw/se,$(SE_DIR)),,_$(notdir $(SE_DIR)))
 se-area: | $(BUILD)
-	mkdir -p $(BUILD)/searea
-	yosys -q -l $(BUILD)/searea/yosys_m$(MASKED).log -p "read_verilog -Ihw/se $(SE_SRC); \
+	mkdir -p $(BUILD)/searea$(SE_TAG)
+	yosys -q -l $(BUILD)/searea$(SE_TAG)/yosys_m$(MASKED).log -p "read_verilog -I$(SE_DIR) $(SE_AREA_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; synth -top pqse_top -flatten; \
 	    $(if $(SKY130_LIB),dfflibmap -liberty $(SKY130_LIB); abc -liberty $(SKY130_LIB);) stat \
 	    $(if $(SKY130_LIB),-liberty $(SKY130_LIB))"
-	@grep -A40 "Printing statistics" $(BUILD)/searea/yosys_m$(MASKED).log | tail -40
+	@grep -A40 "Printing statistics" $(BUILD)/searea$(SE_TAG)/yosys_m$(MASKED).log | tail -40
 
 # Fit on the Tang Nano 20K (Gowin GW2AR-18): Yosys synth_gowin, then the LUT /
 # flip-flop / BSRAM / multiplier counts against the device. PUF=1 (default)
@@ -317,12 +324,12 @@ DEVICE ?= 20k
 GOWIN_D ?= 20000
 GOWIN_MAXLUT ?= 8
 GOWIN_OPTS ?=
-GW := $(BUILD)/segowin/m$(MASKED)_p$(PUF)$(if $(filter 0,$(FLAT)),_hier)
+GW = $(BUILD)/segowin$(SE_TAG)/m$(MASKED)_p$(PUF)$(if $(filter 0,$(FLAT)),_hier)
 GW_SYNTH = synth_gowin -top pqse_top $(if $(filter 0,$(FLAT)),-noflatten) $(GOWIN_OPTS)
 se-gowin: | $(BUILD)
-	mkdir -p $(BUILD)/segowin
-	yosys -q -l $(GW).log -p "read_verilog -Ihw/se \
-	    -DPQSE_LUTRAM_1R $(if $(filter 1,$(PUF)),-DPQSE_PUF_LATCH)$(if $(filter bfly,$(PUF)),-DPQSE_PUF_BFLY) $(SE_SRC); \
+	mkdir -p $(BUILD)/segowin$(SE_TAG)
+	yosys -q -l $(GW).log -p "read_verilog -I$(SE_DIR) \
+	    -DPQSE_LUTRAM_1R $(if $(filter 1,$(PUF)),-DPQSE_PUF_LATCH)$(if $(filter bfly,$(PUF)),-DPQSE_PUF_BFLY) $(SE_AREA_SRC); \
 	    chparam -set MASKED $(MASKED) pqse_top; \
 	    $(GW_SYNTH) -run :map_luts; \
 	    sort; read_verilog -icells -lib -specify +/abc9_model.v; \
@@ -352,6 +359,33 @@ SE_MODULES := pqse_mulred pqse_modq24 pqse_ram_1r1w pqse_spi pqse_parse pqse_cbd
               pqse_ro_src pqse_trng pqse_prng pqse_perm pqse_keccak pqse_sponge pqse_poly \
               pqse_io pqse_masked pqse_mcomp pqse_puf_raw pqse_puf pqse_ucode pqse_host \
               pqse_core pqse_sys pqse_top
+
+# ---- the secure element v1.5 (hw/se_v1_5) ----------------------------------------------------
+# ML-KEM-512 / 768 / 1024 chosen per command (CONFIG[2:1]), Karatsuba PWM,
+# multiplier-free reduction mod q; see hw/se_v1_5/README.md. The testbench runs
+# the ML-KEM-768 vectors (hw/sim/tb_pqse_v15.sv: tb_pqse.sv on the v1.5 buffer
+# map and microcode addresses).
+SE15_DIR := hw/se_v1_5
+SE15_SRC := $(wildcard $(SE15_DIR)/*.v)
+sim-se-v1.5: | $(BUILD)
+	$(PYTHON) scripts/pqse_model.py
+	$(PYTHON) scripts/pqse_probe_verify.py
+	rm -rf $(BUILD)/sesim15 && mkdir -p $(BUILD)/sesim15
+	cp -r hw/sim/vectors $(BUILD)/sesim15/
+	cd $(BUILD)/sesim15 && $(VERILATOR) --binary --timing -j 2 -Wno-fatal -Wno-lint -Wno-style \
+	    --top-module tb_pqse_v15 -Mdir obj -o ../vtb15 -I../../$(SE15_DIR) \
+	    +define+PQSE_SIM_INIT $(if $(TRACE),+define+PQSE_TRACE) $(if $(filter 1,$(LOWPOWER)),+define+PQSE_LOWPOWER) \
+	    ../../hw/sim/tb_pqse_v15.sv $(addprefix ../../,$(SE15_SRC)) > build.log 2>&1 \
+	    || { tail -30 build.log; exit 1; }
+	cd $(BUILD)/sesim15 && ./vtb15 | tee sim.log
+	$(PYTHON) scripts/pqse_sm_check.py $(BUILD)/sesim15/sm_vec.txt
+	$(PYTHON) scripts/pqse_puf_stats.py --puf $(BUILD)/sesim15/puf_raw.txt \
+	    --trng $(BUILD)/sesim15/trng_raw.txt --out $(BUILD)/sesim15
+	@grep -q "TEST PASSED" $(BUILD)/sesim15/sim.log
+se-area-v1.5:
+	$(MAKE) se-area SE_DIR=$(SE15_DIR)
+se-gowin-v1.5:
+	$(MAKE) se-gowin SE_DIR=$(SE15_DIR)
 se-gowin-bisect:
 	@mkdir -p $(BUILD)/gowin/bisect
 	@for m in $(SE_MODULES); do \
