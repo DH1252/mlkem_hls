@@ -609,6 +609,10 @@ OR_TMAX_PS   ?= 50
 OR_KLU       ?= 1
 OR_MINPERIOD ?= 0
 OR_FULL_LEAK ?= 0
+# OpenRAM's temporary files (netlists, stimuli, simulator output). Under WSL a
+# checkout on /mnt/<drive> is on the Windows file system, which is slow for
+# them: they then go to ~/.cache/pqse_openram (the results stay in build/).
+OR_TMP ?= $(if $(filter /mnt/%,$(CURDIR)),$(HOME)/.cache/pqse_openram,$(abspath $(SRAM_CHAR_D)))
 # Memory: with OR_FULL_LEAK=0 only the trimmed netlist is simulated, so make -j3
 # can run all three at once. With OR_FULL_LEAK=1, one at a time unless the machine
 # has a few GB per shape. Keep OR_VERBOSE=0: OpenRAM's -v writes .plot V(*) into
@@ -659,14 +663,14 @@ $(SRAM_CHAR_D)/%.ok: scripts/power/openram/pqse_sram_%.py scripts/power/openram/
 	    PQSE_OR_KLU=$(OR_KLU) PQSE_OR_MINPERIOD=$(OR_MINPERIOD) PQSE_OR_FULL_LEAK=$(OR_FULL_LEAK) \
 	    PQSE_OR_RUNDIR=$(abspath $(SRAM_CHAR_D))/run_$* \
 	    OPENRAM_HOME=$(abspath $(OPENRAM_DIR))/compiler OPENRAM_TECH=$(abspath $(OPENRAM_DIR))/technology \
-	    PDK_ROOT=$${PDK_ROOT:-$(abspath $(OPENRAM_DIR))} OPENRAM_TMP=$(abspath $(SRAM_CHAR_D))/tmp_$* \
+	    PDK_ROOT=$${PDK_ROOT:-$(abspath $(OPENRAM_DIR))} OPENRAM_TMP=$(OR_TMP)/tmp_$* \
 	    $(OR_PYTHON) -u $(abspath scripts/power/openram/pqse_openram_run.py) \
 	        $(if $(filter 1,$(OR_VERBOSE)),-v) $(if $(filter 1,$(OR_ANALYTICAL)),,-c) $(abspath $<) \
 	        > $(SRAM_CHAR_D)/openram_$*.log 2>&1 \
 	        || { tail -30 $(SRAM_CHAR_D)/openram_$*.log; exit 1; }
 	@touch $@
 se-sram-char-clean:
-	rm -rf $(SRAM_CHAR_D)
+	rm -rf $(SRAM_CHAR_D) $(OR_TMP)/tmp_*
 .PHONY: se-sram-char sram-char-check se-sram-char-clean
 
 # Sampled energy per command, the fast way with VCD: GL_WINDOWS windows of

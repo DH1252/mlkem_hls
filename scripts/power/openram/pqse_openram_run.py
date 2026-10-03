@@ -39,6 +39,12 @@ and the ngspice runs themselves are made faster:
      ("unknown subckt: ... sky130_fd_pr__special_nfet_01v8"). With
      PQSE_OR_NIX=1 the run stays in the OpenRAM checkout instead (nix
      develop needs its flake.nix there).
+  7. Xyce raw file. OpenRAM starts Xyce with -r timing.raw: every node at
+     every time step written to disk, never read (OpenRAM takes Xyce's
+     measurements from its stdout). Under WSL with the files on /mnt/<drive>
+     that write is most of the run time and Xyce sits idle. Dropped
+     (PQSE_OR_XYCE_RAW=1 keeps it). The step ceiling (3) applies to Xyce too;
+     KLU (4) is OpenRAM's own setting for Xyce.
   6. fail fast. A simulation that fails is retried by OpenRAM at twice the
      period, up to 8 times; when ngspice itself stopped with an error (not a
      timing failure) the run ends at once with ngspice's message.
@@ -50,6 +56,8 @@ runs unchanged.
 import datetime
 import importlib
 import os
+import re
+import subprocess
 import sys
 
 
@@ -161,9 +169,26 @@ def patch(OPTS, debug):
 
     delay.run_delay_simulation = run_delay_simulation_checked
 
+    xyce = OPTS.spice_name in ("Xyce", "xyce")
+    if xyce and env("PQSE_OR_XYCE_RAW", "0") != "1":
+        class _NoRaw:
+            """subprocess for stimuli.run_sim: Xyce without -r <temp>timing.raw"""
+            def run(self, cmd, *a, **k):
+                if isinstance(cmd, str):
+                    cmd = re.sub(r"\s-r\s+\S*timing\.raw", "", cmd)
+                return subprocess.run(cmd, *a, **k)
+
+            def __getattr__(self, name):
+                return getattr(subprocess, name)
+
+        smod.subprocess = _NoRaw()
+        notes.append("Xyce without the raw file")
+
     tmax = float(env("PQSE_OR_TMAX_PS", "50"))
-    klu = env("PQSE_OR_KLU", "1") == "1"
-    if OPTS.spice_name == "ngspice" and (tmax != 10 or klu):
+    # KLU: ngspice only (OpenRAM sets LINSOL type=klu for Xyce itself; its
+    # TIMEINT line also contains method=gear and must not get KLU)
+    klu = env("PQSE_OR_KLU", "1") == "1" and OPTS.spice_name == "ngspice"
+    if (OPTS.spice_name == "ngspice" or xyce) and (tmax != 10 or klu):
         write_control = stimuli.write_control
 
         def write_control_fast(self, end_time, runlvl=4):
@@ -210,7 +235,7 @@ def main():
     if not OPTS.analytical_delay:
         where = run_dir(root)
         notes = patch(OPTS, debug)
-        debug.print_raw("PQSE: ngspice working directory: {}".format(where))
+        debug.print_raw("PQSE: simulator working directory: {}".format(where))
         debug.print_raw("PQSE: {}".format("; ".join(notes) if notes else "OpenRAM's characterization"))
     debug.print_raw("Words per row: {}".format(OPTS.words_per_row))
 
