@@ -52,7 +52,9 @@
 //      flipped sequencer state bit (shadow) and a hung command (state and
 //      shadow both forced idle: the host watchdog), a PRNG word taken stale
 //      (masks reused) and a dk corrupted after KeyGen computed ek (2 bits,
-//      parity-blind: the pairwise consistency test) - each aborts with R_FAULT
+//      parity-blind: the pairwise consistency test), a parity-blind fault in
+//      the Keccak state during G(d || 3) (the recompute check of G) - each
+//      aborts with R_FAULT
 // Every KeyGen also runs the pairwise consistency test (sections 2, 8, 16).
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -76,6 +78,9 @@ module tb_pqse;
   // KeyGen pairwise consistency test (KEYGEN at 16, PCT at 608)
   localparam logic [9:0] PC_PCT     = 10'd608,   // PCT start: ek computed, s^ final
                          PC_PCT_SEQ = 10'd698;   // the share-wise compare of K and K'
+  // KeyGen recompute checks (720): G(d || 3) at 80, its check (rho share-wise vs 0) at 778
+  localparam logic [9:0] PC_KG_G    = 10'd80,
+                         PC_KG_GCHK = 10'd778;
 `ifdef PQSE_WD_LOG2
   localparam int WD_LOG2 = `PQSE_WD_LOG2;        // host command watchdog (pqse_host.v)
 `else
@@ -809,6 +814,24 @@ module tb_pqse;
     rd(STATUS, st);
     report("fault: dk corrupted after ek was computed -> pairwise consistency test, R_FAULT, key not valid",
            bad + int'(res != R_FAULT) + int'(st[18:17] != 2'd2) + int'(st[2] != 1'b0));
+    // chip D: (g) G(d || 3) computed wrong, consistently: one Keccak state bit flipped
+    // together with its parity bit (the RAM parity cannot see it) during the rho/pi
+    // pass of round 0 (the lane is read at column 3). The key pair from the wrong
+    // rho, sigma would be consistent (the pairwise test would pass it); the second
+    // computation of G disagrees
+    new_chip();
+    start(KEYGEN, 0);
+    wait (dut.u_sys.u_core.pc == PC_KG_G);
+    wait (dut.u_sys.u_core.u_sponge.u_keccak.ks == 3'd3 && dut.u_sys.u_core.u_sponge.u_keccak.cx == 3'd0);
+    @(negedge clk);
+    dut.u_sys.u_core.u_sponge.u_keccak.u_s0.g_def.mem[23] =
+      dut.u_sys.u_core.u_sponge.u_keccak.u_s0.g_def.mem[23] ^ {1'b1, 64'd32};
+    wait (dut.u_sys.u_core.done);
+    bad = int'(dut.u_sys.u_core.pc != PC_KG_GCHK);    // aborted by the check of G
+    finish(res, cyc);
+    rd(STATUS, st);
+    report("fault: G(d || 3) wrong (parity-blind Keccak fault) -> recompute check, R_FAULT, key not valid",
+           bad + int'(res != R_FAULT) + int'(st[18:17] != 2'd1) + int'(st[2] != 1'b0));
 
     // 15 SPI + tamper (second instance) ----------------------------------------------------------
     // consecutive reads of different registers and a write/read of both CONFIG

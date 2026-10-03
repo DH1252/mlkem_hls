@@ -23,13 +23,13 @@
 // CBD instruction, which then runs its words in that order (the NTT / INTT
 // draw a fresh order for every butterfly layer in the background).
 //
-//   0..7     failure exits
+//   0..8     failure exits (8: a KeyGen recompute check failed, result FAULT)
 //   16       KEYGEN / KGWRAP: seeds from the TRNG (or injected in TEST); KGWRAP
 //            first reconstructs the PUF key and derives the KEK (48)
 //   32       UNWRAP: PUF -> KEK (48), tag check (masked), decrypt d, z (masked)
 //   48       PUF key + check value (+ majority retries) -> KEK, shared by
 //            KGWRAP and UNWRAP (returns on the WRAP flag)
-//   80       KeyGen core (masked)
+//   80       KeyGen core (masked); s and e at 720
 //   144      wrap (KGWRAP only): blob = nonce | Enc_KEK(d || z) | tag
 //   156      KeyGen end: wipe temporaries
 //   192      ENCAPS (masked)
@@ -50,6 +50,10 @@
 //            compared share-wise (IO_SEQ): a mismatch aborts with FAULT before
 //            the key is marked valid (FIPS 140-3 pairwise consistency test, and
 //            a check against a fault that corrupted the key pair)
+//   720      KeyGen s, e: G(d || 3) and the six PRF calls each computed twice,
+//            the second run XORed into the first output, which must be 0
+//            (IO_SEQ against a zero entry, FAULT otherwise); rho in the buffer
+//            compared with G's (any key derivation: KEYGEN, KGWRAP, UNWRAP)
 //
 // PUF key reconstruction (48): the helper data's last lane holds the 64-bit
 // check value H(k || "C") (first 8 bytes of SHA3-256, written by ENROLL). The
@@ -93,11 +97,13 @@ module pqse_ucode (
 
   // ---- labels --------------------------------------------------------------------------
   localparam [9:0] X_BADIN = 10'd0, X_NOKEY = 10'd1, X_BADBLOB = 10'd2, X_DENIED = 10'd3,
-                   X_BADTAG = 10'd4, X_NOSK = 10'd5, X_REPLAY = 10'd6, X_PUF = 10'd7;
+                   X_BADTAG = 10'd4, X_NOSK = 10'd5, X_REPLAY = 10'd6, X_PUF = 10'd7,
+                   X_KGF = 10'd8;
   localparam [9:0] L_KGSEED = 10'd18,  L_KGINJ = 10'd24,  L_UWK = 10'd34, L_UWFAIL = 10'd44,
                    L_PREC   = 10'd48,  L_PROK  = 10'd62,  L_PFAIL = 10'd68,
                    L_KG     = 10'd80,  L_WRAP  = 10'd144, L_KGEND = 10'd156,
-                   L_KGV    = 10'd141, L_PCT   = 10'd608;
+                   L_KGV    = 10'd141, L_PCT   = 10'd608,
+                   L_KGA    = 10'd106, L_KGSE  = 10'd720;
 
   // ---- instruction builders --------------------------------------------------------
   function [95:0] u_end(input [7:0] r);
@@ -162,10 +168,21 @@ module pqse_ucode (
     h_prf = u_hash(RATE_136, 1'b1, 1'b1, SRC_SEED, sa(e), 8'd4, SRC_NONE, 9'd0, 8'd0,
                    2'd1, {8'd0, n}, SNK_SEED, E_CBD, E_CBD + 4'd1, 8'd16, 4'd0, 4'd0, 1'b0);
   endfunction
+  // the same PRF again, XORed into E_CBD..E_CBD+3 (SXOR): all four entries are 0
+  // exactly when both computations agree (share-wise: no share meets the other)
+  function [95:0] h_prfx(input [3:0] e, input [7:0] n);
+    h_prfx = u_hash(RATE_136, 1'b1, 1'b1, SRC_SEED, sa(e), 8'd4, SRC_NONE, 9'd0, 8'd0,
+                    2'd1, {8'd0, n}, SNK_SXOR, E_CBD, E_CBD + 4'd1, 8'd16, 4'd0, 4'd0, 1'b0);
+  endfunction
   // masked SamplePolyCBD_2 of the PRF output in E_CBD -> slots os (share 0), os2
   // (share 1), random word order; acc: add to the slots
   function [95:0] cbd(input [3:0] os, input [3:0] os2, input acc);
     cbd = u_mask(M_CBD, 4'd0, os, os2, 1'b0, 9'd0, E_CBD, 4'd0, acc);
+  endfunction
+  // (rho, sigma) = G(d || 3) again, XORed into E_RHO, E_R: both 0 if it agrees
+  function [95:0] h_gx(input dummy);
+    h_gx = u_hash(RATE_72, 1'b0, 1'b1, SRC_SEED, sa(E_D), 8'd4, SRC_NONE, 9'd0, 8'd0,
+                  2'd1, 16'h0003, SNK_SXOR, E_RHO, E_R, 8'd8, 4'd0, 4'd0, 1'b0);
   endfunction
   // XOF(rho || b0 || b1) -> SampleNTT into slot os; rho is public (buffer)
   function [95:0] h_xof(input [8:0] a, input [7:0] b0, input [7:0] b1, input [3:0] os);
@@ -301,6 +318,7 @@ module pqse_ucode (
       10'd5:   ins = u_end(R_NOSK);
       10'd6:   ins = u_end(R_REPLAY);
       10'd7:   ins = u_end(R_PUF);
+      10'd8:   ins = u_end(R_FAULT);                          // X_KGF: a KeyGen recompute check failed
 
       // ---------------- KEYGEN / KGWRAP (16) ----------------
       10'd16:  ins = u_set(ST_RESEED);
@@ -359,32 +377,9 @@ module pqse_ucode (
       10'd80:  ins = u_hash(RATE_72, 1'b0, 1'b1, SRC_SEED, sa(E_D), 8'd4, SRC_NONE, 9'd0, 8'd0,
                             2'd1, 16'h0003, SNK_SEED, E_RHO, E_R, 8'd8, 4'd0, 4'd0, 1'b0); // (rho, sigma) = G(d || 3)
       10'd81:  ins = s2b(E_RHO, RHO_OWN);                     // rho is public
-      10'd82:  ins = h_prf(E_R, 8'd0);                        // s_0 (shares)
-      10'd83:  ins = cbd(S0, S1, 1'b0);
-      10'd84:  ins = ntt(S0);
-      10'd85:  ins = ntt(S1);
-      10'd86:  ins = h_prf(E_R, 8'd1);                        // s_1
-      10'd87:  ins = cbd(S2, S3, 1'b0);
-      10'd88:  ins = ntt(S2);
-      10'd89:  ins = ntt(S3);
-      10'd90:  ins = h_prf(E_R, 8'd2);                        // s_2
-      10'd91:  ins = cbd(S4, S5, 1'b0);
-      10'd92:  ins = ntt(S4);
-      10'd93:  ins = ntt(S5);
-      10'd94:  ins = h_prf(E_R, 8'd3);                        // e_0
-      10'd95:  ins = cbd(Y0, Y0B, 1'b0);
-      10'd96:  ins = ntt(Y0);
-      10'd97:  ins = ntt(Y0B);
-      10'd98:  ins = h_prf(E_R, 8'd4);                        // e_1
-      10'd99:  ins = cbd(Y1, Y1B, 1'b0);
-      10'd100: ins = ntt(Y1);
-      10'd101: ins = ntt(Y1B);
-      10'd102: ins = h_prf(E_R, 8'd5);                        // e_2
-      10'd103: ins = cbd(Y2, Y2B, 1'b0);
-      10'd104: ins = ntt(Y2);
-      10'd105: ins = ntt(Y2B);
+      10'd82:  ins = u_br(BC_ALWAYS, L_KGSE);                 // s, e: generated and checked at 720
       // t^_i = e^_i + sum_j A^[i][j] o s^_j, per share; A^[i][j] = SampleNTT(rho || j || i)
-      10'd106: ins = h_xof(RHO_OWN, 8'd0, 8'd0, S_T);
+      10'd106: ins = h_xof(RHO_OWN, 8'd0, 8'd0, S_T);             // L_KGA
       10'd107: ins = pwm(1'b1, Y0,  S_T, S0);
       10'd108: ins = pwm(1'b1, Y0B, S_T, S1);
       10'd109: ins = h_xof(RHO_OWN, 8'd1, 8'd0, S_T);
@@ -892,6 +887,76 @@ module pqse_ucode (
       10'd703: ins = pzero(S_ACC0);
       10'd704: ins = pzero(S_ACC1);
       10'd705: ins = u_br(BC_ALWAYS, L_KGV);                   // the rest is wiped at L_KGEND
+
+      // ---------------- KeyGen s, e with recompute checks (720), every key derivation ----------------
+      // Each hash whose output becomes secret key material is computed twice: G(d || 3)
+      // and the six PRF calls. The second run is XORed into the first one's output
+      // (SXOR, after the CBD has used it), which must then be 0, checked share-wise
+      // against the all-zero entry E_KB (IO_SEQ: FAULT otherwise). Catches a fault in
+      // one computation that would change ek and dk consistently (the pairwise test
+      // passes such a key) and faults that make two secret polynomials equal
+      // (PRF nonce / domain faults, a known key-recovery attack on KeyGen)
+      10'd720: ins = szero(E_KB);                              // L_KGSE; the all-zero reference entry
+      10'd721: ins = scmpn(E_RHO, RHO_OWN, 4'd0);              // rho in the buffer = rho of G (public)
+      10'd722: ins = u_br(BC_BAD, X_KGF);
+      10'd723: ins = h_prf(E_R, 8'd0);                         // s_0 (shares)
+      10'd724: ins = cbd(S0, S1, 1'b0);
+      10'd725: ins = h_prfx(E_R, 8'd0);                        // the same PRF again, XORed in
+      10'd726: ins = seq(E_CBD, E_KB);                         // = 0?
+      10'd727: ins = seq(E_CBD + 4'd1, E_KB);
+      10'd728: ins = seq(E_CBD + 4'd2, E_KB);
+      10'd729: ins = seq(E_CBD + 4'd3, E_KB);
+      10'd730: ins = ntt(S0);
+      10'd731: ins = ntt(S1);
+      10'd732: ins = h_prf(E_R, 8'd1);                         // s_1 (shares)
+      10'd733: ins = cbd(S2, S3, 1'b0);
+      10'd734: ins = h_prfx(E_R, 8'd1);                        // the same PRF again, XORed in
+      10'd735: ins = seq(E_CBD, E_KB);                         // = 0?
+      10'd736: ins = seq(E_CBD + 4'd1, E_KB);
+      10'd737: ins = seq(E_CBD + 4'd2, E_KB);
+      10'd738: ins = seq(E_CBD + 4'd3, E_KB);
+      10'd739: ins = ntt(S2);
+      10'd740: ins = ntt(S3);
+      10'd741: ins = h_prf(E_R, 8'd2);                         // s_2 (shares)
+      10'd742: ins = cbd(S4, S5, 1'b0);
+      10'd743: ins = h_prfx(E_R, 8'd2);                        // the same PRF again, XORed in
+      10'd744: ins = seq(E_CBD, E_KB);                         // = 0?
+      10'd745: ins = seq(E_CBD + 4'd1, E_KB);
+      10'd746: ins = seq(E_CBD + 4'd2, E_KB);
+      10'd747: ins = seq(E_CBD + 4'd3, E_KB);
+      10'd748: ins = ntt(S4);
+      10'd749: ins = ntt(S5);
+      10'd750: ins = h_prf(E_R, 8'd3);                         // e_0 (shares)
+      10'd751: ins = cbd(Y0, Y0B, 1'b0);
+      10'd752: ins = h_prfx(E_R, 8'd3);                        // the same PRF again, XORed in
+      10'd753: ins = seq(E_CBD, E_KB);                         // = 0?
+      10'd754: ins = seq(E_CBD + 4'd1, E_KB);
+      10'd755: ins = seq(E_CBD + 4'd2, E_KB);
+      10'd756: ins = seq(E_CBD + 4'd3, E_KB);
+      10'd757: ins = ntt(Y0);
+      10'd758: ins = ntt(Y0B);
+      10'd759: ins = h_prf(E_R, 8'd4);                         // e_1 (shares)
+      10'd760: ins = cbd(Y1, Y1B, 1'b0);
+      10'd761: ins = h_prfx(E_R, 8'd4);                        // the same PRF again, XORed in
+      10'd762: ins = seq(E_CBD, E_KB);                         // = 0?
+      10'd763: ins = seq(E_CBD + 4'd1, E_KB);
+      10'd764: ins = seq(E_CBD + 4'd2, E_KB);
+      10'd765: ins = seq(E_CBD + 4'd3, E_KB);
+      10'd766: ins = ntt(Y1);
+      10'd767: ins = ntt(Y1B);
+      10'd768: ins = h_prf(E_R, 8'd5);                         // e_2 (shares)
+      10'd769: ins = cbd(Y2, Y2B, 1'b0);
+      10'd770: ins = h_prfx(E_R, 8'd5);                        // the same PRF again, XORed in
+      10'd771: ins = seq(E_CBD, E_KB);                         // = 0?
+      10'd772: ins = seq(E_CBD + 4'd1, E_KB);
+      10'd773: ins = seq(E_CBD + 4'd2, E_KB);
+      10'd774: ins = seq(E_CBD + 4'd3, E_KB);
+      10'd775: ins = ntt(Y2);
+      10'd776: ins = ntt(Y2B);
+      10'd777: ins = h_gx(1'b0);                               // G(d || 3) again, XORed into rho, sigma
+      10'd778: ins = seq(E_RHO, E_KB);
+      10'd779: ins = seq(E_R, E_KB);                           // (sigma is not needed after the PRFs)
+      10'd780: ins = u_br(BC_ALWAYS, L_KGA);                   // on to t^ = A^ o s^ + e^
 
       default: ins = u_end(R_UNKNOWN);
     endcase
