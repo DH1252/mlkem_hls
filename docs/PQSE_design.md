@@ -2,7 +2,7 @@
 
 Part A explains what the chip is for and how it protects its secrets, without assuming a background in hardware or cryptography. Part B is the engineering description for VLSI and security engineers: architecture, memories, countermeasures, verification and measured results. Terms are explained where they first appear and again in the glossary at the end.
 
-The source is in `hw/se/`. Register maps, the microcode map, testbench details and debugging notes are in [`hw/se/README.md`](../hw/se/README.md).
+The source is in `hw/se/`. Register maps, the microcode map, testbench details and debugging notes are in [`hw/se/README.md`](../hw/se/README.md). Diagrams of the blocks, state machines and command flows are in [`PQSE_diagrams.md`](PQSE_diagrams.md).
 
 ---
 

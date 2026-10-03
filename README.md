@@ -7,6 +7,7 @@ The target is a contactless card. The reader's 13.56 MHz field powers the chip w
 | Document | Read it for |
 |---|---|
 | [`docs/PQSE_design.md`](docs/PQSE_design.md) | the design: a plain-language part, then the engineering description |
+| [`docs/PQSE_diagrams.md`](docs/PQSE_diagrams.md) | Mermaid diagrams: blocks, module hierarchy, share domains, state machines, KeyGen / Decaps / PUF / messaging flows, tool flow |
 | [`hw/se/README.md`](hw/se/README.md) | the RTL reference: registers, commands, microcode map, detectors, testbenches, debugging |
 | [`docs/proposal_hackathon_chip_2026.md`](docs/proposal_hackathon_chip_2026.md) | proposal text for the Hackathon Chip 2026 (in Indonesian) |
 
