@@ -48,11 +48,10 @@ and the ngspice runs themselves are made faster:
      instances of sky130 FET models that are NOT a .subckt (in the PDK or the
      netlist) written as M devices, and the stimulus includes that copy. The
      PDK's .subckt names come from a scan of its libs.tech/ngspice and
-     libs.ref/sky130_fd_pr. Not yet usable, so off by default: in hsa mode
-     ngspice then stops at the converted transistors with "could not find a
-     valid modelname" (sky130_fd_pr__special_nfet_01v8, w=0.36 l=0.15), i.e.
-     no model bin matches; probably because hsa applies the PDK's .option
-     scale=1e-6 to the model bins' size limits as well. With
+     libs.ref/sky130_fd_pr. Off by default, experimental: its first test
+     stopped at sky130_fd_pr__special_nfet_01v8 ("could not find a valid
+     modelname"), a device this PDK does not have at all (see 8), so it
+     is worth trying again now that 8 renames it. With
      PQSE_OR_NIX=1 the run stays in the OpenRAM checkout instead (nix
      develop needs its flake.nix there).
   7. Xyce raw file. OpenRAM starts Xyce with -r timing.raw: every node at
@@ -61,6 +60,15 @@ and the ngspice runs themselves are made faster:
      that write is most of the run time and Xyce sits idle. Dropped
      (PQSE_OR_XYCE_RAW=1 keeps it). The step ceiling (3) applies to Xyce too;
      KLU (4) is OpenRAM's own setting for Xyce.
+  8. narrow nfets. This OpenRAM names an nfet narrower than 0.42 um
+     sky130_fd_pr__special_nfet_01v8 (tech.py spice["nmos_narrow"]: the name
+     magic extracts, for LVS), but the PDK's SPICE library has no device of
+     that name (only special_nfet_latch / _pass and special_pfet_pass), so
+     every simulation stopped at the first decoder inverter with "unknown
+     subckt: ... sky130_fd_pr__special_nfet_01v8". The netlist copies given to
+     the simulator (pqse_m_<netlist> in the temp directory) use
+     PQSE_OR_NARROW_NFET instead (default sky130_fd_pr__nfet_01v8, the device
+     those transistors are; empty: no renaming).
   6. fail fast. A simulation that fails is retried by OpenRAM at twice the
      period, up to 8 times; when ngspice itself stopped with an error (not a
      timing failure) the run ends at once with ngspice's message.
@@ -176,32 +184,42 @@ def pdk_subckts(lib):
     return names, dirs
 
 
-def x_to_m(src, dst, subckts):
-    """copy netlist src to dst with X instances of sky130 FET .model cards as M
-    devices (the cell is the last token before the name=value parameters;
-    continuation lines are followed); returns the number changed"""
-    lines = open(src, errors="replace").read().splitlines()
-    local = {ln.split()[1].lower() for ln in lines
-             if ln.lstrip()[:7].lower() == ".subckt" and len(ln.split()) > 1}
-    out, n, i = [], 0, 0
-    while i < len(lines):
-        j = i + 1
-        while j < len(lines) and lines[j].startswith("+"):
-            j += 1
-        first = lines[i]
-        if first[:1] in "xX":
-            toks = " ".join([first] + [c[1:] for c in lines[i + 1:j]]).split()
-            plain = [t for t in toks[1:] if "=" not in t]
-            cell = plain[-1] if plain else ""
-            if FETNAME.match(cell) and cell.lower() not in subckts and cell.lower() not in local:
-                first = "M" + first[1:]
-                n += 1
-        out.append(first)
-        out.extend(lines[i + 1:j])
-        i = j
+def fix_netlist(src, dst, subckts=None, rename=None):
+    """copy netlist src to dst, (1) renaming devices (rename: {old: new}, whole
+    names only), (2) with subckts given (hsa): X instances of sky130 FET
+    .model cards (not a .subckt in the PDK or the netlist) as M devices (the
+    cell is the last token before the name=value parameters; continuation
+    lines are followed). Returns (renamed, converted)."""
+    text = open(src, errors="replace").read()
+    nr = 0
+    for old, new in (rename or {}).items():
+        text, k = re.subn(r"(?<![\w.])%s(?![\w.])" % re.escape(old), new, text, flags=re.IGNORECASE)
+        nr += k
+    lines = text.splitlines()
+    n = 0
+    if subckts is not None:
+        local = {ln.split()[1].lower() for ln in lines
+                 if ln.lstrip()[:7].lower() == ".subckt" and len(ln.split()) > 1}
+        out, i = [], 0
+        while i < len(lines):
+            j = i + 1
+            while j < len(lines) and lines[j].startswith("+"):
+                j += 1
+            first = lines[i]
+            if first[:1] in "xX":
+                toks = " ".join([first] + [c[1:] for c in lines[i + 1:j]]).split()
+                plain = [t for t in toks[1:] if "=" not in t]
+                cell = plain[-1] if plain else ""
+                if FETNAME.match(cell) and cell.lower() not in subckts and cell.lower() not in local:
+                    first = "M" + first[1:]
+                    n += 1
+            out.append(first)
+            out.extend(lines[i + 1:j])
+            i = j
+        lines = out
     with open(dst, "w") as f:
-        f.write("\n".join(out) + "\n")
-    return n
+        f.write("\n".join(lines) + "\n")
+    return nr, n
 
 
 def patch(OPTS, debug):
@@ -267,28 +285,40 @@ def patch(OPTS, debug):
         smod.subprocess = _NoRaw()
         notes.append("Xyce without the raw file")
 
-    if OPTS.spice_name == "ngspice" and env("PQSE_OR_HSA", "0") == "1":
+    # netlist copies for the simulator: OpenRAM's name for a narrow nfet, which
+    # this PDK's SPICE library does not have, and (hsa) M devices
+    narrow = env("PQSE_OR_NARROW_NFET", "sky130_fd_pr__nfet_01v8")
+    old_narrow = dmod.tech.spice.get("nmos_narrow", "")
+    rename = {old_narrow: narrow} if narrow and old_narrow and old_narrow != narrow else {}
+    hsa = OPTS.spice_name == "ngspice" and env("PQSE_OR_HSA", "0") == "1"
+    subckts = None
+    if hsa:
         libs = [v[0][0] for v in dmod.tech.spice["fet_libraries"].values() if v]
         subckts, dirs = pdk_subckts(libs[0]) if libs else (set(), [])
         if not subckts:
             debug.warning("PQSE: no sky130_fd_pr .subckt found in {0}: every X instance of a "
                           "sky130 FET becomes an M device".format(dirs))
+    if rename or hsa:
         write_include = stimuli.write_include
-        converted = {}
+        done = {}
 
-        def write_include_m(self, circuit):
+        def write_include_fixed(self, circuit):
             if os.path.isfile(circuit):
                 dst = os.path.join(OPTS.openram_temp, "pqse_m_" + os.path.basename(circuit))
-                n = x_to_m(circuit, dst, subckts)
-                if converted.get(circuit) != n:
-                    converted[circuit] = n
-                    debug.info(1, "PQSE: {0}: {1} sky130 FET instances X -> M".format(circuit, n))
+                res = fix_netlist(circuit, dst, subckts, rename)
+                if done.get(circuit) != res:
+                    done[circuit] = res
+                    debug.print_raw("PQSE: {0}: {1} devices renamed, {2} X -> M".format(
+                        os.path.basename(circuit), res[0], res[1]))
                 circuit = dst
             return write_include(self, circuit)
 
-        stimuli.write_include = write_include_m
-        notes.append("ngbehavior=hsa (netlists with sky130 FET models as M devices; "
-                     "%d PDK subcircuits kept as X)" % len(subckts))
+        stimuli.write_include = write_include_fixed
+        if rename:
+            notes.append("%s simulated as %s" % (old_narrow, narrow))
+        if hsa:
+            notes.append("ngbehavior=hsa (netlists with sky130 FET models as M devices; "
+                         "%d PDK subcircuits kept as X)" % len(subckts))
 
     tmax = float(env("PQSE_OR_TMAX_PS", "50"))
     # KLU: ngspice only (OpenRAM sets LINSOL type=klu for Xyce itself; its

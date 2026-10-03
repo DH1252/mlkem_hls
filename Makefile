@@ -614,9 +614,12 @@ OR_FULL_LEAK ?= 0
 OR_NGFAST    ?= 1
 # OR_HSA=1: also ngbehavior=hsa (HSPICE-compatible, faster reading of the PDK
 # libraries); the wrapper then gives ngspice copies of the netlists with the
-# sky130 transistors that are .model cards as M devices. Experimental, off:
-# ngspice then finds no model bin for them ("could not find a valid modelname")
+# sky130 transistors that are .model cards as M devices. Experimental, off.
 OR_HSA       ?= 0
+# OR_NARROW_NFET: the device simulated for OpenRAM's narrow nfets, which it
+# names sky130_fd_pr__special_nfet_01v8 (for LVS) although the PDK's SPICE
+# library has no such device (every simulation stopped with "unknown subckt")
+OR_NARROW_NFET ?= sky130_fd_pr__nfet_01v8
 # OpenRAM's temporary files (netlists, stimuli, simulator output). Under WSL a
 # checkout on /mnt/<drive> is on the Windows file system, which is slow for
 # them: they then go to ~/.cache/pqse_openram (the results stay in build/).
@@ -672,7 +675,7 @@ $(SRAM_CHAR_D)/%.ok: scripts/power/openram/pqse_sram_%.py scripts/power/openram/
 	    PQSE_OR_THREADS=$(OR_THREADS) PQSE_OR_TABLE=$(OR_TABLE) PQSE_OR_NIX=$(OR_NIX) \
 	    PQSE_OR_ANALYTICAL=$(OR_ANALYTICAL) PQSE_OR_PERIOD=$(OR_PERIOD) PQSE_OR_TMAX_PS=$(OR_TMAX_PS) \
 	    PQSE_OR_KLU=$(OR_KLU) PQSE_OR_MINPERIOD=$(OR_MINPERIOD) PQSE_OR_FULL_LEAK=$(OR_FULL_LEAK) \
-	    PQSE_OR_NGFAST=$(OR_NGFAST) PQSE_OR_HSA=$(OR_HSA) \
+	    PQSE_OR_NGFAST=$(OR_NGFAST) PQSE_OR_HSA=$(OR_HSA) PQSE_OR_NARROW_NFET=$(OR_NARROW_NFET) \
 	    PQSE_OR_RUNDIR=$(abspath $(SRAM_CHAR_D))/run_$* \
 	    OPENRAM_HOME=$(abspath $(OPENRAM_DIR))/compiler OPENRAM_TECH=$(abspath $(OPENRAM_DIR))/technology \
 	    PDK_ROOT=$${PDK_ROOT:-$(abspath $(OPENRAM_DIR))} OPENRAM_TMP=$(OR_TMP)/tmp_$* \
