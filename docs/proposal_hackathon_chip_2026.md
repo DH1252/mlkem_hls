@@ -48,7 +48,7 @@ Desain mandiri (`quartus/jtag`, `build.tcl se`) dikendalikan dari PC melalui JTA
 - **Hasil keamanan terukur:**
   - TVLA (dua run independen): tidak ada kebocoran orde-1 yang terkonfirmasi;
   - kampanye injeksi fault acak 400 run: **0 hasil salah yang lolos tanpa terdeteksi** dan 0 hang.
-- **Hemat energi untuk kartu nirkontak:** sekitar **92,5 µJ per KeyGen**, rata-rata **0,57 mW** pada clock 3,39 MHz (analisis gate-level SkyWater 130 nm).
+- **Hemat energi untuk kartu nirkontak:** sekitar **73,5 µJ per KeyGen**, rata-rata **0,45 mW** pada clock 3,39 MHz (analisis gate-level SkyWater 130 nm).
 - **Kunci tidak pernah keluar chip:** kunci bersama disimpan termasking sebagai kunci sesi; kunci jangka panjang dibungkus dengan kunci dari PUF.
 - **Waktu konstan:** tidak ada percabangan atau alamat yang bergantung pada rahasia, berbeda dengan perangkat lunak pada mikrokontroler yang rentan terhadap serangan timing dan cache.
 
@@ -140,7 +140,7 @@ Kinerja (simulasi Verilator, hiding aktif):
 
 Catatan estimasi:
 1. **ALM.** Hasil *place & route* terukur pada FPGA lain (Gowin GW2AR-18, versi v4 sebelum penambahan proteksi fault): 15.881 unit logika LUT4. Konversi ke ALM Cyclone V (1,5–2,6 LUT4 per ALM) ditambah ≈ 1.900 LUT untuk sel PUF (di Cyclone V dibuat dari LUT) dan logika proteksi fault yang ditambahkan kemudian. Angka pasti diperoleh dari laporan fitter Quartus (`quartus_sh -t build.tcl se`).
-2. **Flip-flop.** Jumlah terukur pada netlist sintesis RTL versi terkini (7.774 FF, SkyWater 130 nm dengan RAM sebagai makro); jumlah di FPGA serupa.
+2. **Flip-flop.** Jumlah terukur pada netlist sintesis RTL versi terkini (7.775 FF, 97 % di belakang clock gate; SkyWater 130 nm dengan RAM sebagai makro); jumlah di FPGA serupa.
 3. **M10K.** Dihitung dari peta memori: RAM polinomial 2 × 1024 × 25 (6 blok), state Keccak 2 × 64 × 65 (4 blok), buffer I/O 2 × 512 × 32 (4 blok), ROM mikrokode 1024 × 96 (10 blok).
 4. **DSP.** Pengali 12 × 12 dan pengali konstanta reduksi Barrett, pengali skala Compress dan pengali permutasi; pada Gowin terpakai 14,75 unit DSP.
 
@@ -164,7 +164,7 @@ Catatan estimasi:
 - **Kampanye fault (`make sim-se-fault`):** 200 bit-flip acak per perintah pada 38 target, setiap run dari chip "dingin":
   - Decaps: 111 tidak berpengaruh, 74 terdeteksi, 15 implicit rejection, **0 lolos**, 0 hang;
   - KeyGen: 127 tidak berpengaruh, 73 terdeteksi, **0 lolos**, 0 hang.
-- **Timing/latensi dan daya (gate-level):** jumlah siklus per perintah dicatat otomatis. Analisis SkyWater 130 nm memberi slack setup 7,3 ns pada 20 ns dan energi KeyGen 92,5 µJ.
+- **Timing/latensi dan daya (gate-level):** jumlah siklus per perintah dicatat otomatis. Analisis SkyWater 130 nm memberi slack setup 7,2 ns pada 20 ns dan energi KeyGen 73,5 µJ (turun dari 92,5 µJ setelah optimasi clock gating).
 
 **[Uji Hardware Board FPGA DE10-Nano]:**
 1. **Sintesis dan bitstream:** `quartus_sh -t build.tcl se` (top `de10_nano_pqse`); periksa laporan fitter (ALM, M10K, DSP) dan TimeQuest (slack setup positif pada 50 MHz).
@@ -184,7 +184,7 @@ Catatan estimasi:
 | Pemakaian resource | ≤ 30 % ALM, ≤ 10 % M10K, ≤ 15 % DSP | estimasi tabel 3.1 |
 | Kebocoran side-channel | \|t\| < 4,5 (TVLA, dua run) | tercapai di simulasi; board: rencana |
 | Ketahanan fault | 0 hasil salah tak terdeteksi, 0 hang | tercapai (400 run) |
-| Energi (ASIC, SkyWater 130 nm) | ≤ 100 µJ per KeyGen, ≤ 1 mW @ 3,39 MHz | 92,5 µJ, 0,57 mW |
+| Energi (ASIC, SkyWater 130 nm) | ≤ 100 µJ per KeyGen, ≤ 1 mW @ 3,39 MHz | 73,5 µJ, 0,45 mW |
 
 ---
 

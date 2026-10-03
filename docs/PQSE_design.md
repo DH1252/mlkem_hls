@@ -57,7 +57,7 @@ A secure element is the small, hardened chip inside a bank card, an e-passport o
 - **Correct:** it reproduces the official NIST test vectors for ML-KEM.
 - **Leakage-free in simulation:** a standard leakage test (TVLA) on simulated power traces finds no first-order leakage, and every masking building block passes a mathematical check that covers glitches.
 - **Fault-tolerant:** in 400 simulated random fault injections (one flipped bit each, anywhere in the chip, at any moment) the chip never gave a wrong result without noticing. A few faults ended in the designed safe outcome, a random-looking key instead of an error.
-- **Small and frugal:** a key generation takes about 0.16 s at the 3.4 MHz clock a contactless reader provides. Its energy is about 90 µJ, an average of about 0.6 mW, which a reader's field can supply.
+- **Small and frugal:** a key generation takes about 0.16 s at the 3.4 MHz clock a contactless reader provides. Its energy is about 75 µJ, an average of about 0.45 mW, which a reader's field can supply.
 
 ---
 
@@ -228,12 +228,13 @@ The full maps are in `hw/se/README.md`, section 10.
 
 | KeyGen | |
 |---|---|
-| Energy | 92.5 µJ (logic 71.0, SRAM 21.5) |
-| Average power at 3.39 MHz | 0.57 mW |
-| Flip-flops / behind clock gates | 7,774 / 6,622 (269 integrated clock gates) |
-| Worst setup slack at 20 ns | 7.3 ns (≈ 79 MHz logic-only, ideal clock) |
+| Energy | 73.5 µJ (logic 52.0, SRAM 21.5) |
+| Energy per clock | 133.8 pJ |
+| Average power at 3.39 MHz | 0.45 mW |
+| Flip-flops / behind clock gates | 7,775 / 7,526 (285 integrated clock gates) |
+| Worst setup slack at 20 ns | 7.2 ns (≈ 78 MHz logic-only, ideal clock) |
 
-These figures predate the last two clock-gating changes, which moved about 900 further flip-flops behind gates (θ column parities, χ operands). Re-measure with `make se-power-vcd`.
+Giving the last ~900 every-cycle flip-flops plain enables (θ column parities, χ operands, CSR, counters) took KeyGen from 92.5 to 73.5 µJ. The SRAMs are now 29 % of the energy; their energy per access is an assumption.
 
 **FPGA** (an earlier v4 build, before the fault hardening; Gowin EDA place and route, GW2AR-18 / Tang Nano 20K): 15,881 logic units (77 %), 8,779 registers (56 %, including 1,920 PUF latches), 15 of 46 block RAMs, 14.75 of 24 DSP. It fits, but at 94 % of the logic cells.
 
