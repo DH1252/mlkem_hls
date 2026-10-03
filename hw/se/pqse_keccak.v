@@ -321,14 +321,45 @@ module pqse_keccak #(
     end
   end
 
+  // ---- theta column parities C[x] (and their parity bits) -------------------------------------
+  // One write condition per lane, constant indices: plain enable flip-flops,
+  // each 64-bit lane clocked only when it changes (5 write-backs of ~126
+  // clocks per round). Written through a variable part-select, synthesis had
+  // made all 650 flip-flops one shift network clocked every cycle. Priority as
+  // before: clear, then the theta pass (round 0), then the write-back.
+  //   clear: reset, the wipe (first clock), the end of the permutation
+  //   theta pass: C[dx] = T ^ A[x + 20] at dy = 4
+  //   write-back (rounds 0..22): the first lane of a column (plane 0) replaces
+  //   the old parity, the others accumulate into it
+  wire c_clr = rst || ((ks == K_WIPE) && (wcnt == 6'd0)) ||
+               ((ks == K_CHI) && (cs == 2'd3) && (cj == 3'd4) && (cy == 3'd4) && (rnd_i == 5'd23));
+  wire c_th  = (ks == K_TH) && dv && (dy == 3'd4);
+  wire c_wb  = wbv && wbacc;
+  integer gx;
+  always @(posedge clk) begin
+    for (gx = 0; gx < 5; gx = gx + 1) begin
+      if (c_clr || (c_th && (dx == gx)) || (c_wb && (wbx == gx))) begin
+        C0v[gx*64 +: 64] <= c_clr ? 64'd0 : c_th ? th0 :
+                            wby0 ? wd0 : (C0v[gx*64 +: 64] ^ wd0);
+        Cp0[gx]          <= c_clr ? 1'b0 : c_th ? ^th0 :
+                            wby0 ? wp0 : (Cp0[gx] ^ wp0);
+      end
+      if (c_clr || (use1 && ((c_th && (dx == gx)) || (c_wb && (wbx == gx))))) begin
+        C1v[gx*64 +: 64] <= c_clr ? 64'd0 : c_th ? th1 :
+                            wby0 ? wd1 : (C1v[gx*64 +: 64] ^ wd1);
+        Cp1[gx]          <= c_clr ? 1'b0 : c_th ? ^th1 :
+                            wby0 ? wp1 : (Cp1[gx] ^ wp1);
+      end
+    end
+  end
+
   // ---- control and registers --------------------------------------------------------------
   always @(posedge clk) begin
     if (rst) begin
       begin ks <= K_IDLE; ks_n <= ~(K_IDLE); end mj <= 1'b0; clean <= 1'b0; ap <= 1'b0; wbv <= 1'b0; dv <= 1'b0; iss <= 1'b0;
       apn <= 1'b0; apv0 <= 64'd0; apv1 <= 64'd0; T0 <= 64'd0; T1 <= 64'd0;
       X0r <= 64'd0; X1r <= 64'd0;
-      begin C0v <= 320'd0; C1v <= 320'd0; end
-      Cp0 <= 5'd0; Cp1 <= 5'd0; pchk <= 1'b0;
+      pchk <= 1'b0;                                      // (C0v / C1v / Cp: below)
       begin rnd_i <= 5'd0; rnd_i_n <= ~(5'd0); end
       begin cx <= 3'd0; cx_n <= ~(3'd0); end
       begin cy <= 3'd0; cy_n <= ~(3'd0); end
@@ -361,14 +392,6 @@ module pqse_keccak #(
       // the last round: there C is cleared when the permutation ends. (wbacc is
       // set with the write-back: the round's last write-back lands the clock
       // after rnd_i has moved on)
-      if (wbv && wbacc) begin
-        C0v[{wbx, 6'd0} +: 64] <= wby0 ? wd0 : (C0v[{wbx, 6'd0} +: 64] ^ wd0);
-        Cp0[wbx]               <= wby0 ? wp0 : (Cp0[wbx] ^ wp0);
-        if (use1) begin
-          C1v[{wbx, 6'd0} +: 64] <= wby0 ? wd1 : (C1v[{wbx, 6'd0} +: 64] ^ wd1);
-          Cp1[wbx]               <= wby0 ? wp1 : (Cp1[wbx] ^ wp1);
-        end
-      end
 
       case (ks)
         K_IDLE: begin
@@ -391,8 +414,7 @@ module pqse_keccak #(
         K_WIPE: begin
           wcnt <= wcnt + 6'd1;
           T0 <= 64'd0; T1 <= 64'd0;
-          if (wcnt == 6'd0)
-            begin C0v <= 320'd0; C1v <= 320'd0; Cp0 <= 5'd0; Cp1 <= 5'd0; end
+          // (wcnt 0: the column parities are cleared, below)
           if (wcnt == 6'd63) begin
             begin ks    <= K_IDLE; ks_n <= ~(K_IDLE); end
             clean <= 1'b1;
@@ -414,14 +436,7 @@ module pqse_keccak #(
           if (dv) begin
             T0 <= (dy == 3'd0) ? q0 : th0;
             T1 <= (dy == 3'd0) ? q1 : th1;
-            if (dy == 3'd4) begin                        // C[x] = T ^ A[x + 20]
-              C0v[{dx, 6'd0} +: 64] <= th0;
-              Cp0[dx]               <= ^th0;
-              if (use1) begin
-                C1v[{dx, 6'd0} +: 64] <= th1;
-                Cp1[dx]               <= ^th1;
-              end
-            end
+            // dy = 4: C[dx] = T ^ A[x + 20] (below)
             if (dx == 3'd4 && dy == 3'd4) begin          // C[4] loaded this clock
               begin ks  <= K_RP; ks_n <= ~(K_RP); end
               begin cx  <= 3'd0; cx_n <= ~(3'd0); end
@@ -489,8 +504,7 @@ module pqse_keccak #(
                   begin cy <= 3'd0; cy_n <= ~(3'd0); end
                   if (rnd_i == 5'd23) begin
                     begin ks <= K_IDLE; ks_n <= ~(K_IDLE); end
-                    // no state parity left behind (zeroization)
-                    begin C0v <= 320'd0; C1v <= 320'd0; Cp0 <= 5'd0; Cp1 <= 5'd0; end
+                    // no state parity left behind (zeroization): C cleared below
                   end else begin
                     // next round: C was accumulated by this round's write-backs
                     // (the last one lands next clock, in column 3, which D of
