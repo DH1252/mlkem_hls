@@ -17,7 +17,10 @@
 #                    (Magic; slowest, most accurate)
 #   PQSE_OR_DRC      1 (with LAYOUT=1): run DRC / LVS (Magic, Netgen)
 #   PQSE_OR_SPICE    ngspice (default), xa, hspice, spectre
-#   PQSE_OR_THREADS  ngspice threads per simulation (default 4)
+#   PQSE_OR_THREADS  ngspice threads per simulation (default 4; it takes effect
+#                    through pqse_openram_run.py's .spiceinit)
+#   (pqse_openram_run.py also reads PQSE_OR_PERIOD, _TMAX_PS, _KLU,
+#   _MINPERIOD, _FULL_LEAK, _RUNDIR: see that file)
 #   PQSE_OR_TABLE    1: OpenRAM's full 3 x 3 load / slew table (9 timing and
 #                    power simulations at the minimum period). Default 0: one
 #                    point, the nominal load (one flip-flop input) and slew -

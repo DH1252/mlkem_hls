@@ -575,8 +575,9 @@ se-power-vcd-report:
 #        [OR_TABLE=1: the full 3 x 3 load / slew table, several times slower]
 #        [OR_VERBOSE=1: OpenRAM's -v; see the memory note below]
 #        [OR_ANALYTICAL=1: OpenRAM's analytical model, no SPICE]
+#        [OR_PERIOD=10] [OR_TMAX_PS=50] [OR_KLU=1] [OR_MINPERIOD=0] [OR_FULL_LEAK=0]
 # OR_LAYOUT=0 (default) characterizes the schematic netlist (no wire
-# capacitance: energies somewhat low; minutes to hours per shape);
+# capacitance: energies somewhat low);
 # OR_LAYOUT=1 OR_PEX=1 the extracted layout (Magic; slowest, most accurate,
 # also gives the area). Logs: build/sepower/openram/openram_<shape>.log.
 OPENRAM_DIR ?= $(HOME)/OpenRAM
@@ -591,13 +592,27 @@ OR_SPICE    ?= ngspice
 OR_THREADS  ?= 4
 OR_TABLE    ?= 0
 OR_NIX      ?= 0
-# Memory: OpenRAM simulates the whole array once (leakage of the untrimmed
-# netlist; 1024 x 25 is ~150 k transistors), so each shape needs one ngspice
-# of a few GB. With -v (OR_VERBOSE=1) OpenRAM also writes .plot V(*) into every
-# stimulus: ngspice then keeps and prints every node at every time step, which
-# runs out of memory (and disk, in tmp_<shape>/timing.lis) on the large shapes.
-# Keep OR_VERBOSE=0 and run the shapes one at a time (no -j) unless the
-# machine has memory for several at once.
+# Speed: OpenRAM runs through scripts/power/openram/pqse_openram_run.py, which
+# keeps the energy measurements and drops what the energy flow does not use
+# (details in that file): no minimum-period search, the shape is characterized
+# at OR_PERIOD ns (OR_MINPERIOD=1: OpenRAM's search); no leakage run of the
+# untrimmed array, the run that needed gigabytes for 1024 x 25 (OR_FULL_LEAK=1:
+# run it; otherwise the leakage is the trimmed netlist's, a lower bound);
+# ngspice step ceiling OR_TMAX_PS ps instead of OpenRAM's 10; the KLU solver
+# (OR_KLU=0 without); ngspice started in build/.../run_<shape>, where it reads a
+# .spiceinit with OR_THREADS threads (started from the repository, it never
+# read OpenRAM's). OR_MINPERIOD=1 OR_FULL_LEAK=1 OR_TMAX_PS=10 OR_KLU=0 is
+# OpenRAM's own characterization.
+OR_PERIOD    ?= 10
+OR_TMAX_PS   ?= 50
+OR_KLU       ?= 1
+OR_MINPERIOD ?= 0
+OR_FULL_LEAK ?= 0
+# Memory: with OR_FULL_LEAK=0 only the trimmed netlist is simulated, so make -j3
+# can run all three at once. With OR_FULL_LEAK=1, one at a time unless the machine
+# has a few GB per shape. Keep OR_VERBOSE=0: OpenRAM's -v writes .plot V(*) into
+# every stimulus, and ngspice then keeps and prints every node at every time
+# step (out of memory, and disk in tmp_<shape>/timing.lis).
 OR_VERBOSE  ?= 0
 # OR_ANALYTICAL=1: no SPICE at all (no ngspice needed; seconds, little memory).
 # OpenRAM then estimates one dynamic power, C V^2 f at sky130's 100 MHz event
@@ -615,8 +630,8 @@ OR_ANALYTICAL ?= 0
 # or point OR_PYTHON at another interpreter, e.g. OR_PYTHON=/usr/bin/python3
 OR_PYTHON   ?= $(PYTHON)
 SRAM_CHAR_D := $(BUILD)/sepower/openram$(if $(filter 1,$(OR_ANALYTICAL)),_analytical)
-# One target per shape, done once (a stamp): make -j2 se-sram-char runs two
-# shapes at once (memory permitting); a shape already characterized is not run again (delete
+# One target per shape, done once (a stamp): make -j3 se-sram-char runs the
+# shapes at once; a shape already characterized is not run again (delete
 # its stamp, $(SRAM_CHAR_D)/<shape>.ok, or make se-sram-char-clean to redo).
 # Shapes not characterized keep the assumed energy in the report.
 se-sram-char: $(foreach s,$(SRAM_SHAPES),$(SRAM_CHAR_D)/$(s).ok)
@@ -632,16 +647,20 @@ sram-char-check:
 	    echo "or use another interpreter that has them: make se-sram-char OR_PYTHON=/usr/bin/python3 ..."; exit 1; }
 	@command -v $(OR_SPICE) >/dev/null || [ "$(OR_NIX)" = 1 ] || [ "$(OR_ANALYTICAL)" = 1 ] || { \
 	    echo "$(OR_SPICE) not found on PATH (sudo apt install ngspice), or OR_NIX=1 for OpenRAM's Nix tools"; exit 1; }
-$(SRAM_CHAR_D)/%.ok: scripts/power/openram/pqse_sram_%.py | sram-char-check
+$(SRAM_CHAR_D)/%.ok: scripts/power/openram/pqse_sram_%.py scripts/power/openram/pqse_sram_common.py \
+                     scripts/power/openram/pqse_openram_run.py | sram-char-check
 	@mkdir -p $(SRAM_CHAR_D)
 	@echo "OpenRAM: $* (log: $(SRAM_CHAR_D)/openram_$*.log)"
 	@PQSE_OR_OUT=$(abspath $(SRAM_CHAR_D)) PQSE_OR_LAYOUT=$(OR_LAYOUT) PQSE_OR_PEX=$(OR_PEX) \
 	    PQSE_OR_DRC=$(OR_DRC) PQSE_OR_PORTS=$(OR_PORTS) PQSE_OR_SPICE=$(OR_SPICE) \
 	    PQSE_OR_THREADS=$(OR_THREADS) PQSE_OR_TABLE=$(OR_TABLE) PQSE_OR_NIX=$(OR_NIX) \
-	    PQSE_OR_ANALYTICAL=$(OR_ANALYTICAL) \
-	    OPENRAM_HOME=$(OPENRAM_DIR)/compiler OPENRAM_TECH=$(OPENRAM_DIR)/technology \
-	    PDK_ROOT=$${PDK_ROOT:-$(OPENRAM_DIR)} OPENRAM_TMP=$(abspath $(SRAM_CHAR_D))/tmp_$* \
-	    $(OR_PYTHON) -u $(OPENRAM_DIR)/sram_compiler.py $(if $(filter 1,$(OR_VERBOSE)),-v) $(if $(filter 1,$(OR_ANALYTICAL)),,-c) $(abspath $<) \
+	    PQSE_OR_ANALYTICAL=$(OR_ANALYTICAL) PQSE_OR_PERIOD=$(OR_PERIOD) PQSE_OR_TMAX_PS=$(OR_TMAX_PS) \
+	    PQSE_OR_KLU=$(OR_KLU) PQSE_OR_MINPERIOD=$(OR_MINPERIOD) PQSE_OR_FULL_LEAK=$(OR_FULL_LEAK) \
+	    PQSE_OR_RUNDIR=$(abspath $(SRAM_CHAR_D))/run_$* \
+	    OPENRAM_HOME=$(abspath $(OPENRAM_DIR))/compiler OPENRAM_TECH=$(abspath $(OPENRAM_DIR))/technology \
+	    PDK_ROOT=$${PDK_ROOT:-$(abspath $(OPENRAM_DIR))} OPENRAM_TMP=$(abspath $(SRAM_CHAR_D))/tmp_$* \
+	    $(OR_PYTHON) -u $(abspath scripts/power/openram/pqse_openram_run.py) \
+	        $(if $(filter 1,$(OR_VERBOSE)),-v) $(if $(filter 1,$(OR_ANALYTICAL)),,-c) $(abspath $<) \
 	        > $(SRAM_CHAR_D)/openram_$*.log 2>&1 \
 	        || { tail -30 $(SRAM_CHAR_D)/openram_$*.log; exit 1; }
 	@touch $@

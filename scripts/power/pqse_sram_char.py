@@ -11,9 +11,10 @@ clock pin, internal_power groups with a "when" condition - write (csb low, web
 low), read (csb low, web high, or a read-only port), and the same with csb high
 (port deselected). Their rise / fall values are the AVERAGE POWER in mW over
 one clock cycle of the SPICE simulation (power_measure, scaled x 1e3), with
-the data bit 1 / 0, measured at the minimum period the characterizer found
-(written as the clock pin's minimum_period constraint, in the library's
-time unit). So the energy of one access is
+the data bit 1 / 0, measured at the period the characterizer used (written as the clock pin's
+minimum_period constraint, in the library's time unit: OpenRAM's minimum
+period, or the fixed OR_PERIOD when pqse_openram_run.py skips that search).
+So the energy of one access is
 
     E [pJ] = mean(rise, fall) [mW] x min_period [ns]
 
