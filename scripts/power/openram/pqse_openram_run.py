@@ -131,10 +131,13 @@ def spice_errors(temp):
             lines = open(os.path.join(temp, name), errors="replace").read().splitlines()
         except OSError:
             continue
-        for ln in lines:
-            if any(k in ln for k in FATAL) and ln.strip()[:300] not in out:
-                out.append(ln.strip()[:300])
-    return "\n".join(out[:10])
+        for i, ln in enumerate(lines):
+            if any(k in ln for k in FATAL):
+                # ngspice prints the offending line after "Error on line N ..."
+                for x in lines[i:i + (3 if "Error on line" in ln else 1)]:
+                    if x.strip() and x.strip()[:300] not in out:
+                        out.append(x.strip()[:300])
+    return "\n".join(out[:14])
 
 
 FETNAME = re.compile(r"^sky130_fd_pr__\S*fet\S*$", re.IGNORECASE)
