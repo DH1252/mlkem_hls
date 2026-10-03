@@ -37,7 +37,7 @@ and the ngspice runs themselves are made faster:
      PQSE_OR_THREADS and (PQSE_OR_NGFAST=1, default) the two settings the
      sky130 / ngspice guides give for faster model loading, ng_nomodcheck
      (no model-parameter checks) and skywaterpdk (skips checks while
-     reading the PDK's .lib), and (PQSE_OR_HSA=1, default) ngbehavior=hsa,
+     reading the PDK's .lib), and, with PQSE_OR_HSA=1 (default 0), ngbehavior=hsa,
      the third setting of those guides (HSPICE-compatible reading of the PDK
      libraries, the largest part of their speed-up). With hsa, ngspice no
      longer turns an X instance of a .model card into a MOSFET, and OpenRAM
@@ -48,7 +48,11 @@ and the ngspice runs themselves are made faster:
      instances of sky130 FET models that are NOT a .subckt (in the PDK or the
      netlist) written as M devices, and the stimulus includes that copy. The
      PDK's .subckt names come from a scan of its libs.tech/ngspice and
-     libs.ref/sky130_fd_pr. PQSE_OR_HSA=0 goes back to plain mode. With
+     libs.ref/sky130_fd_pr. Not yet usable, so off by default: in hsa mode
+     ngspice then stops at the converted transistors with "could not find a
+     valid modelname" (sky130_fd_pr__special_nfet_01v8, w=0.36 l=0.15), i.e.
+     no model bin matches; probably because hsa applies the PDK's .option
+     scale=1e-6 to the model bins' size limits as well. With
      PQSE_OR_NIX=1 the run stays in the OpenRAM checkout instead (nix
      develop needs its flake.nix there).
   7. Xyce raw file. OpenRAM starts Xyce with -r timing.raw: every node at
@@ -113,7 +117,7 @@ def run_dir(root):
         if env("PQSE_OR_NGFAST", "1") == "1":
             f.write("set ng_nomodcheck\n")     # no model-parameter checks
             f.write("set skywaterpdk\n")       # skip checks while reading the PDK libs
-        if env("PQSE_OR_HSA", "1") == "1":
+        if env("PQSE_OR_HSA", "0") == "1":
             f.write("set ngbehavior=hsa\n")   # needs the X -> M netlist copies (patch)
     os.chdir(d)
     return d
@@ -263,7 +267,7 @@ def patch(OPTS, debug):
         smod.subprocess = _NoRaw()
         notes.append("Xyce without the raw file")
 
-    if OPTS.spice_name == "ngspice" and env("PQSE_OR_HSA", "1") == "1":
+    if OPTS.spice_name == "ngspice" and env("PQSE_OR_HSA", "0") == "1":
         libs = [v[0][0] for v in dmod.tech.spice["fet_libraries"].values() if v]
         subckts, dirs = pdk_subckts(libs[0]) if libs else (set(), [])
         if not subckts:

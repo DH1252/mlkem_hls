@@ -614,8 +614,9 @@ OR_FULL_LEAK ?= 0
 OR_NGFAST    ?= 1
 # OR_HSA=1: also ngbehavior=hsa (HSPICE-compatible, faster reading of the PDK
 # libraries); the wrapper then gives ngspice copies of the netlists with the
-# sky130 transistors that are .model cards as M devices (0: plain mode)
-OR_HSA       ?= 1
+# sky130 transistors that are .model cards as M devices. Experimental, off:
+# ngspice then finds no model bin for them ("could not find a valid modelname")
+OR_HSA       ?= 0
 # OpenRAM's temporary files (netlists, stimuli, simulator output). Under WSL a
 # checkout on /mnt/<drive> is on the Windows file system, which is slow for
 # them: they then go to ~/.cache/pqse_openram (the results stay in build/).
