@@ -624,6 +624,11 @@ OR_NARROW_NFET ?= sky130_fd_pr__nfet_01v8
 # enable. OpenRAM's 9 stages fired the sense amps too early in simulation
 # ("Sense amp enable timing error"); raise further if that error comes back
 OR_DC_STAGES ?= 15
+# OR_TRIM=1: OpenRAM's trimmed netlist (only the border rows / columns of the
+# cell array: bitlines without their load, energies mostly the periphery's;
+# fast). 0 (default): the whole array, the energies the report needs; slower
+# and more memory (1024 x 25: ~150 k transistors per simulation)
+OR_TRIM      ?= 0
 OR_DC_FANOUT ?=
 # OpenRAM's temporary files (netlists, stimuli, simulator output). Under WSL a
 # checkout on /mnt/<drive> is on the Windows file system, which is slow for
@@ -681,7 +686,7 @@ $(SRAM_CHAR_D)/%.ok: scripts/power/openram/pqse_sram_%.py scripts/power/openram/
 	    PQSE_OR_ANALYTICAL=$(OR_ANALYTICAL) PQSE_OR_PERIOD=$(OR_PERIOD) PQSE_OR_TMAX_PS=$(OR_TMAX_PS) \
 	    PQSE_OR_KLU=$(OR_KLU) PQSE_OR_MINPERIOD=$(OR_MINPERIOD) PQSE_OR_FULL_LEAK=$(OR_FULL_LEAK) \
 	    PQSE_OR_NGFAST=$(OR_NGFAST) PQSE_OR_HSA=$(OR_HSA) PQSE_OR_NARROW_NFET=$(OR_NARROW_NFET) \
-	    PQSE_OR_DC_STAGES=$(OR_DC_STAGES) PQSE_OR_DC_FANOUT=$(OR_DC_FANOUT) \
+	    PQSE_OR_DC_STAGES=$(OR_DC_STAGES) PQSE_OR_DC_FANOUT=$(OR_DC_FANOUT) PQSE_OR_TRIM=$(OR_TRIM) \
 	    PQSE_OR_RUNDIR=$(abspath $(SRAM_CHAR_D))/run_$* \
 	    OPENRAM_HOME=$(abspath $(OPENRAM_DIR))/compiler OPENRAM_TECH=$(abspath $(OPENRAM_DIR))/technology \
 	    PDK_ROOT=$${PDK_ROOT:-$(abspath $(OPENRAM_DIR))} OPENRAM_TMP=$(OR_TMP)/tmp_$* \

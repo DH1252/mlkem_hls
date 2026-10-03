@@ -79,6 +79,17 @@ else:
 # whole-word writes (no byte enables)
 write_size = None
 
+# netlist trimming (OpenRAM's default: on). Trimmed, OpenRAM keeps only the
+# border rows and columns of the bit-cell array (bitcell_array.py trim_insts):
+# each bitline then carries 2 cells instead of all of them, so the energy it
+# measures is mostly the periphery's (precharge, sense amps, decoders, control,
+# input flip-flops, all of which work every clock): read, write and idle came
+# out within a few % of each other (1024 x 25: 18.6 / 19.0 / 18.3 pJ). OpenRAM
+# corrects the trimmed netlist only for leakage. PQSE_OR_TRIM=0 (Makefile
+# default) simulates the whole array: slower, more memory, but the bitlines
+# carry their real load.
+trim_netlist = _os.environ.get("PQSE_OR_TRIM", "1") == "1"
+
 # delay chain that times the sense-amp enable (replica-bitline control logic):
 # OpenRAM's default of 9 stages fired the sense amps too early with the sky130
 # models ("Sense amp enable timing error. Increase the delay chain"). Stages
