@@ -41,7 +41,7 @@ Results of the current version (v4, branch `claude/v4-tooling`), run with Verila
 | `make se-probe`: exhaustive first-order robust-probing check (glitches + transitions) of every masked gadget, with negative controls that must leak | **PROBING CHECK PASSED** |
 | TVLA, fixed-vs-random, masked Decaps, two independent runs (`pqse_tvla.py confirm`), operand-isolated build | no confirmed first-order leakage |
 | Fault-injection campaign, 200 random single-bit flips per command, 38 targets, every run a cold chip | Decaps and KeyGen: **0 silent faults, 0 hangs** |
-| Gate-level power, sky130_fd_sc_hd, whole masked KeyGen | 92.5 µJ, 0.57 mW at 3.39 MHz (section 4) |
+| Gate-level power, sky130_fd_sc_hd, whole masked KeyGen | 73.5 µJ, 0.45 mW at 3.39 MHz (section 4) |
 
 **Not yet run:** the FPGA board builds (Tang Nano 20K, DE10-Nano) with the current version, place and route, and silicon.
 
@@ -117,13 +117,13 @@ Without the KeyGen fault checks, KeyGen takes 242,129 clocks. The pairwise test 
 
 | KeyGen | |
 |---|---|
-| Energy | **92.5 µJ** (logic 71.0 µJ, SRAM 21.5 µJ) |
-| Time / average power at 3.39 MHz | 162 ms / **0.57 mW** |
-| Energy per clock | 168.5 pJ |
-| Flip-flops (behind 269 clock gates) | 7,774 (6,622) |
-| Setup slack at 50 MHz (20 ns) | 7.3 ns |
+| Energy | **73.5 µJ** (logic 52.0 µJ, SRAM 21.5 µJ) |
+| Time / average power at 3.39 MHz | 162 ms / **0.45 mW** |
+| Energy per clock | 133.8 pJ |
+| Flip-flops (behind 285 clock gates) | 7,775 (7,526: 97 %) |
+| Setup slack at 50 MHz (20 ns) | 7.2 ns |
 
-These figures predate the last two clock-gating changes. Those moved the θ column parities and the χ operands behind clock gates, about 900 flip-flops that had been clocked every cycle, so re-run `make se-power-vcd` for current figures.
+Clock gating of the last ~900 flip-flops that were clocked every cycle (θ column parities, χ operands, CSR and counters) took KeyGen from 92.5 to 73.5 µJ (−21 %). The SRAMs are now 29 % of the energy, mostly the Keccak-state and seed RAMs (19.2 µJ); their energy per access is an assumption (`scripts/power/pqse_energy.py`).
 
 ---
 

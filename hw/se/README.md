@@ -105,13 +105,13 @@ After the low-power RTL, the clock gating and the fault hardening (v4, `LOWPOWER
 |---|---|
 | Clocks (gate-level run) | 549,032 |
 | Time at 3.39 MHz | 162 ms |
-| Energy | 92.5 uJ (logic 71.0 uJ, SRAM 21.5 uJ: the Keccak and seed RAMs 19.2 uJ) |
-| Energy per clock | 168.5 pJ (203 pJ before the low-power RTL) |
-| Average power at 3.39 MHz | 0.57 mW |
-| Flip-flops / behind a clock gate | 7,774 / 6,622 (269 gates) |
-| Setup slack at 20 ns | 7.3 ns |
+| Energy | 73.5 uJ (logic 52.0 uJ, SRAM 21.5 uJ: the Keccak and seed RAMs 19.2 uJ) |
+| Energy per clock | 133.8 pJ (203 pJ before the low-power RTL) |
+| Average power at 3.39 MHz | 0.45 mW |
+| Flip-flops / behind a clock gate | 7,775 / 7,526 (285 gates) |
+| Setup slack at 20 ns | 7.2 ns |
 
-The flip-flops dominate: sequential internal power is 72 % of the logic power. The 1,152 flip-flops still clocked every cycle draw ~2.3 uW each at 50 MHz, ~2.7 mW together - about 40 % of the logic energy; `build/sepower/ffs_<tag>.txt` names them.
+Before the last clock-gating changes, 1,152 flip-flops were clocked every cycle (~2.3 uW each at 50 MHz, ~40 % of the logic energy) and KeyGen took 92.5 uJ; giving the theta column parities, the chi operands, the CSR read register, the cycle counter and the SampleNTT counters plain enables left 249 (small state machines, synchronizers) and brought it to 73.5 uJ. `build/sepower/ffs_<tag>.txt` names the remaining ones.
 
 v4 is the primary design: about one contactless-card transaction slot per KEM
 operation, and the lower energy per operation.
