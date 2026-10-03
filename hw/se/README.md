@@ -67,16 +67,19 @@ A compact, low-power secure-element chip for ML-KEM-768 (FIPS 203), designed sid
 
 ## 3. Speed
 
-Speed is no longer a priority (v4): the target is a contactless card, where the 13.56 MHz field supplies a few milliwatts and the reader allows waiting-time extensions, so v4 trades clocks for area and energy. Version 1 measured (Verilator): KeyGen 108,669 clocks, Encaps 111,935, masked Decaps ~176–182 k. Version 4 estimates (the testbench prints the real numbers; the Keccak permutation now takes ~3,050 clocks instead of 2,064 - ~3,900 before the theta parities moved into the chi write-back - about 50 permutations per KEM operation; measured KeyGen before that change: 242,129 clocks):
+Speed is no longer a priority (v4): the target is a contactless card, where the 13.56 MHz field supplies a few milliwatts and the reader allows waiting-time extensions, so v4 trades clocks for area and energy. Version 1 measured (Verilator): KeyGen 108,669 clocks, Encaps 111,935, masked Decaps ~176–182 k. Version 4, measured with `make sim-se LOWPOWER=1` (hiding on; the Keccak permutation takes ~3,050 clocks, about 50 permutations per KEM operation):
 
-| Command | Clocks (estimate) | at 13.56 / 4 = 3.39 MHz (contactless) | at 10 MHz |
+| Command | Clocks (measured) | at 13.56 / 4 = 3.39 MHz (contactless) | at 10 MHz |
 |---|---|---|---|
-| KeyGen, masked | ~230 k | ~68 ms | ~23 ms |
-| KeyGen + duplicate s / e and G + pairwise consistency test (KEYGEN, KGWRAP; measured 492,920 before the duplicates) | ~560 k | ~165 ms | ~56 ms |
-| Encaps, masked | ~280 k | ~83 ms | ~28 ms |
-| Decaps, masked, m′ decoded twice | ~320 k | ~94 ms | ~32 ms |
-| SEAL / OPEN (up to 128 bytes, KMAC) | ~20 k | ~6 ms | ~2 ms |
-| UNWRAP (PUF key right at the first read) | ~170 k | ~50 ms | ~17 ms |
+| KeyGen, masked: s / e and G computed twice + pairwise consistency test (242,129 without them) | 545,344 | 161 ms | 54.5 ms |
+| KGWRAP (PUF key, KeyGen, wrap) | 587,755 | 173 ms | 58.8 ms |
+| Encaps, masked | 267,964 | 79 ms | 26.8 ms |
+| Decaps, masked, m′ decoded twice | 298,465–304,526 (290,116 hiding off) | 88–90 ms | 30 ms |
+| UNWRAP (PUF key right at the first read; s / e computed twice, no pairwise test) | 271,738 (293,466 with the 3-read retry) | 80 ms | 27.2 ms |
+| SEAL / OPEN (128 bytes, KMAC) | 22,550 | 6.7 ms | 2.3 ms |
+| ENROLL | 38,876 | 11.5 ms | 3.9 ms |
+
+The fault hardening of KeyGen (section 8) costs ~300 k clocks: the pairwise consistency test ~250 k (an Encaps and a partial Decaps), the second computation of s, e and G ~50 k. UNWRAP derives the key pair too and runs the duplicates, not the pairwise test.
 
 What the protection costs in time: running NTT, PWM and INTT once per share; the masked compression (two clocks per adder bit, ~50 clocks per coefficient for d = 10); the second decoding of m′ (~10 k clocks); drawing a Fisher–Yates order before every shuffled instruction (128–256 clocks each, the next NTT layer's order is drawn while the current layer runs); the χ DOM AND (4 clocks per lane). A PUF read takes ~15 clocks (excite a row, let it settle, sample), so a reconstruction is ~15 k clocks, and the 3- or 5-read retry ~45 k / ~75 k.
 
@@ -95,6 +98,20 @@ tree, wires, pads or analog blocks). Before the low-power RTL below:
 | Time at 3.39 MHz | 71 ms | 279 ms |
 | Energy (logic + SRAM) | 49.2 uJ | 59.3 uJ |
 | Average power at 3.39 MHz | 0.69 mW | 0.21 mW |
+
+After the low-power RTL, the clock gating and the fault hardening (v4, `LOWPOWER`, `CG_SRST`, KeyGen with the pairwise test and the duplicates, 99.6 % of the pins annotated):
+
+| KeyGen | v4, now |
+|---|---|
+| Clocks (gate-level run) | 549,032 |
+| Time at 3.39 MHz | 162 ms |
+| Energy | 92.5 uJ (logic 71.0 uJ, SRAM 21.5 uJ: the Keccak and seed RAMs 19.2 uJ) |
+| Energy per clock | 168.5 pJ (203 pJ before the low-power RTL) |
+| Average power at 3.39 MHz | 0.57 mW |
+| Flip-flops / behind a clock gate | 7,774 / 6,622 (269 gates) |
+| Setup slack at 20 ns | 7.3 ns |
+
+The flip-flops dominate: sequential internal power is 72 % of the logic power. The 1,152 flip-flops still clocked every cycle draw ~2.3 uW each at 50 MHz, ~2.7 mW together - about 40 % of the logic energy; `build/sepower/ffs_<tag>.txt` names them.
 
 v4 is the primary design: about one contactless-card transaction slot per KEM
 operation, and the lower energy per operation.
