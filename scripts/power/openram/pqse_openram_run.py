@@ -33,10 +33,14 @@ and the ngspice runs themselves are made faster:
   5. working directory. OpenRAM writes ngspice's .spiceinit (threads,
      ngbehavior=hsa) into its temp directory, but starts ngspice in the
      current directory, where ngspice looks for it, so it was never read.
-     The run goes to PQSE_OR_RUNDIR, with a .spiceinit there that sets only
-     num_threads = PQSE_OR_THREADS: with OpenRAM's ngbehavior=hsa, ngspice-42
-     no longer finds the sky130 device subcircuits in OpenRAM's netlists
-     ("unknown subckt: ... sky130_fd_pr__special_nfet_01v8"). With
+     The run goes to PQSE_OR_RUNDIR, with a .spiceinit there: num_threads =
+     PQSE_OR_THREADS and (PQSE_OR_NGFAST=1, default) the two settings the
+     sky130 / ngspice guides give for faster model loading, ng_nomodcheck
+     (no model-parameter checks) and skywaterpdk (skips checks while
+     reading the PDK's .lib). Not ngbehavior=hsa (OpenRAM's, and the third
+     setting of those guides): with it ngspice-42 no longer finds the sky130
+     transistors in OpenRAM's netlists, which instantiate the PDK's .model
+     cards with X ("unknown subckt: ... sky130_fd_pr__special_nfet_01v8"). With
      PQSE_OR_NIX=1 the run stays in the OpenRAM checkout instead (nix
      develop needs its flake.nix there).
   7. Xyce raw file. OpenRAM starts Xyce with -r timing.raw: every node at
@@ -98,7 +102,10 @@ def run_dir(root):
     with open(os.path.join(d, ".spiceinit"), "w") as f:
         f.write("* written by scripts/power/openram/pqse_openram_run.py\n")
         f.write("set num_threads=%d\n" % int(env("PQSE_OR_THREADS", "4")))
-        # no ngbehavior=hsa (OpenRAM's): sky130 subcircuits not found with it
+        if env("PQSE_OR_NGFAST", "1") == "1":
+            f.write("set ng_nomodcheck\n")     # no model-parameter checks
+            f.write("set skywaterpdk\n")       # skip checks while reading the PDK libs
+        # no ngbehavior=hsa (OpenRAM's): X instances of the sky130 FET models fail with it
     os.chdir(d)
     return d
 
